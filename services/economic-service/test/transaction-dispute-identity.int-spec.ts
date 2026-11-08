@@ -2,7 +2,7 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * A resolution decides one dispute, named by its identity (Codex on #318
@@ -67,6 +67,7 @@ describe('a dispute resolution names the dispute it decides', () => {
         sourceType: 'ORDER',
         sourceReference: order,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     return created.body.id;
@@ -149,7 +150,7 @@ describe('a dispute resolution names the dispute it decides', () => {
     });
     expect(resolved.status).toBe(200);
     expect(resolved.body).toMatchObject({
-      status: 'PENDING_SETTLEMENT',
+      status: 'HELD',
       disputeId: first.disputeId,
     });
 
@@ -194,7 +195,7 @@ describe('a dispute resolution names the dispute it decides', () => {
       disputeId: b,
     });
     expect(decided.status).toBe(200);
-    expect(decided.body).toMatchObject({ status: 'PENDING_SETTLEMENT', disputeId: b });
+    expect(decided.body).toMatchObject({ status: 'HELD', disputeId: b });
   });
 
   it('a name the transaction never held is refused', async () => {
@@ -222,7 +223,7 @@ describe('a dispute resolution names the dispute it decides', () => {
       resolution: 'the invoice was reissued to this supplier',
     });
     expect(resolved.status).toBe(200);
-    expect(resolved.body).toMatchObject({ status: 'PENDING_SETTLEMENT', disputeId: b });
+    expect(resolved.body).toMatchObject({ status: 'HELD', disputeId: b });
   });
 
   it('is checked under the row lock: a dispute replaced while the resolution waits for it is refused', async () => {
@@ -257,7 +258,7 @@ describe('a dispute resolution names the dispute it decides', () => {
         'the concurrent writer resolves A',
         () =>
           tx.$executeRaw`UPDATE "transaction"
-                          SET status = 'PENDING_SETTLEMENT', dispute_resolved_at = now()
+                          SET status = 'HELD', dispute_resolved_at = now()
                         WHERE id = ${transactionId}`,
       );
       await runUnscoped(
@@ -341,7 +342,7 @@ describe('a dispute resolution names the dispute it decides', () => {
       'the suite resolves it',
       () =>
         harness.prisma.client.$executeRaw`UPDATE "transaction"
-                                           SET status = 'PENDING_SETTLEMENT', dispute_id = NULL
+                                           SET status = 'HELD', dispute_id = NULL
                                          WHERE id = ${transactionId}`,
     );
     expect(await identity()).toBe(assigned);

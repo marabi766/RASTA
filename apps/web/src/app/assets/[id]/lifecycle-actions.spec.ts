@@ -13,6 +13,7 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_LIFECYCLE_FORM } from './lifecycle-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The three lifecycle forms' write path. Mirrors `actions.spec.ts`: the order is
@@ -59,7 +60,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -410,12 +411,12 @@ describe.each(CASES)('$command', (testCase) => {
       [
         'UNKNOWN_OUTCOME',
         { kind: 'UNKNOWN_OUTCOME', correlationId: 'c4' },
-        { kind: 'UNCONFIRMED', correlationId: 'c4' },
+        { kind: 'UNCONFIRMED', correlationId: 'c4', submissionId: expect.any(String) },
       ],
       [
         'IN_PROGRESS',
         { kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'c5' },
-        { kind: 'UNCONFIRMED', correlationId: 'c5' },
+        { kind: 'UNCONFIRMED', correlationId: 'c5', submissionId: expect.any(String) },
       ],
     ])('says %s without claiming more than it knows', async (_name, result, state) => {
       testCase.send.mockResolvedValue(result);

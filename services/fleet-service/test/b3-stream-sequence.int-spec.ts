@@ -3,6 +3,7 @@ import { FleetRepository } from '../src/fleet/fleet.repository';
 import { UsageService } from '../src/fleet/usage.service';
 import { DriverService } from '../src/fleet/driver.service';
 import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { everyoneIsAMember } from './membership-source.fake';
 
 /**
  * ADR-051 Phase B3 in this service, against a real database.
@@ -36,7 +37,7 @@ describe('fleet stream sequencing', () => {
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
     usage = new UsageService(repository);
-    drivers = new DriverService(repository);
+    drivers = new DriverService(repository, everyoneIsAMember());
     await cleanup(prisma, [org.a, org.b]);
 
     await asActor({ organizationId: org.a }, async () => {

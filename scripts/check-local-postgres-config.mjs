@@ -28,7 +28,10 @@ const targets =
   fileFlag >= 0 && args[fileFlag + 1]
     ? [resolve(args[fileFlag + 1])]
     : COMMITTED_CONFIG_FILES.map((name) => resolve(root, name));
-const target = targets.join(' + ');
+// What the output calls them: the committed files by name, an operator's
+// --file path never (#385 r6: only a value from a closed list is echoed).
+const target =
+  fileFlag >= 0 && args[fileFlag + 1] ? 'the --file path' : COMMITTED_CONFIG_FILES.join(' + ');
 
 let text;
 try {

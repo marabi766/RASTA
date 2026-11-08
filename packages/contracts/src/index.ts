@@ -30,7 +30,58 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
+export {
+  patternRefinement,
+  publishedRefinementPattern,
+  publishablePattern,
+  unchangedCheck,
+} from './common/pattern-refinement';
+
 export { withMaxKeys } from './common/bounds';
+export {
+  TRANSACTION_TEXT_BOUNDS,
+  boundsForAll,
+  isWithin,
+  keptTextWithin,
+  textWithin,
+  type TextBounds,
+} from './common/transaction-text';
+export { parsableUrl, isParsableUrlCheck } from './common/parsable-url';
+export {
+  isoDateTime,
+  legacyDatetimeRegex,
+  publishedIsoDateTimeZone,
+  type IsoDateTimeOptions,
+  type IsoDateTimeZone,
+} from './common/iso-datetime';
+export {
+  LEGACY_PARSED_TYPES,
+  LegacyContextError,
+  LegacyRefusal,
+  describeLegacyRefusal,
+  isLegacyRefusal,
+  isSchemaAuthored,
+  joinLegacyValues,
+  legacyDefaultMessage,
+  legacyParse,
+  legacyParseAsync,
+  legacyParsedType,
+  requireLegacyRefusal,
+  type LegacyIssue,
+  type LegacyParseResult,
+  type LegacyIssueCode,
+  type LegacySizeType,
+  type LegacyStringValidation,
+  type LegacyUnionBranchIssue,
+} from './common/zod-issues';
+export {
+  enumOptions,
+  literalValues,
+  resolveZodPath,
+  unwrapZodSchema,
+  zodDef,
+  type ZodDefLike,
+} from './common/zod-schema-walk';
 
 export {
   CURRENCIES,
@@ -50,7 +101,7 @@ export {
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
 
-export { numberInput } from './common/number-input';
+export { numberInput, numberInputInnerSchema } from './common/number-input';
 
 export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
 export type { BusinessLine } from './common/business-line';
@@ -58,7 +109,12 @@ export type { BusinessLine } from './common/business-line';
 export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './common/errors';
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
 
-export { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from './common/replay-window';
+export {
+  INVENTORY_MAX_REPLAY_WINDOW_SECONDS,
+  MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS,
+  PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
+  PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
+} from './common/replay-window';
 
 export {
   DEFAULT_PAGE_SIZE,
@@ -206,6 +262,20 @@ export type {
   RfqClosedPayload,
   RfqCancelledPayload,
 } from './events/procurement-rfq';
+export {
+  PROCUREMENT_QUOTATION_EVENTS,
+  PROCUREMENT_QUOTATION_EVENT_SCHEMAS,
+  QUOTATION_RECEIPT_GENESIS_LABEL,
+  quotationSubmittedPayloadSchema,
+  quotationRevisedPayloadSchema,
+  quotationWithdrawnPayloadSchema,
+} from './events/procurement-quotation';
+export type {
+  ProcurementQuotationEventName,
+  QuotationSubmittedPayload,
+  QuotationRevisedPayload,
+  QuotationWithdrawnPayload,
+} from './events/procurement-quotation';
 export {
   INVENTORY_SHIPMENT_EVENTS,
   INVENTORY_SHIPMENT_EVENT_SCHEMAS,

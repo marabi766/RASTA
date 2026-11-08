@@ -116,7 +116,7 @@ export const submitQualificationSchema = z
      * admissions rule (AGENTS.md § 9); the reviewer decides what is enough, and
      * a submission with nothing attached is one a reviewer can reject.
      */
-    evidence: z.array(qualificationEvidenceInputSchema).max(20).default([]),
+    evidence: z.array(qualificationEvidenceInputSchema).max(20).prefault([]),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -139,9 +139,10 @@ export type SubmitQualificationDto = z.infer<typeof submitQualificationSchema>;
 export const approveQualificationSchema = z
   .object({
     /**
-     * The reviewer's own account of the decision. **Private**: it is stored,
-     * shown to the supplier's own organization and to platform operators, and
-     * never published on an event or through the directory.
+     * The reviewer's own account of the decision. **Private to reviewers**: it
+     * is stored and shown to platform operators outside the supplier's
+     * organization, never to the supplier's own organization, never published
+     * on an event and never in the directory.
      */
     note: plainText().min(1).max(2000).optional(),
   })
@@ -152,12 +153,13 @@ export type ApproveQualificationDto = z.infer<typeof approveQualificationSchema>
 export const rejectQualificationSchema = z
   .object({
     /**
-     * Why, stated for the supplier. Required, and published on
-     * `SUPPLIER_REJECTED` — a rejection the supplier cannot see the reason for
-     * is a decision they can never act on.
+     * Why, stated for the supplier. Required, stored on the qualification as
+     * `rejectionReason` (readable on the supplier's own record) and published
+     * on `SUPPLIER_REJECTED` — a rejection the supplier cannot see the reason
+     * for is a decision they can never act on.
      */
     reason: statedReason,
-    /** The reviewer's private note. Never published. */
+    /** The reviewer's private note: reviewers only, never the supplier, never published. */
     note: plainText().min(1).max(2000).optional(),
   })
   .strict();
@@ -171,6 +173,17 @@ export type RejectQualificationDto = z.infer<typeof rejectQualificationSchema>;
 export const suspendSupplierSchema = z
   .object({
     reason: statedReason,
+    /**
+     * The newest suspension episode the operator saw on the supplier's record —
+     * `suspensions[0].id` of the detail view — or `null` when it showed none.
+     * Required, `null` included, so a client cannot forget it.
+     *
+     * Compared atomically with the suspension: if an episode was opened (and
+     * closed) since, the operator decided about a record that no longer exists,
+     * and the answer is `409` with `details[].code` `SUSPENSION_EPISODE_CHANGED`
+     * and nothing written (Codex review of PR 366, finding 2).
+     */
+    latestSuspensionId: identifier.nullable(),
   })
   .strict();
 
@@ -186,6 +199,15 @@ export const reinstateSupplierSchema = z
      * Stored in `suspension.reinstatement_note`, on the episode it closes.
      */
     reason: statedReason,
+    /**
+     * The open episode this lifts — the detail view's suspension with
+     * `open: true`. Compared atomically with the lifting: if another episode is
+     * open now (the one the operator read was lifted and the supplier suspended
+     * again), the answer is `409` with `details[].code`
+     * `SUSPENSION_EPISODE_CHANGED` and nothing is written, so one episode's
+     * explanation never closes another (Codex review of PR 366, finding 2).
+     */
+    suspensionId: identifier,
   })
   .strict();
 
@@ -207,6 +229,40 @@ export type ReinstateSupplierDto = z.infer<typeof reinstateSupplierSchema>;
  * `sort=RATING` is likewise absent rather than accepted-and-ignored, which is
  * the choice ADR-042 already made on the marketplace side.
  */
+export const MAX_DIRECTORY_ORGANIZATION_IDS = 200;
+
+/**
+ * One value arrives as a string, a repeated one as an array. Each id must be a
+ * canonical organization id; more than {@link MAX_DIRECTORY_ORGANIZATION_IDS}
+ * values (counted before deduplication, so the bound is on what was sent) or an
+ * empty one is a 400, never a silently truncated or widened answer.
+ */
+/**
+ * One organization id, as a schema the OpenAPI converter can publish (PR 699
+ * review F2). The shared `organizationIdSchema` checks the ULID branch in a
+ * `.refine()`, which no JSON-schema converter can see, so the published item
+ * read `{"type":"string"}` — arbitrary strings. This is the same language as a
+ * single anchored pattern (`ORG_<26 Crockford base32>` or the readable seed
+ * form), so what runs and what is published come from one regex;
+ * `dto.spec.ts` pins the equivalence with `organizationIdSchema`. The shared
+ * schema itself is follow-up FU-073.
+ */
+export const DIRECTORY_ORGANIZATION_ID_PATTERN =
+  /^(?:ORG_[0-9A-HJKMNP-TV-Z]{26}|ORG-[A-Z0-9-]{1,48})$/;
+
+const directoryOrganizationId = z
+  .string()
+  .regex(DIRECTORY_ORGANIZATION_ID_PATTERN, 'Expected an identifier of the form ORG_<ULID>');
+
+const directoryOrganizationIds = z.preprocess(
+  (value) => (typeof value === 'string' ? [value] : value),
+  z
+    .array(directoryOrganizationId)
+    .min(1)
+    .max(MAX_DIRECTORY_ORGANIZATION_IDS)
+    .transform((ids) => [...new Set(ids)]),
+);
+
 export const searchSuppliersQuerySchema = cursorPaginationSchema
   .extend({
     /** Suppliers that *claim* this capability. Claiming is not qualification. */
@@ -214,6 +270,14 @@ export const searchSuppliersQuerySchema = cursorPaginationSchema
     /** Suppliers with a **current** approval for this capability. */
     qualifiedFor: capability.optional(),
     status: z.enum(SUPPLIER_STATUSES).optional(),
+    /**
+     * Narrows the page to these organizations' directory entries (FU-019): the
+     * offer page asks for exactly the suppliers behind its offers instead of
+     * walking the directory. Repeat the parameter (`?organizationId=A&organizationId=B`).
+     * It only narrows the same cross-tenant, catalogue-safe list — same roles,
+     * same projection; an organization with no profile is simply absent.
+     */
+    organizationId: directoryOrganizationIds.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -252,7 +316,7 @@ export type ListQualifiedForQuery = z.infer<typeof listQualifiedForQuerySchema>;
 /** The reviewer's queue. Platform operators only — see `access.ts`. */
 export const reviewQueueQuerySchema = cursorPaginationSchema
   .extend({
-    state: z.enum(QUALIFICATION_STATES).default('SUBMITTED'),
+    state: z.enum(QUALIFICATION_STATES).prefault('SUBMITTED'),
     capability: capability.optional(),
   })
   .strict();
@@ -301,8 +365,22 @@ export const qualificationViewSchema = z
     submittedAt: z.string(),
     decidedBy: z.string().nullable(),
     decidedAt: z.string().nullable(),
-    /** Private. Present only in the detail view. */
-    decisionNote: z.string().nullable(),
+    /**
+     * The reviewer's private note. **Present only for a reviewer**: a platform
+     * operator who is not a member of the supplier's organization
+     * (`mayReadReviewerNote`). The key is absent — not null — for the
+     * supplier's own organization, so "no note" and "not yours to read" are
+     * never the same answer. Never in the directory, never on an event.
+     */
+    decisionNote: z.string().nullable().optional(),
+    /**
+     * Why a rejection was made, stated for the supplier: present on a
+     * `REJECTED` qualification for every reader of the detail view, and null
+     * on every other state. Also null on a rejection recorded before this
+     * field existed whose event had already left the outbox — nothing is
+     * invented for it.
+     */
+    rejectionReason: z.string().nullable(),
     evidence: z.array(z.object({ documentId: z.string(), label: z.string().nullable() }).strict()),
     /**
      * Whether this approval counts right now.

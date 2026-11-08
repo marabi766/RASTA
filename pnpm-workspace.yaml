@@ -4,6 +4,14 @@ packages:
   - 'packages/*'
   - 'tests/*'
 
+# One version for every package that resolves zod. nest-common's pipe uses
+# `instanceof ZodError` and apps/web composes @rasta/contracts schemas into its
+# own, so two copies (or two majors) side by side would turn validation errors
+# into 500s. zod 4.6.6+ closes GHSA-mrhx-c7xc-m3w5 (leading array length checks
+# reject before any element is parsed); 4.6.7 was published 2026-10-12.
+catalog:
+  zod: 4.6.7
+
 # pnpm blocks dependency lifecycle scripts by default. These compile native
 # binaries or generate clients at install time and genuinely need to run.
 allowBuilds:
@@ -68,6 +76,13 @@ overrides:
   # @opentelemetry/auto-instrumentations-node pulls in (packages/observability);
   # they still resolve an affected release of their range.
   '@grpc/grpc-js@>=1.14.0 <1.14.5': '1.14.5'
+  # GHSA-3f7j-7jwc-fxfj (high, 2026-10-29 in CI) — systeminformation <5.33.16:
+  # Windows command injection in services() through Unicode quotation marks.
+  # Reached only through @opentelemetry/instrumentation-host-metrics (pulled in
+  # by auto-instrumentations-node in packages/observability); every service runs
+  # on Linux and nothing calls services(), but the audit gate is version-based.
+  # 5.33.16 (2026-10-19) is past the seven-day minimum release age.
+  'systeminformation@<5.33.16': '5.33.16'
   # GHSA-jqcg-44mw-7w3h (critical) — proxy-addr <2.0.8. Reached through express
   # (@nestjs/platform-express) in every service and the gateway, where it decides
   # the client address behind a proxy. Express still resolves 2.0.7.
@@ -97,33 +112,6 @@ overrides:
   # minimumReleaseAgeExclude below; this pin keeps that exception to one version.
   'body-parser@<2.4.0': '2.4.0'
 
-# Advisories that no override can fix yet (no patched release, or the patch is
-# only in a new major that needs a code migration), accepted for a fixed time
-# only. Each entry names the advisory, why it cannot be fixed by an override,
-# where it is reached, and the date it must be re-checked; the CI "Dependency
-# audit" step fails again for it once removed. Remove the entry as soon as the
-# fix lands (then pin it in overrides above instead).
-auditConfig:
-  ignoreGhsas:
-    # GHSA-vfj7-8cjw-p6xm (high) — braces <=3.0.3, stack exhaustion on crafted
-    # brace patterns. No patched release exists (3.0.3 is the newest on the
-    # registry, 2026-10-03). Reached ONLY through development tooling (Jest's
-    # micromatch, @types/jest -> expect, linters); pnpm audit --prod is clean,
-    # so no service image or runtime path loads it. Patterns are written by
-    # this repository, not by users. RE-CHECK BY 2026-10-17: if a patched
-    # braces is out, pin it under overrides and delete this entry.
-    - GHSA-vfj7-8cjw-p6xm
-    # GHSA-mrhx-c7xc-m3w5 (high, CVE-2023-54404) — zod <4.6.6: an array schema
-    # without a length cap collects one issue per failing element, so a huge
-    # array can exhaust memory. Advisory widened to every zod 3 release on
-    # 2026-10-23; the only fix is zod 4.6.6+, a major migration (~280 files,
-    # zod 3 internals in construction OpenAPI), not an override. Reached at
-    # runtime: every service validates request bodies with zod. Bounded by the
-    # JSON body limit each service sets in main.ts (16 kb to 512 kb; gateway
-    # 256 kb), so one request cannot allocate without limit. RE-CHECK BY
-    # 2026-10-30: the zod 4 migration must be merged and this entry deleted,
-    # together with its Trivy twin (CVE-2023-54404) in .trivyignore.services.
-    - GHSA-mrhx-c7xc-m3w5
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
 # suddenly does not is worth stopping on.
@@ -179,3 +167,16 @@ trustPolicyExclude:
   - pino@9.14.0
   - semver@6.3.1
   - undici-types@6.21.0
+# zod 3's parse kept going after a check failed, and so ran every enclosing
+# refinement; zod 4 stops at some of those failures (a fractional `.int()`,
+# ±Infinity as a number, an issue added inside a transform, a union of options
+# that failed only on checks) and goes on after one zod 3 stopped at (a value
+# refused before its transform). Every refusal in this repository is still
+# worded as zod 3's (PR #444), so the patch restores zod 3's run order in the
+# one zod every workspace resolves; acceptance is zod 4's, unchanged. Each hunk
+# says which zod 3 rule it keeps. pnpm refuses to install a patch that no
+# longer applies; `packages/contracts/src/common/zod-compat-patch.spec.ts`
+# fails when the catalog moves past the patched version, and checks the copy
+# every workspace resolves.
+patchedDependencies:
+  zod@4.6.7: patches/zod@4.6.7.patch

@@ -1,4 +1,4 @@
-import { PrismaService } from '../src/prisma/prisma.service';
+import type { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
 
@@ -179,7 +179,7 @@ describe('tenant isolation', () => {
             },
           }),
         ),
-      ).rejects.toThrow(/Cross-tenant writes are never implicit/);
+      ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
     });
 
     it('refuses a query that names another tenant explicitly', async () => {
@@ -187,7 +187,7 @@ describe('tenant isolation', () => {
         asActor({ organizationId: org.b }, () =>
           prisma.client.driver.findMany({ where: { organizationId: org.a } }),
         ),
-      ).rejects.toThrow(/Use runUnscoped\(\) if this is intentional/);
+      ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
     });
   });
 

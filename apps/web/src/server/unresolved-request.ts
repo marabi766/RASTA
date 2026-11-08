@@ -1,11 +1,17 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 import Redis from 'ioredis';
+import { assertRedisDiagnosticsSafe, protectRedisReadyCheck } from '@rasta/config';
 import { z } from 'zod';
 
 import { webServerEnv } from './env';
 import type { RedisLike } from './refresh-coordinator';
 import type { WebSession } from './session';
+import {
+  actingOrganizationId,
+  formerOrganizationCopy,
+  sessionOrganization,
+} from './session-organization';
 import { signPayload, verifyPayload } from './signed-payload';
 import { LEGACY_V1_SCOPES, MAX_CLOCK_SKEW_MS, policyOf } from './unresolved-request-policy';
 import {
@@ -86,6 +92,18 @@ import {
  * `"NONE"`). Time: see `unresolved-request-store.ts` and the policy file.
  *
  * It holds **no body**, only a keyed digest, no token and no personal data.
+ *
+ * ## Whose organization (PR 405 review 2, F1 and F2)
+ *
+ * Every key names the organization the session **acts** for
+ * (`actingOrganizationId`), the one the token sends the request for — not the
+ * stored copy, which a cookie sealed before task 100 kept at the login's
+ * organization while its token acted for another. Such a cookie keyed its
+ * records under that copy; it is kept beside the session once brought into
+ * step (`formerOrganizationCopy`), and a record found under it for this login
+ * and scope is this person's, sent for an organization nobody can name now:
+ * it **holds** the scope like any unresolved request, is never re-sent
+ * (`former`, `mayResend`), and goes only by the same explicit release.
  */
 
 /** What an earlier version kept in cookies. Logout still removes them. */
@@ -114,6 +132,11 @@ export interface UnresolvedRequest {
   readonly ref: string | null;
   /** True while an attempt is being dispatched right now (by the store's clock, not this replica's). */
   readonly inFlight: boolean;
+  /**
+   * Kept under the copy an older cookie of this login carried (see above): it
+   * may have been sent for another organization, so it is never sent again.
+   */
+  readonly former?: true;
 }
 
 function scopeLabel(scope: UnresolvedScope): string {
@@ -123,10 +146,22 @@ function scopeLabel(scope: UnresolvedScope): string {
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
-/** Every key names the organization (ADR-007) and is bound to this person's login; the record carries the same binding. */
-function keysFor(session: WebSession, scope: UnresolvedScope): RecordBinding {
-  const org = encodeURIComponent(session.organizationId ?? 'none');
-  const login = `${session.subject}\n${session.csrfToken}`;
+/**
+ * Every key names the organization the session acts for (ADR-007) — or, for
+ * `organizationId`, the copy an older cookie kept — and is bound to this
+ * person's login, or the person for money purposes; the record carries the same binding.
+ */
+function keysFor(
+  session: WebSession,
+  scope: UnresolvedScope,
+  organizationId: string | null = actingOrganizationId(session),
+  legacyLogin = false,
+): RecordBinding {
+  const org = encodeURIComponent(organizationId ?? 'none');
+  const login =
+    !legacyLogin && policyOf(scope.purpose)?.identity === 'PERSON'
+      ? `person:${session.subject}`
+      : `${session.subject}\n${session.csrfToken}`;
   const bind = sha256(`${login}\n${scopeLabel(scope)}`);
   const loginDigest = sha256(login);
   return {
@@ -138,6 +173,13 @@ function keysFor(session: WebSession, scope: UnresolvedScope): RecordBinding {
     target: scope.target ?? '',
     bind,
   };
+}
+
+/** Expand phase: only this authenticated login's old binding can be proven. */
+function compatibilityKeys(session: WebSession, scope: UnresolvedScope): RecordBinding | null {
+  return policyOf(scope.purpose)?.identity === 'PERSON'
+    ? keysFor(session, scope, actingOrganizationId(session), true)
+    : null;
 }
 
 /**
@@ -191,6 +233,7 @@ function defaultStore(): UnresolvedStore {
   if (store) return store;
   const env = webServerEnv();
   if (env.WEB_REDIS_URL) {
+    assertRedisDiagnosticsSafe();
     const redis = new Redis(env.WEB_REDIS_URL, {
       // Bounded: a command waits for a connection being made, never past
       // `commandTimeout`; then the action sends nothing.
@@ -199,6 +242,7 @@ function defaultStore(): UnresolvedStore {
       connectTimeout: 2_000,
       commandTimeout: 2_000,
     });
+    protectRedisReadyCheck(redis);
     redis.on('error', () => undefined);
     store = redisUnresolvedStore(redis as unknown as RedisLike);
   } else if (process.env.NODE_ENV !== 'production') {
@@ -231,6 +275,31 @@ function viewOf(record: StoredRecord, now: number): UnresolvedRequest {
   };
 }
 
+/** The binding under the copy an older cookie of this login kept, if there is one. */
+function formerKeysFor(session: WebSession, scope: UnresolvedScope): RecordBinding | null {
+  // A money hold belongs only to the acting organization, never a former copy.
+  if (policyOf(scope.purpose)?.identity === 'PERSON') return null;
+  const former = formerOrganizationCopy(session);
+  return former === undefined ? null : keysFor(session, scope, former);
+}
+
+/**
+ * The record this login keeps for `scope` under the copy an older cookie
+ * carried, as a request that is never re-sent — or null. Throws
+ * `UnresolvedStoreUnavailable` like every read: never "no hold".
+ */
+async function formerRecord(
+  session: WebSession,
+  scope: UnresolvedScope,
+): Promise<{ request: UnresolvedRequest; now: number } | 'UNTRUSTED' | null> {
+  const keys = formerKeysFor(session, scope);
+  if (keys === null) return null;
+  const { record, now } = await defaultStore().read(keys);
+  if (record === null) return null;
+  if (!trusted(record, keys)) return 'UNTRUSTED';
+  return { request: { ...viewOf(record, now), former: true }, now };
+}
+
 /** A record found under a key it does not belong to is not trusted (the store checked it too). */
 function trusted(record: StoredRecord, keys: RecordBinding): boolean {
   return record.bind === keys.bind;
@@ -245,7 +314,7 @@ export type UnresolvedRead =
   /** `now` is the store's time at the read: what `inFlight` and `mayResend` are judged by. */
   | { readonly kind: 'PENDING'; readonly request: UnresolvedRequest; readonly now: number }
   /** The store could not say (error, timeout, malformed or unverifiable record): never "no hold". */
-  | { readonly kind: 'UNAVAILABLE' };
+  | { readonly kind: 'UNAVAILABLE'; readonly reason?: 'STORE_UNAVAILABLE' | 'CORRUPT_RECORD' };
 
 /**
  * The request still held for `scope` by this person, acting for this
@@ -256,20 +325,36 @@ export type UnresolvedRead =
 export async function readUnresolved(
   session: WebSession,
   scope: UnresolvedScope,
+  includeRefusalReason = false,
 ): Promise<UnresolvedRead> {
+  const unavailable = (reason: UnresolvedStoreUnavailable['reason']): UnresolvedRead =>
+    includeRefusalReason ? { kind: 'UNAVAILABLE', reason } : { kind: 'UNAVAILABLE' };
   try {
     const keys = keysFor(session, scope);
     const { record, now } = await defaultStore().read(keys);
-    if (record === null) return { kind: 'NONE' };
-    if (!trusted(record, keys)) return { kind: 'UNAVAILABLE' };
-    return { kind: 'PENDING', request: viewOf(record, now), now };
+    if (record !== null) {
+      if (!trusted(record, keys)) return unavailable('CORRUPT_RECORD');
+      return { kind: 'PENDING', request: viewOf(record, now), now };
+    }
+    const compatibility = compatibilityKeys(session, scope);
+    if (compatibility) {
+      const legacy = await defaultStore().read(compatibility);
+      if (legacy.record) {
+        if (!trusted(legacy.record, compatibility)) return unavailable('CORRUPT_RECORD');
+        return { kind: 'PENDING', request: viewOf(legacy.record, legacy.now), now: legacy.now };
+      }
+    }
+    const former = await formerRecord(session, scope);
+    if (former === null) return { kind: 'NONE' };
+    if (former === 'UNTRUSTED') return unavailable('CORRUPT_RECORD');
+    return { kind: 'PENDING', request: former.request, now: former.now };
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
     warnOperator(
       'RASTA_WEB_PENDING_UNAVAILABLE',
       'The pending-request store is unavailable: writes that need it are refused.',
     );
-    return { kind: 'UNAVAILABLE' };
+    return unavailable(error.reason);
   }
 }
 
@@ -280,6 +365,7 @@ export async function readUnresolved(
 /** What the caller must hand back to `settleUnresolved`. */
 export interface UnresolvedAttempt {
   readonly binding: RecordBinding;
+  readonly compatibility?: RecordBinding;
   readonly id: string;
   readonly attemptId: string;
 }
@@ -349,10 +435,17 @@ export async function reserveUnresolved(
     ) {
       throw new UnresolvedStoreUnavailable(new Error('input does not fit the purpose policy'));
     }
+    // A request this login sent under an older cookie's copy holds the scope:
+    // reconcile, or release it explicitly — nothing is sent over it.
+    const former = await formerRecord(session, scope);
+    if (former === 'UNTRUSTED') return { kind: 'UNAVAILABLE' };
+    if (former !== null) return { kind: 'HELD', reason: 'RECONCILE_ONLY', request: former.request };
     const id = newId();
     const attemptId = newId();
+    const compatibility = compatibilityKeys(session, scope);
     const reply = await defaultStore().reserve({
       binding: keys,
+      compatibility: compatibility ?? undefined,
       cap: MAX_PENDING_PER_LOGIN,
       leaseMs: INFLIGHT_LEASE_MS,
       windowMs: input.windowMs,
@@ -379,7 +472,8 @@ export async function reserveUnresolved(
     });
     if (reply.kind === 'CAPACITY') return { kind: 'CAPACITY' };
     if (reply.record === null) return { kind: 'EXPIRED', request: null };
-    if (!trusted(reply.record, keys)) return { kind: 'UNAVAILABLE' };
+    if (!trusted(reply.record, keys) && !(compatibility && trusted(reply.record, compatibility)))
+      return { kind: 'UNAVAILABLE' };
     const request = viewOf(reply.record, reply.now);
     if (reply.kind === 'HELD') return { kind: 'HELD', reason: reply.reason, request };
     if (reply.kind === 'EXPIRED') return { kind: 'EXPIRED', request };
@@ -388,7 +482,12 @@ export async function reserveUnresolved(
       retry: reply.retry,
       deadline: deadlineOf(reply.record),
       now: reply.now,
-      attempt: { binding: keys, id: reply.record.id, attemptId: reply.record.attemptId },
+      attempt: {
+        binding: keys,
+        compatibility: compatibility ?? undefined,
+        id: reply.record.id,
+        attemptId: reply.record.attemptId,
+      },
     };
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
@@ -419,6 +518,15 @@ export async function settleUnresolved(
   outcome: SettleOutcome,
 ): Promise<boolean> {
   try {
+    // Settle the rollback-visible copy first; any partial failure leaves the person hold closed.
+    if (attempt.compatibility) {
+      await defaultStore().settle(
+        attempt.compatibility,
+        attempt.id,
+        attempt.attemptId,
+        MODE[outcome],
+      );
+    }
     const reply = await defaultStore().settle(
       attempt.binding,
       attempt.id,
@@ -479,7 +587,16 @@ export async function releaseUnresolved(
   const named = verifyPayload(session, RELEASE_PURPOSE, token, releaseSchema, tokenNow);
   if (named === null || named.scope !== scopeLabel(scope)) return 'STALE';
   try {
-    return await defaultStore().release(keysFor(session, scope), named.id, INFLIGHT_LEASE_MS);
+    const result = await defaultStore().release(
+      keysFor(session, scope),
+      named.id,
+      INFLIGHT_LEASE_MS,
+      compatibilityKeys(session, scope) ?? undefined,
+    );
+    const former = formerKeysFor(session, scope);
+    return result === 'GONE' && former !== null
+      ? await defaultStore().release(former, named.id, INFLIGHT_LEASE_MS)
+      : result;
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
     return 'UNAVAILABLE';
@@ -487,25 +604,37 @@ export async function releaseUnresolved(
 }
 
 /**
- * Logout: deletes every record this login holds and its capacity set. True when
- * the store did; false when it could not be reached **or** found a member that
- * is not valid (then it deleted nothing — see the store header).
+ * Logout: deletes every record this login holds and its capacity set — under
+ * the organization it acts for and under the copy an older cookie kept. True
+ * when the store did; false when it could not be reached **or** found a member
+ * that is not valid (then it deleted nothing — see the store header), and for
+ * a session whose organization cannot be told (`readStoredSessionForLogout`
+ * still signs it out): whose records it would be is unknown, so none is
+ * touched; they are bound to this login and expire on their own.
  */
 export async function purgeUnresolved(session: WebSession): Promise<boolean> {
-  try {
-    const keys = keysFor(session, { purpose: 'purge' });
-    return await defaultStore().purge({
-      setKey: keys.setKey,
-      org: keys.org,
-      login: keys.login,
-      // What a legacy record's ownership is proven against: derived here from the session, never read
-      // from the stored record.
-      legacyBinds: LEGACY_V1_SCOPES.map((scope) => keysFor(session, scope).bind),
-    });
-  } catch (error) {
-    if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
-    return false;
+  const acting = sessionOrganization(session);
+  if (acting === undefined) return false;
+  const former = formerOrganizationCopy(session);
+  let purged = true;
+  for (const organizationId of former === undefined ? [acting] : [acting, former]) {
+    try {
+      const keys = keysFor(session, { purpose: 'purge' }, organizationId);
+      const done = await defaultStore().purge({
+        setKey: keys.setKey,
+        org: keys.org,
+        login: keys.login,
+        // What a legacy record's ownership is proven against: derived here from the session, never read
+        // from the stored record.
+        legacyBinds: LEGACY_V1_SCOPES.map((scope) => keysFor(session, scope, organizationId).bind),
+      });
+      purged &&= done;
+    } catch (error) {
+      if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
+      purged = false;
+    }
   }
+  return purged;
 }
 
 /**
@@ -515,5 +644,7 @@ export async function purgeUnresolved(session: WebSession): Promise<boolean> {
  * script would refuse.
  */
 export function mayResend(request: UnresolvedRequest, now: number): boolean {
+  // Perhaps sent for another organization: never again, whatever its deadline.
+  if (request.former) return false;
   return request.deadline === null || now + MAX_CLOCK_SKEW_MS <= request.deadline;
 }

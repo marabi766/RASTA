@@ -1,8 +1,13 @@
+import { randomUUID } from 'node:crypto';
+import { Context, CancelledFailure } from '@temporalio/activity';
+import { foreignFailure } from '../temporal/foreign-failure';
+import { InternalHttpClient, exchangeWithDeadline } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
 import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
+import { ORDER_HOLD_SEND_DEADLINE_MS } from '../config/operation-budgets';
 import { economicCallDuration, economicCallsTotal } from '../observability/metrics';
 
 /**
@@ -35,6 +40,60 @@ import { economicCallDuration, economicCallsTotal } from '../observability/metri
  * exists to prevent.
  */
 
+/** Transport ceiling, including error envelopes and paged obligation lookups. */
+export const ECONOMIC_RESPONSE_MAX_BYTES = 1024 * 1024;
+/** First owned read buffer; doubled as the body grows, never past the ceiling. */
+const ECONOMIC_RESPONSE_MIN_BUFFER_BYTES = 256;
+
+async function readEconomicJson(response: Response, deadlineAt: number): Promise<unknown> {
+  const length = response.headers.get('content-length');
+  if (length !== null && Number(length) > ECONOMIC_RESPONSE_MAX_BYTES) {
+    throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+  }
+  if (!response.body) {
+    if (response.status === 204) return undefined;
+    throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+  }
+  const reader = response.body.getReader();
+  // Memory follows the bytes actually received, never the ceiling and never
+  // the number of chunks (FU-044): each chunk is copied into one owned buffer
+  // that grows geometrically up to the ceiling and is then dropped, so a body
+  // delivered one byte at a time costs no more than one delivered whole.
+  let owned: Buffer | undefined;
+  let size = 0;
+  try {
+    for (;;) {
+      // Always-ready microtasks can delay the abort timer's event-loop slot.
+      if (performance.now() >= deadlineAt) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+      const { done, value } = await reader.read();
+      if (done) break;
+      // Refused before the chunk that would cross the ceiling is copied.
+      if (value.byteLength > ECONOMIC_RESPONSE_MAX_BYTES - size)
+        throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+      const needed = size + value.byteLength;
+      if (!owned || needed > owned.byteLength) {
+        const grown = Math.min(
+          ECONOMIC_RESPONSE_MAX_BYTES,
+          Math.max(needed, ECONOMIC_RESPONSE_MIN_BUFFER_BYTES, (owned?.byteLength ?? 0) * 2),
+        );
+        const next = Buffer.alloc(grown);
+        if (owned) owned.copy(next, 0, 0, size);
+        owned = next;
+      }
+      owned.set(value, size);
+      size = needed;
+    }
+    const text = owned
+      ? new TextDecoder('utf-8', { fatal: true }).decode(owned.subarray(0, size))
+      : '';
+    if (!text && response.status !== 204) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+    return text ? (JSON.parse(text) as unknown) : undefined;
+  } finally {
+    // The exchange boundary aborts an incomplete stream without awaiting a stalled peer.
+    reader.releaseLock();
+  }
+}
+
 export interface TransactionView {
   id: string;
   organizationId: string;
@@ -47,6 +106,13 @@ export interface TransactionView {
   currency: string;
   sourceType: string | null;
   sourceReference: string | null;
+  /**
+   * economic-service's proof that `HELD` is true (`transaction_held_proven`).
+   * Optional because an economic-service older than it does not send it, which
+   * proves nothing (`fundsOf`) and refutes nothing (`heldProofMissing`):
+   * economic-service deploys first (ADR-040).
+   */
+  heldProven?: boolean;
 }
 
 /**
@@ -154,25 +220,39 @@ export function termsDiffer(terms: ObligationTerms, transaction: TransactionView
 /**
  * What a found obligation's status says about the buyer's money.
  *
- * - `HELD`: in escrow now. The only status that proves it: economic-service
- *   places the hold and moves the obligation to HELD in one transaction, and
- *   every way the money leaves escrow moves it on.
+ * - `HELD`: in escrow now: HELD, and economic-service proves it (`heldProven`).
+ *   The status alone does not: a transaction can stand in HELD on a decision
+ *   read from a hold not its own, with nothing in escrow (#762 r3, F2).
  * - `UNPROVEN`: PENDING_SETTLEMENT or DISPUTED. Reached from HELD with the
  *   hold still in place, but also from CREATED with none (an obligation with
  *   no escrow, ADR-032) — and a status the saga's own creation never leaves
- *   it in, so somebody else moved it.
+ *   it in, so somebody else moved it. Or HELD without that proof.
  * - `RETURNED`: REFUNDED — back with the buyer.
  * - `PAID_OUT`: SETTLED.
  * - `NEVER_HELD`: CREATED, CANCELLED, FAILED.
  *
  * A status this service does not know is `UNPROVEN`, never `HELD`.
  */
+/**
+ * HELD from an economic-service that does not speak of proof at all: a release
+ * or replica older than `heldProven`, not a verdict. The saga waits for one that
+ * does; it never adopts this (`fundsOf` stays UNPROVEN) and never stops on it,
+ * since the hold may be real. A present `false` or malformed value is an answer.
+ */
+export function heldProofMissing(
+  transaction: Pick<TransactionView, 'status' | 'heldProven'>,
+): boolean {
+  return transaction.status === 'HELD' && transaction.heldProven === undefined;
+}
+
 export type ObligationFunds = 'HELD' | 'UNPROVEN' | 'RETURNED' | 'PAID_OUT' | 'NEVER_HELD';
 
-export function fundsOf(status: string): ObligationFunds {
-  switch (status) {
+export function fundsOf(
+  transaction: Pick<TransactionView, 'status' | 'heldProven'>,
+): ObligationFunds {
+  switch (transaction.status) {
     case 'HELD':
-      return 'HELD';
+      return transaction.heldProven === true ? 'HELD' : 'UNPROVEN';
     case 'REFUNDED':
       return 'RETURNED';
     case 'SETTLED':
@@ -195,6 +275,8 @@ interface TransactionPage {
 
 /** The lookup's page: economic-service's largest. */
 const OBLIGATION_LOOKUP_PAGE_SIZE = 100;
+/** A placement waits for this, inside the gateway's deadline; a slow answer is retried by the poll. */
+const CAPABILITY_TIMEOUT_MS = 1000;
 
 /**
  * Pages the lookup reads before it gives up on a complete answer. The exact
@@ -206,7 +288,8 @@ export const OBLIGATION_LOOKUP_PAGES = 10;
 /**
  * The lookup did not reach the end of economic-service's answer. Nothing can
  * be concluded from part of it — not "nothing is held", not "only somebody
- * else's row" — so the saga stops instead (`OBLIGATION_LOOKUP_INCOMPLETE`).
+ * else's row" — so the saga stops instead (`OBLIGATION_LOOKUP_INCOMPLETE`), or
+ * stays in its wait with the hold unanswered (`placeHold`).
  */
 export class ObligationLookupIncomplete extends Error {
   constructor(readonly pagesRead: number) {
@@ -257,7 +340,7 @@ export class EconomicClient {
    * the hold the money can go.
    */
   async createObligation(
-    input: ObligationTerms & { correlationId: string },
+    input: ObligationTerms & { correlationId: string; holdNotAfter?: string },
   ): Promise<TransactionView> {
     return this.call<TransactionView>('createObligation', {
       method: 'POST',
@@ -273,6 +356,7 @@ export class EconomicClient {
         sourceType: OBLIGATION_SOURCE_TYPE,
         sourceReference: input.orderId,
         holdFunds: true,
+        ...(input.holdNotAfter === undefined ? {} : { holdNotAfter: input.holdNotAfter }),
       },
     });
   }
@@ -373,20 +457,91 @@ export class EconomicClient {
     return ours ? transaction : null;
   }
 
-  /** Marks the obligation ready to settle. Only reachable after receipt. */
+  /**
+   * Whether economic-service proves HELD (`heldProven`): asked before any order's
+   * work starts, of no organization's data. Anything but its explicit yes is no, an
+   * older release's 404 and an outage alike; the start is retried.
+   */
+  async provesHeldFunds(): Promise<boolean> {
+    return (await this.capability('heldProven')) === true;
+  }
+
+  /**
+   * Whether economic-service refuses an order's hold sent without its deadline
+   * (`orderHoldDeadlineRequired`, D-150). Only then is every hold that can land counted
+   * on the order's row, so the saga asks this before it takes the row as proof (FU-233).
+   * Only its explicit yes is yes. Its explicit no is no, and so is the shape a release
+   * before the rule sends: `heldProven: true` and no such field. Undefined for anything
+   * else — an outage, or a body no release sends (`{}`, an array, a field that is not a
+   * boolean), which is no answer and never a lasting no (review of #948 r1, L2).
+   */
+  async requiresOrderHoldDeadline(): Promise<boolean | undefined> {
+    return this.capability('orderHoldDeadlineRequired');
+  }
+
+  /**
+   * The capability's answer: the field's own boolean; false when it is absent from a release
+   * that answers `heldProven: true` (one from before the field); undefined otherwise, when
+   * none was had or the body is not one economic-service sends. A cancelled activity's
+   * question is cancelled, not unanswered.
+   */
+  private async capability(
+    name: 'heldProven' | 'orderHoldDeadlineRequired',
+  ): Promise<boolean | undefined> {
+    try {
+      const answer = await this.call<unknown>(
+        'capabilities',
+        {
+          method: 'GET',
+          path: '/v1/transactions/capabilities',
+          correlationId: randomUUID(),
+        },
+        CAPABILITY_TIMEOUT_MS,
+      );
+      if (typeof answer !== 'object' || answer === null) return undefined;
+      const value: unknown = Reflect.get(answer, name);
+      if (typeof value === 'boolean') return value;
+      if (
+        value === undefined &&
+        name !== 'heldProven' &&
+        Reflect.get(answer, 'heldProven') === true
+      ) {
+        return false;
+      }
+      return undefined;
+    } catch (error) {
+      if (error instanceof CancelledFailure) throw error;
+      this.logger.warn(
+        { failure: foreignFailure(error), capability: name },
+        'The capability question went unanswered',
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Marks the obligation ready to settle. Only reachable after receipt.
+   *
+   * Sent with the order's row held (`OrderService.whileOrderHeld`), so it has the
+   * deadline of whatever waits behind that lock, not the deadline of other calls.
+   */
   async authoriseSettlement(input: {
     orderId: string;
     transactionId: string;
     buyerOrganizationId: string;
     correlationId: string;
   }): Promise<TransactionView> {
-    return this.call<TransactionView>('authoriseSettlement', {
-      method: 'POST',
-      path: `/v1/transactions/${input.transactionId}/authorise-settlement`,
-      organizationId: input.buyerOrganizationId,
-      idempotencyKey: idempotencyKeyFor.authorise(input.orderId),
-      correlationId: input.correlationId,
-    });
+    return this.call<TransactionView>(
+      'authoriseSettlement',
+      {
+        method: 'POST',
+        path: `/v1/transactions/${input.transactionId}/authorise-settlement`,
+        organizationId: input.buyerOrganizationId,
+        idempotencyKey: idempotencyKeyFor.authorise(input.orderId),
+        correlationId: input.correlationId,
+      },
+      Math.min(this.env.ECONOMIC_REQUEST_TIMEOUT_MS, ORDER_HOLD_SEND_DEADLINE_MS),
+    );
   }
 
   /** Moves the money and applies commission, in economic-service's own transaction. */
@@ -512,56 +667,80 @@ export class EconomicClient {
     request: {
       method: 'POST' | 'GET';
       path: string;
-      organizationId: string;
+      organizationId?: string;
       idempotencyKey?: string;
       correlationId: string;
       body?: unknown;
     },
+    timeoutMs = this.env.ECONOMIC_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
-    const token = await this.tokens.issue(
-      SERVICE_NAME,
-      ECONOMIC_SERVICE,
-      'SERVICE',
-      request.organizationId,
-    );
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: ECONOMIC_SERVICE,
+      purpose: 'SERVICE',
+      organizationId: request.organizationId,
+    });
 
     const url = `${this.env.ECONOMIC_SERVICE_URL}${request.path}`;
     const stop = economicCallDuration.startTimer({ service: SERVICE_NAME, operation });
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.env.ECONOMIC_REQUEST_TIMEOUT_MS);
-
-    let response: Response;
+    // One deadline for the whole exchange, body included: a 200 whose body then
+    // stalls is as unresolved as one that never answered, and the activity must
+    // not hang on it. The request is not sent again here; whoever retries sends
+    // the same idempotency key (derived from the order), so a write that did
+    // commit replays instead of being applied twice.
+    let activity: Context | undefined;
     try {
-      response = await fetch(url, {
-        method: request.method,
-        headers: {
-          'content-type': 'application/json',
-          'x-internal-token': token,
-          'x-correlation-id': request.correlationId,
-          ...(request.idempotencyKey ? { 'idempotency-key': request.idempotencyKey } : {}),
+      activity = Context.current();
+    } catch {
+      /* Non-activity callers have no cancellation owner. */
+    }
+    let received: { ok: boolean; status: number; parsed: unknown };
+    const deadlineAt = performance.now() + timeoutMs;
+    try {
+      received = await exchangeWithDeadline(
+        timeoutMs,
+        (signal) =>
+          sender.send(url, {
+            method: request.method,
+            headers: {
+              'content-type': 'application/json',
+              'x-correlation-id': request.correlationId,
+              ...(request.idempotencyKey ? { 'idempotency-key': request.idempotencyKey } : {}),
+            },
+            ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+            signal,
+          }),
+        async (response) => {
+          const parsed = await readEconomicJson(response, deadlineAt);
+          // JSON parsing is synchronous; check the monotonic deadline again
+          // before accepting it, even if parsing delayed the timer callback.
+          if (performance.now() >= deadlineAt)
+            throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+          return { ok: response.ok, status: response.status, parsed };
         },
-        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-        signal: controller.signal,
-      });
+        { cancel: activity?.cancellationSignal },
+      );
     } catch (error) {
       stop();
+      if (activity?.cancellationSignal.aborted)
+        throw new CancelledFailure('The financial activity was cancelled');
       economicCallsTotal.inc({ service: SERVICE_NAME, operation, outcome: 'UNREACHABLE' });
       // No detail from the error in the message: it can carry a URL with a
       // token in it depending on the runtime (S-09). The activity is retried
       // by Temporal, so what matters is that it failed, not how.
-      this.logger.error({ operation, err: error }, 'economic-service could not be reached');
+      this.logger.error(
+        { operation, failure: foreignFailure(error) },
+        'economic-service could not be reached',
+      );
       throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-    } finally {
-      clearTimeout(timer);
     }
 
     stop();
 
-    const text = await response.text();
-    const parsed: unknown = text ? JSON.parse(text) : undefined;
+    const { ok, parsed, status } = received;
 
-    if (response.ok) {
+    if (ok) {
       economicCallsTotal.inc({ service: SERVICE_NAME, operation, outcome: 'OK' });
       return parsed as T;
     }
@@ -579,16 +758,22 @@ export class EconomicClient {
     // UPSTREAM_UNAVAILABLE, and a retry refused for the transaction's state
     // never reached the obligation read that answers it (D-053, review of
     // #287).
-    const body = parsed as Partial<Pick<ApiError, 'code' | 'message'>> | undefined;
-    const reported = body?.code;
-    const code: ErrorCode =
-      reported && reported in ERROR_CODES
-        ? (reported as ErrorCode)
-        : ERROR_CODES.UPSTREAM_UNAVAILABLE;
-    const message = body?.message ?? 'The financial service refused this operation';
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+    }
+    const body = parsed as Partial<Pick<ApiError, 'code' | 'message'>>;
+    if (
+      typeof body.code !== 'string' ||
+      !Object.hasOwn(ERROR_CODES, body.code) ||
+      typeof body.message !== 'string'
+    ) {
+      throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+    }
+    const code = body.code as ErrorCode;
+    const message = body.message;
 
     throw new RastaError(code, message, {
-      internalContext: { operation, status: response.status },
+      internalContext: { operation, status },
     });
   }
 }

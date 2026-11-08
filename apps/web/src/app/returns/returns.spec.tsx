@@ -32,6 +32,8 @@ import { ReturnDetailScreen } from './[id]/ReturnDetailScreen';
 import { ReturnCommandForm } from './ReturnCommandForm';
 import { ReturnsScreen } from './ReturnsScreen';
 import type { ReturnFormState } from './return-form-state';
+import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The return screens in every state they can be in, each checked with axe:
@@ -45,7 +47,7 @@ jest.mock('./return-actions', () => ({
   submitReturnCommand: jest.fn(),
 }));
 
-const BINDING = { owner: 'owner-tag-A', session: 'session-tag-1' };
+const BINDING = bindingOf('owner-tag-A', 'session-tag-1');
 const STAMP = { token: 'stamp', until: Date.now() + 50 * 60 * 1000 };
 const NAMES = new Map([
   [LINE_A, 'شن و ماسه'],
@@ -84,7 +86,7 @@ describe('the list', () => {
     const { container } = render(
       <ReturnsScreen
         result={result as ReadResult<ReturnPage>}
-        query={{ side }}
+        query={{ context: TEST_CONTEXT, side }}
         actionable={new Set([REQUESTED.id])}
       />,
     );
@@ -96,7 +98,7 @@ describe('the list', () => {
     render(
       <ReturnsScreen
         result={page([REQUESTED])}
-        query={{ side: 'SUPPLIER' }}
+        query={{ context: TEST_CONTEXT, side: 'SUPPLIER' }}
         actionable={new Set([RETURN_ID])}
       />,
     );

@@ -1,3 +1,4 @@
+import { ownValue } from '@/lib/own-key';
 /**
  * The vocabulary of a contractor's own bid on `/tenders/[id]` (EXP-004;
  * construction-service CON-002, ADR-065, ADR-066) — client-safe, so the forms
@@ -68,7 +69,7 @@ const BID_STATUS_LABELS: Readonly<Record<(typeof BID_STATUSES)[number], string>>
 };
 
 export function bidStatusLabel(status: string): string {
-  return (BID_STATUS_LABELS as Readonly<Record<string, string>>)[status] ?? status;
+  return ownValue(BID_STATUS_LABELS, status) ?? status;
 }
 
 /** `bid.dto.ts`: `MAX_ANSWER_LENGTH`, `MAX_NOTE_LENGTH`, `MAX_ANSWERS`. */
@@ -79,8 +80,8 @@ export const BID_ANSWERS_MAX = 50;
 /** The form's fields. A criterion's answer is drawn per row; its code rides beside it. */
 export const PRICE_FIELD = 'priceMinor';
 export const NOTE_FIELD = 'note';
-export const answerField = (row: number): string => `answer.${row}`;
-export const criterionField = (row: number): string => `criterion.${row}`;
+export const answerField = (row: number): `answer.${number}` => `answer.${row}`;
+export const criterionField = (row: number): `criterion.${number}` => `criterion.${row}`;
 
 /**
  * Every closed reason a refused bid names (`BID_REFUSALS`, in `details[].code`

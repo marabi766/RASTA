@@ -12,9 +12,10 @@ import {
   PageHeader,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import {
-  transactionStatusLabel,
+  presentTransactionStatus,
   transactionStatusOptions,
   transactionTypeLabel,
   transactionTypeOptions,
@@ -32,7 +33,12 @@ import type {
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { demoModeOf } from '@/lib/demo-mode';
 import { providerNotice } from '@/lib/wallet-fields';
+import type { TopUpFormState } from './form-state';
 import { TopUpForm } from './TopUpForm';
+import { UnresolvedTopUpNotice } from './UnresolvedTopUpNotice';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * `/wallet` — کیف پول و تراکنش (docs/16 § ۱۶٫۶, role `ORGANIZATION_ADMIN`).
@@ -64,19 +70,24 @@ export interface WalletScreenProps {
   readonly holds: ReadResult<HoldsPage>;
   readonly transactions: ReadResult<TransactionPage>;
   readonly provider: ReadResult<PaymentProviderDisclosure>;
-  readonly query: TransactionListQuery;
+  readonly query: InContext<TransactionListQuery>;
   readonly csrfToken: string;
   readonly submissionId: string;
+  readonly topUpState?: TopUpFormState;
+  readonly releaseOutcome?: string;
 }
 
-function hrefWith(query: TransactionListQuery, changes: Partial<TransactionListQuery>): string {
+function hrefWith(
+  query: InContext<TransactionListQuery>,
+  changes: Partial<TransactionListQuery>,
+): string {
   const params = new URLSearchParams();
   const merged = { ...query, ...changes };
   if (merged.status) params.set('status', merged.status);
   if (merged.transactionType) params.set('transactionType', merged.transactionType);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
-  return search ? `/wallet?${search}` : '/wallet';
+  return withContext(query.context, search ? `/wallet?${search}` : '/wallet');
 }
 
 const CONTROL =
@@ -116,43 +127,45 @@ function HoldRows({ holds }: { holds: HoldsPage }) {
   }
 
   return (
-    <table className="w-full border-collapse text-sm">
-      <caption className="sr-only">فهرست وجوه در وثیقه</caption>
-      <thead>
-        <tr className="border-b border-border text-start text-content-muted">
-          <th scope="col" className="p-3 text-start font-medium">
-            مبلغ
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            وضعیت
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            مرجع
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            تاریخ
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {holds.items.map((hold) => (
-          <tr key={hold.id} className="border-b border-border">
-            <td className="p-3">{formatMoney(hold.amountMinor)}</td>
-            <td className="p-3">
-              <StatusBadge status={hold.status} label={walletHoldStatusLabel(hold.status)} />
-            </td>
-            <td className="p-3 text-content-muted">
-              <Identifier>{hold.reference}</Identifier>
-            </td>
-            <td className="p-3 text-content-muted">{formatJalaliDateLong(hold.placedAt)}</td>
+    <TableScroll label="فهرست وجوه در وثیقه">
+      <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">فهرست وجوه در وثیقه</caption>
+        <thead>
+          <tr className="border-b border-border text-start text-content-muted">
+            <th scope="col" className="p-3 text-start font-medium">
+              مبلغ
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              وضعیت
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              مرجع
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              تاریخ
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {holds.items.map((hold) => (
+            <tr key={hold.id} className="border-b border-border">
+              <td className="p-3">{formatMoney(hold.amountMinor)}</td>
+              <td className="p-3">
+                <StatusBadge status={hold.status} label={walletHoldStatusLabel(hold.status)} />
+              </td>
+              <td className="p-3 text-content-muted">
+                <Identifier>{hold.reference}</Identifier>
+              </td>
+              <td className="p-3 text-content-muted">{formatJalaliDateLong(hold.placedAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 
-function TransactionFilters({ query }: { query: TransactionListQuery }) {
+function TransactionFilters({ query }: { query: InContext<TransactionListQuery> }) {
   return (
     <form
       method="get"
@@ -160,6 +173,7 @@ function TransactionFilters({ query }: { query: TransactionListQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="پالایش تراکنش‌ها"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-status" className="flex flex-col gap-1 text-sm text-content-muted">
         وضعیت
         <select
@@ -199,52 +213,74 @@ function TransactionFilters({ query }: { query: TransactionListQuery }) {
   );
 }
 
-function TransactionRows({ page, query }: { page: TransactionPage; query: TransactionListQuery }) {
+function TransactionRows({
+  page,
+  query,
+}: {
+  page: TransactionPage;
+  query: InContext<TransactionListQuery>;
+}) {
   return (
     <>
-      <table className="w-full border-collapse text-sm">
-        <caption className="sr-only">فهرست تراکنش‌ها</caption>
-        <thead>
-          <tr className="border-b border-border text-start text-content-muted">
-            <th scope="col" className="p-3 text-start font-medium">
-              نوع
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              مبلغ خالص
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              وضعیت
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              تاریخ
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {page.items.map((transaction) => (
-            <tr key={transaction.id} className="border-b border-border">
-              <td className="p-3">
-                <Link
-                  href={`/transactions/${encodeURIComponent(transaction.id)}`}
-                  className="underline"
-                >
-                  {transactionTypeLabel(transaction.transactionType)}
-                </Link>
-              </td>
-              <td className="p-3">{formatMoney(transaction.netAmountMinor)}</td>
-              <td className="p-3">
-                <StatusBadge
-                  status={transaction.status}
-                  label={transactionStatusLabel(transaction.status)}
-                />
-              </td>
-              <td className="p-3 text-content-muted">
-                {formatJalaliDateLong(transaction.occurredAt)}
-              </td>
+      <TableScroll label="فهرست تراکنش‌ها">
+        <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">فهرست تراکنش‌ها</caption>
+          <thead>
+            <tr className="border-b border-border text-start text-content-muted">
+              <th scope="col" className="p-3 text-start font-medium">
+                نوع
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                مبلغ خالص
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                وضعیت
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                تاریخ
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {page.items.map((transaction) => (
+              <tr key={transaction.id} className="border-b border-border">
+                <td className="p-3">
+                  <Link
+                    href={`/transactions/${encodeURIComponent(transaction.id)}`}
+                    className="underline"
+                  >
+                    {transactionTypeLabel(transaction.transactionType)}
+                  </Link>
+                </td>
+                <td className="p-3">
+                  {formatMoney(transaction.netAmountMinor)}
+                  {/* The gross, labelled as the gross: never the net, and no claim
+                    about a hold (net is zero until settlement, ADR-028). */}
+                  <span className="block text-xs text-content-muted">
+                    مبلغ کل:{' '}
+                    {transaction.grossAmountMinor === null
+                      ? '—'
+                      : formatMoney(transaction.grossAmountMinor)}
+                  </span>
+                </td>
+                <td className="p-3">
+                  <StatusBadge
+                    status={transaction.status}
+                    label={presentTransactionStatus(transaction)}
+                  />
+                </td>
+                <td className="p-3 text-content-muted">
+                  {formatJalaliDateLong(transaction.occurredAt)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
+      <p className="mt-3 text-xs text-content-muted">
+        مبلغ کل همان مبلغ ثبت‌شدهٔ تراکنش است. مبلغ خالص هنگام تسویه محاسبه می‌شود و تا آن زمان صفر
+        نشان داده می‌شود؛ صفر به معنی «مبلغی در تعهد نیست» نیست و وجه در وثیقه را نشان نمی‌دهد.
+      </p>
 
       {page.hasMore && page.nextCursor ? (
         <div className="mt-4 flex justify-start">
@@ -265,8 +301,12 @@ export function WalletScreen({
   query,
   csrfToken,
   submissionId,
+  topUpState,
+  releaseOutcome,
 }: WalletScreenProps) {
   const filtered = Boolean(query.status || query.transactionType);
+  const releaseKey =
+    topUpState && 'releaseToken' in topUpState ? topUpState.releaseToken : undefined;
 
   return (
     <>
@@ -299,15 +339,25 @@ export function WalletScreen({
           </Section>
 
           <Section headingId="top-up" title="افزایش موجودی">
+            <ReleaseFeedback surface="wallet" outcome={releaseOutcome} />
+            {provider.kind !== 'OK' && releaseKey ? (
+              <UnresolvedTopUpNotice
+                walletId={wallet.data.id}
+                csrfToken={csrfToken}
+                releaseToken={releaseKey}
+              />
+            ) : null}
             {provider.kind === 'OK' ? (
               <>
                 {/* Worded here from the provider's `simulated` flag, never the service's
                     English sentence; the «حالت نمایشی» label itself is drawn once, above. */}
                 <Alert tone="info">{providerNotice(provider.data.simulated)}</Alert>
                 <TopUpForm
+                  key={releaseKey ?? submissionId}
                   walletId={wallet.data.id}
                   csrfToken={csrfToken}
                   submissionId={submissionId}
+                  initialState={topUpState}
                 />
               </>
             ) : (

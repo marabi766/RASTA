@@ -12,10 +12,13 @@ import { RecordInspectionForm, RecordPolicyForm } from './assets/[id]/AssetRecor
 import { DeclareAvailabilityForm } from './assets/[id]/AvailabilityForms';
 import { ChangeStatusForm as DriverChangeStatusForm } from './drivers/[id]/ChangeStatusForm';
 import { EndAssignmentForm } from './drivers/[id]/EndAssignmentForm';
+import { NewDriverForm } from './drivers/NewDriverForm';
 import { PlaceOrderForm } from './marketplace/[productId]/PlaceOrderForm';
 import { ReportRequestForm } from './maintenance/ReportRequestForm';
 import { RecordCostForm, RecordPartForm } from './maintenance/[id]/RepairOrderForms';
 import { StatementCommandForm } from './contracts/[id]/StatementCommandForm';
+import { bindingOf } from '@/test/unresolved-binding';
+import { SubmitQualificationForm } from './suppliers/SupplierForms';
 
 /**
  * A `<select>` keeps the choice a person made after an attempt is refused.
@@ -56,6 +59,10 @@ jest.mock('./drivers/[id]/actions', () => {
   const { refuse } = jest.requireActual('@/test/refusal');
   return { submitChangeStatus: refuse, submitEndAssignment: refuse };
 });
+jest.mock('./drivers/actions', () => {
+  const { refuse } = jest.requireActual('@/test/refusal');
+  return { submitCreateDriver: refuse };
+});
 jest.mock('./marketplace/[productId]/place-order-actions', () => {
   const { refuse } = jest.requireActual('@/test/refusal');
   return { submitPlaceOrder: refuse };
@@ -89,6 +96,20 @@ jest.mock('./contracts/[id]/statement-actions', () => {
     message: 'refused',
   });
   return { submitStatementDraft: refuseDraft, submitStatementCommand: refuseDraft };
+});
+
+jest.mock('./suppliers/supplier-actions', () => {
+  const { REFUSED_SUBMISSION } = jest.requireActual('@/test/refusal');
+  const { submitFormValues } = jest.requireActual('@/lib/supplier-commands');
+  // The qualification form keeps structured values (evidence rows): the same refusal, in that shape.
+  const refuseRequest = async (...args: unknown[]) => ({
+    kind: 'INVALID',
+    submissionId: REFUSED_SUBMISSION,
+    values: submitFormValues(args[args.length - 1] as FormData),
+    fieldErrors: {},
+    message: 'refused',
+  });
+  return { submitQualificationRequest: refuseRequest };
 });
 
 const CSRF = 'csrf-token-for-this-session';
@@ -182,6 +203,23 @@ const CASES = [
     ),
   },
   {
+    form: 'register driver (the member picked)',
+    select: 'userId',
+    mount: () => (
+      <NewDriverForm
+        csrfToken={CSRF}
+        submissionId={SUBMISSION}
+        picker={{
+          kind: 'PICK',
+          candidates: [
+            { userId: 'USR_01J00000000000000000000001', name: 'نخست', username: 'one' },
+            { userId: 'USR_01J00000000000000000000002', name: 'دوم', username: 'two' },
+          ],
+        }}
+      />
+    ),
+  },
+  {
     form: 'place order',
     select: 'offerId',
     mount: () => (
@@ -191,7 +229,7 @@ const CASES = [
         submissionId={SUBMISSION}
         newOrderHref="/marketplace/PRD_1"
         productId="PRD_1"
-        binding={{ owner: 'owner-tag', session: 'session-tag' }}
+        binding={bindingOf('owner-tag', 'session-tag')}
         sessionMaxAgeSeconds={3600}
       />
     ),
@@ -221,13 +259,26 @@ const CASES = [
         csrfToken={CSRF}
         submissionId={SUBMISSION}
         replay={{ token: 'stamp', until: Date.now() + 60_000 }}
-        binding={{ owner: 'owner-tag', session: 'session-tag' }}
+        binding={bindingOf('owner-tag', 'session-tag')}
         sessionMaxAgeSeconds={3600}
         milestones={[
           { id: 'MST_1', title: 'نخست' },
           { id: 'MST_2', title: 'دوم' },
         ]}
         pageHref="/contracts/CTR_1"
+      />
+    ),
+  },
+  {
+    form: 'send a supplier qualification request (capability)',
+    select: 'capability',
+    mount: () => (
+      <SubmitQualificationForm
+        supplierId="SUP_01J00000000000000000000000"
+        csrfToken={CSRF}
+        submissionId={SUBMISSION}
+        baseline={BASELINE}
+        capabilities={['GOODS_SUPPLY', 'CONTRACTING']}
       />
     ),
   },

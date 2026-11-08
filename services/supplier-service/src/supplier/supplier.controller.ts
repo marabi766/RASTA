@@ -185,7 +185,11 @@ export class SupplierController {
       'The caller’s own organization, or a platform operator. A supplier owned by another ' +
       'organization answers 404 rather than 403, so its existence is never disclosed — the ' +
       'directory is where a stranger legitimately sees that a supplier exists, and it ' +
-      'returns a different, catalogue-safe object.',
+      'returns a different, catalogue-safe object. A qualification’s `decisionNote` (the ' +
+      'reviewer’s private note) is present only for a platform operator who is not a member ' +
+      'of the supplier’s organization; the supplier’s own organization never receives the ' +
+      'key. A rejected qualification’s `rejectionReason` is the reason stated for the ' +
+      'supplier, and every reader of this record receives it.',
   })
   async get(@Param('id') id: string) {
     return this.suppliers.get(id);
@@ -242,8 +246,10 @@ export class SupplierController {
     summary: 'Reject a submitted qualification',
     description:
       'The mirror of approval, with the same authorization and the same terminality. The ' +
-      'stated `reason` is published on SUPPLIER_REJECTED so the supplier can act on it; the ' +
-      'optional `note` is the reviewer’s private record and is never published.',
+      'stated `reason` is stored on the qualification as `rejectionReason`, readable on the ' +
+      'supplier’s own record, and published on SUPPLIER_REJECTED, so the supplier can act on ' +
+      'it; the optional `note` is the reviewer’s private record — returned to reviewers only, ' +
+      'never to the supplier’s organization, and never published.',
   })
   async rejectQualification(
     @Param('id') id: string,
@@ -267,7 +273,9 @@ export class SupplierController {
       'qualifications rather than revoking them: a suspended supplier is returned as ' +
       'qualified for nothing, and reinstating restores exactly what was approved before with ' +
       'no new decision. Publishes SUPPLIER_SUSPENDED, whose `until` is always null because ' +
-      'a suspension runs until an explicit reinstatement.',
+      'a suspension runs until an explicit reinstatement. `latestSuspensionId` names the ' +
+      'newest episode the operator read (null for none); if a newer one was recorded since, ' +
+      'the answer is 409 `SUSPENSION_EPISODE_CHANGED` and nothing is written.',
   })
   async suspend(
     @Param('id') id: string,
@@ -285,7 +293,10 @@ export class SupplierController {
       'Closes the open suspension episode by stamping it with the lifting operator and ' +
       'reason; the episode is never deleted, so who suspended the supplier and why stays ' +
       'answerable. Publishes SUPPLIER_REINSTATED for the closed episode, in the same ' +
-      'transaction, so a consumer that hid this supplier on SUPPLIER_SUSPENDED learns to stop.',
+      'transaction, so a consumer that hid this supplier on SUPPLIER_SUSPENDED learns to stop. ' +
+      '`suspensionId` names the episode being lifted; if another episode is open now, the ' +
+      'answer is 409 `SUSPENSION_EPISODE_CHANGED` and nothing is written, so one episode’s ' +
+      'explanation never closes another.',
   })
   async reinstate(
     @Param('id') id: string,

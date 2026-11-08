@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { BIDI_CONTROL, toLatinDigits, toPersianDigits } from '@/lib/format';
@@ -13,6 +14,7 @@ import {
 import type { WebSession } from './session';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Placing an order, through the gateway: `POST /v1/orders`.
@@ -72,19 +74,19 @@ export function placeOrderFormValues(form: FormData): PlaceOrderFormValues {
 /** A quantity is a count, not money: a `number` is the service's own type for it. */
 const quantitySchema = z
   .string()
-  .regex(/^[0-9]+$/, 'تعداد را به‌صورت عدد صحیح وارد کنید')
+  .regex(/^[0-9]+$/, formMessage('تعداد را به‌صورت عدد صحیح وارد کنید'))
   .transform((value) => Number(value))
   .pipe(
     z
       .number()
-      .min(1, 'تعداد باید دست‌کم ۱ باشد')
+      .min(1, formMessage('تعداد باید دست‌کم ۱ باشد'))
       // Before `.int()`: 400 digits parse to Infinity, which is both too big and
       // not an integer, and the person should read the first (the limit).
       .max(
         LIMITS.quantity.max,
-        `تعداد نباید بیش از ${toPersianDigits(String(LIMITS.quantity.max))} باشد`,
+        formMessage(`تعداد نباید بیش از ${toPersianDigits(String(LIMITS.quantity.max))} باشد`),
       )
-      .int('تعداد را به‌صورت عدد صحیح وارد کنید'),
+      .int(formMessage('تعداد را به‌صورت عدد صحیح وارد کنید')),
   );
 
 const placeOrderSchema = z.object({
@@ -92,11 +94,11 @@ const placeOrderSchema = z.object({
   // one, and is refused here rather than echoed back by the service.
   offerId: z
     .string()
-    .min(1, 'پیشنهاد را انتخاب کنید')
-    .max(64, 'پیشنهاد را انتخاب کنید')
+    .min(1, formMessage('پیشنهاد را انتخاب کنید'))
+    .max(64, formMessage('پیشنهاد را انتخاب کنید'))
     .refine(
       (value) => !BIDI_CONTROL.test(value) && !/\p{Cc}/u.test(value),
-      'پیشنهاد را انتخاب کنید',
+      formMessage('پیشنهاد را انتخاب کنید'),
     ),
   quantity: quantitySchema,
 });
@@ -110,9 +112,12 @@ export type ParsedPlaceOrderForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<PlaceOrderField, string>> };
 
 export function parsePlaceOrderForm(values: PlaceOrderFormValues): ParsedPlaceOrderForm {
-  const parsed = placeOrderSchema.safeParse(values);
+  const parsed = legacyParse(placeOrderSchema, values);
   if (!parsed.success) {
-    return { ok: false, fieldErrors: firstIssuePerField(parsed.error, PLACE_ORDER_FIELDS) };
+    return {
+      ok: false,
+      fieldErrors: firstIssuePerField(parsed.refusal, PLACE_ORDER_FIELDS),
+    };
   }
 
   const { offerId, quantity } = parsed.data;

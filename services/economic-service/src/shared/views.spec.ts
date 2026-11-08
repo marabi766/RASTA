@@ -1,4 +1,4 @@
-import { storedTransactionDetailView, toRewardBalanceView } from './views';
+import { storedTransactionDetailView, toRewardBalanceView, toRewardRuleView } from './views';
 import type { TransactionDetailView } from '../transaction/dto';
 
 /**
@@ -9,6 +9,40 @@ import type { TransactionDetailView } from '../transaction/dto';
  * makes deliberately: a level that exists against one that does not, and an
  * amount that crosses the wire as a string rather than a number (ADR-022).
  */
+describe('toRewardRuleView', () => {
+  const row = {
+    id: 'RWR_1',
+    organizationId: null,
+    triggerEvent: 'USAGE_RECORDED',
+    rewardType: 'POINTS',
+    condition: null,
+    points: 2,
+    creditPerPointMinor: 9_007_199_254_740_993n,
+    periodCap: 40,
+    periodType: 'DAY',
+    validFrom: new Date('2026-10-29T00:00:00.000Z'),
+    validTo: null,
+    status: 'ACTIVE',
+    label: null,
+    createdAt: new Date('2026-10-29T00:00:00.000Z'),
+    createdBy: 'USR-1',
+    updatedAt: new Date('2026-10-29T00:00:00.000Z'),
+    updatedBy: 'USR-1',
+  };
+
+  it('answers the credit as an exact decimal string, and the points cap as a number', () => {
+    // 2^53 + 1: `Number(...)` would have answered …992 (economic audit F1).
+    const view = toRewardRuleView(row);
+    expect(view.creditPerPointMinor).toBe('9007199254740993');
+    expect(view.periodCap).toBe(40);
+    expect(Object.values(view).some((value) => typeof value === 'bigint')).toBe(false);
+  });
+
+  it('keeps a points-only rule’s credit null, not "0"', () => {
+    expect(toRewardRuleView({ ...row, creditPerPointMinor: null }).creditPerPointMinor).toBeNull();
+  });
+});
+
 describe('toRewardBalanceView', () => {
   const base = {
     organizationId: 'ORG-A',

@@ -1,0 +1,146 @@
+// TEST ONLY (backup-restore-drill-cli.test.mjs): `NODE_OPTIONS=--import=<this file>` makes the
+// CLI's file system fail on demand, so a real process can be shown to survive (or refuse) a
+// publication failure that cannot be produced from outside. Nothing in the drill imports this.
+// DRILL_FAULT is JSON; every key is optional:
+//   rename:         { match, exact = false, skip = 0, times = 1, afterRm = false }
+//                   renameSync whose destination contains `match` (is `match`) fails EIO `times` times after
+//                   `skip` passes (only after an rmSync of a drill directory when `afterRm`);
+//   fsyncDirectory: { times = 1, afterCheckpoint = false }
+//                   fsyncSync of a directory descriptor fails EIO `times` times (with
+//                   `afterCheckpoint`: only once this process has written a "recovered"
+//                   checkpoint, so that write is the one whose durability is lost);
+//   rm:             { mode: 'before' | 'after', times = 1 }
+//                   rmSync of a drill directory fails EIO without removing anything (before) or
+//                   after removing it (after), `times` times;
+//   rm:             { mode: 'kill-before' | 'kill-mid' | 'kill-after' }
+//                   the process SIGKILLs itself instead: when the removal is asked for, after
+//                   deleting the directory's marker and compose.json only (mid), or after the
+//                   whole directory is gone (after).
+//   swapSibling:    { contains, skip = 0, times = 1 }
+//                   the write sibling (`*.tmp`) of an atomic write whose bytes contain `contains`
+//                   is replaced by another file right after it is closed, as an actor with write
+//                   access to the directory could do before the write is published (a list of
+//                   specs hits different writes of one run: the first one that still has swaps
+//                   left and matches claims a write);
+//   swapDirectory:  { parent }
+//                   right after the first rename that publishes a recovery journal, the drill
+//                   directory found in `parent` is moved aside and another directory (holding
+//                   `theirs`) takes its name, as an actor with write access to `parent` could do
+//                   while the checkpoint is being published.
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+
+const fault = JSON.parse(process.env.DRILL_FAULT ?? '{}');
+const eio = () => Object.assign(new Error('EIO: injected'), { code: 'EIO' });
+const remaining = (spec, key = 'times') => {
+  spec[key] = (spec[key] ?? 1) - 1;
+  return spec[key] >= 0;
+};
+let removed = false;
+let checkpointWritten = false;
+
+if (fault.rename) {
+  const original = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    const spec = fault.rename;
+    const matches = spec.exact ? String(to) === spec.match : String(to).includes(spec.match);
+    if (matches && (!spec.afterRm || removed)) {
+      if ((spec.skip ?? 0) > 0) spec.skip -= 1;
+      else if (remaining(spec)) throw eio();
+    }
+    return original(from, to);
+  };
+}
+if (fault.swapDirectory) {
+  const original = fs.renameSync;
+  let swapped = false;
+  fs.renameSync = (from, to) => {
+    const result = original(from, to);
+    if (!swapped && String(to).endsWith('.recovery-journal.json')) {
+      swapped = true;
+      const { parent } = fault.swapDirectory;
+      for (const name of fs.readdirSync(parent)) {
+        if (!/^rasta-restore-drill-[A-Za-z0-9]{6}$/.test(name)) continue;
+        const path = `${parent}/${name}`;
+        original(path, `${path}.moved`);
+        fs.mkdirSync(path, { mode: 0o700 });
+        fs.writeFileSync(`${path}/theirs`, 'precious');
+      }
+    }
+    return result;
+  };
+}
+if (fault.swapSibling) {
+  const { open, close } = { open: fs.openSync, close: fs.closeSync };
+  const write = fs.writeSync;
+  // One spec, or a list of them (a write is claimed by the first spec that matches it and still
+  // has swaps left, so two faults can hit two different writes of one run).
+  const specs = [fault.swapSibling].flat();
+  const siblings = new Map();
+  const marked = new Map();
+  fs.openSync = (path, ...rest) => {
+    const fd = open(path, ...rest);
+    if (String(path).endsWith('.tmp')) siblings.set(fd, String(path));
+    return fd;
+  };
+  fs.writeSync = (fd, ...rest) => {
+    if (siblings.has(fd) && !marked.has(fd) && Buffer.isBuffer(rest[0])) {
+      const spec = specs.find((one) => (one.times ?? 1) > 0 && rest[0].includes(one.contains));
+      if (spec) marked.set(fd, spec);
+    }
+    return write(fd, ...rest);
+  };
+  fs.closeSync = (fd) => {
+    const result = close(fd);
+    const path = siblings.get(fd);
+    siblings.delete(fd);
+    const spec = marked.get(fd);
+    marked.delete(fd);
+    if (spec) {
+      if ((spec.skip ?? 0) > 0) spec.skip -= 1;
+      else if (remaining(spec)) {
+        fs.unlinkSync(path);
+        fs.writeFileSync(path, 'theirs\n');
+      }
+    }
+    return result;
+  };
+}
+if (fault.fsyncDirectory) {
+  const original = fs.fsyncSync;
+  const write = fs.writeSync;
+  fs.writeSync = (fd, ...rest) => {
+    if (Buffer.isBuffer(rest[0]) && rest[0].includes('"checkpoint": "recovered"'))
+      checkpointWritten = true;
+    return write(fd, ...rest);
+  };
+  fs.fsyncSync = (fd) => {
+    if (
+      fs.fstatSync(fd).isDirectory() &&
+      (!fault.fsyncDirectory.afterCheckpoint || checkpointWritten) &&
+      remaining(fault.fsyncDirectory)
+    )
+      throw eio();
+    return original(fd);
+  };
+}
+if (fault.rm) {
+  const original = fs.rmSync;
+  fs.rmSync = (path, options) => {
+    if (!String(path).includes('rasta-restore-drill-')) return original(path, options);
+    if (fault.rm.mode === 'before' && remaining(fault.rm)) throw eio();
+    const die = () => process.kill(process.pid, 'SIGKILL');
+    if (fault.rm.mode === 'kill-before') die();
+    if (fault.rm.mode === 'kill-mid') {
+      for (const name of ['recovery.json', 'compose.json'])
+        original(`${path}/${name}`, { force: true });
+      die();
+    }
+    original(path, options);
+    removed = true;
+    if (fault.rm.mode === 'kill-after') die();
+    if (fault.rm.mode === 'after' && remaining(fault.rm)) throw eio();
+    return undefined;
+  };
+}
+syncBuiltinESMExports();

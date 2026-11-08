@@ -17,14 +17,14 @@ export const MAX_PAGE_SIZE = 200;
 export const cursorPaginationSchema = z.object({
   /** Opaque, server-issued. Clients must not construct or parse it. */
   cursor: z.string().max(512).optional(),
-  limit: numberInput(z.number().int().min(1).max(MAX_PAGE_SIZE)).default(DEFAULT_PAGE_SIZE),
+  limit: numberInput(z.number().int().min(1).max(MAX_PAGE_SIZE)).prefault(DEFAULT_PAGE_SIZE),
 });
 
 export type CursorPagination = z.infer<typeof cursorPaginationSchema>;
 
 export const offsetPaginationSchema = z.object({
-  page: numberInput(z.number().int().min(1)).default(1),
-  pageSize: numberInput(z.number().int().min(1).max(MAX_PAGE_SIZE)).default(DEFAULT_PAGE_SIZE),
+  page: numberInput(z.number().int().min(1)).prefault(1),
+  pageSize: numberInput(z.number().int().min(1).max(MAX_PAGE_SIZE)).prefault(DEFAULT_PAGE_SIZE),
 });
 
 export type OffsetPagination = z.infer<typeof offsetPaginationSchema>;
@@ -40,7 +40,7 @@ export type SortDirection = z.infer<typeof sortDirectionSchema>;
 export function sortSchema<const T extends readonly [string, ...string[]]>(sortableFields: T) {
   return z.object({
     sortBy: z.enum(sortableFields).optional(),
-    sortDir: sortDirectionSchema.default('desc'),
+    sortDir: sortDirectionSchema.prefault('desc'),
   });
 }
 

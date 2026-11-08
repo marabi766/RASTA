@@ -15,6 +15,17 @@ import {
   topUpWallet,
 } from '@/server/wallet';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
+import {
+  restoreTopUp,
+  topUpReleaseScope,
+  topUpScope,
+  topUpSnapshot,
+} from '@/server/top-up-request';
+import { reserveUnresolved, requestDigest, settleUnresolved } from '@/server/unresolved-request';
+import { settleRelease } from '@/server/release-feedback';
+import { isProvenRefusal } from '@/server/write';
+
 import type { TopUpFormState } from './form-state';
 
 /**
@@ -29,9 +40,13 @@ import type { TopUpFormState } from './form-state';
  */
 export async function submitTopUp(
   walletId: string,
-  _previous: TopUpFormState,
+  previous: TopUpFormState,
   form: FormData,
 ): Promise<TopUpFormState> {
+  return keepUnconfirmed(previous, form, () => attemptTopUp(walletId, form));
+}
+
+async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
@@ -40,6 +55,9 @@ export async function submitTopUp(
 
   const submissionId = form.get(SUBMISSION_FIELD);
   if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+
+  const restored = await restoreTopUp(session, walletId);
+  if (restored.kind !== 'IDLE') return restored;
 
   const values = topUpFormValues(form);
   const parsed = parseTopUpForm(values);
@@ -58,10 +76,51 @@ export async function submitTopUp(
     return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
   }
 
-  const result = await topUpWallet(session, walletId, parsed.request, submissionId);
+  const scope = topUpScope(walletId);
+  const ref = topUpSnapshot(session, walletId, submissionId, parsed.request.amountMinor);
+  if (ref.length > 800) return { kind: 'NOT_CHECKED', reason: 'SNAPSHOT_TOO_LARGE' };
+  const reserved = await reserveUnresolved(session, scope, {
+    key: submissionId,
+    digest: requestDigest(session, scope.purpose, parsed.request),
+    ref,
+    issuedAt: Date.now(),
+    deadline: null,
+    windowMs: null,
+  });
+  if (reserved.kind === 'CAPACITY') return { kind: 'NOT_CHECKED', reason: 'CAPACITY' };
+  if (reserved.kind !== 'RESERVED')
+    return restoreTopUp(session, walletId).then((state) =>
+      state.kind === 'IDLE' ? { kind: 'NOT_CHECKED', reason: 'STORE_UNAVAILABLE' } : state,
+    );
+  let result;
+  try {
+    result = await topUpWallet(session, walletId, parsed.request, submissionId);
+  } catch (error) {
+    await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+    throw error;
+  }
+  const ambiguous =
+    result.kind === 'UNKNOWN_OUTCOME' ||
+    result.kind === 'IN_PROGRESS' ||
+    (result.kind === 'UNAVAILABLE' &&
+      !result.neverSent &&
+      !isProvenRefusal(result.status, result.code));
+  await settleUnresolved(
+    reserved.attempt,
+    result.kind === 'CREATED' ? 'CONFIRMED' : ambiguous ? 'UNRESOLVED' : 'REFUSED',
+  );
+  if (ambiguous)
+    return {
+      kind: 'UNCONFIRMED',
+      correlationId: result.correlationId,
+      submissionId,
+      values: { amountMinor: parsed.request.amountMinor },
+    };
 
   if (result.kind === 'CREATED') {
-    redirect('/wallet?toppedUp=1');
+    // Nothing on the page reads a confirmation flag, so none is carried (PR 405 review 2, F2):
+    // the balance it reads again is the confirmation.
+    redirect('/wallet');
   }
 
   switch (result.kind) {
@@ -86,4 +145,17 @@ export async function submitTopUp(
       // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
+}
+
+/** Explicit reconciliation only; the signed record id prevents a stale tab releasing a newer hold. */
+export async function releaseUnresolvedTopUp(walletId: string, form: FormData): Promise<void> {
+  const session = await currentSession();
+  if (!session) redirect('/login?returnTo=/wallet');
+  return settleRelease({
+    session,
+    form,
+    back: '/wallet',
+    subject: { surface: 'wallet', target: walletId },
+    scope: topUpReleaseScope(walletId),
+  });
 }

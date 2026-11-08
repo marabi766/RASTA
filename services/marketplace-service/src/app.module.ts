@@ -23,6 +23,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -59,6 +60,7 @@ import { CatalogueService } from './offer/catalogue.service';
 import { OfferController, ProductController } from './offer/catalogue.controller';
 import { EconomicClient } from './economic/economic.client';
 import { OrganizationHierarchy } from './organization/organization-hierarchy';
+import { SagaStartStore } from './temporal/saga-start.store';
 import { OrderSagaClient } from './temporal/saga.client';
 import { OrderSagaWorker } from './temporal/worker';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -93,6 +95,9 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     MetricsController,
   ],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: () => loadMarketplaceEnv() },
 
     {
@@ -134,6 +139,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     ReturnService,
     ReturnDispatchSourceService,
     CatalogueService,
+    SagaStartStore,
     OrderSagaClient,
     OrderSagaWorker,
 
@@ -277,6 +283,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
         OutboxRelay,
         OutboxPurgeScheduler,
         OrderSagaWorker,
+        OrderSagaClient,
         ReturnMirrorConsumer,
         KafkaEventPublisher,
         ENV,
@@ -285,6 +292,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         saga: OrderSagaWorker,
+        starter: OrderSagaClient,
         mirror: ReturnMirrorConsumer,
         publisher: KafkaEventPublisher,
         env: MarketplaceEnv,
@@ -292,7 +300,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
         new OutboxShutdown({
           relay,
           purge,
-          workers: [saga, mirror],
+          workers: [saga, starter, mirror],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
@@ -334,6 +342,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
     private readonly mirror: ReturnMirrorConsumer,
+    private readonly starter: OrderSagaClient,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -347,6 +356,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // that could lift this service's database guards.
     await this.prisma.assertRuntimeRole();
 
+    this.starter.startPolling();
     this.relay.start();
     this.purge.start();
     await this.mirror.start();

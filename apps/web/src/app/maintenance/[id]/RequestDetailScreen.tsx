@@ -36,6 +36,7 @@ import type {
   RepairOrderDetail,
   RepairOrderSummary,
 } from '@/server/maintenance';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The maintenance request detail (docs/16 § 16.6, `/maintenance/[id]`).
@@ -490,8 +491,8 @@ export function RequestDetailScreen({
               <RepairOrderCard
                 key={order.id}
                 order={order}
-                detail={orderDetails?.[order.id]}
-                forms={orderForms?.[order.id]}
+                detail={ownValue(orderDetails, order.id)}
+                forms={ownValue(orderForms, order.id)}
                 demoMode={demoMode}
               />
             ))}

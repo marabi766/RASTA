@@ -1,4 +1,5 @@
-import { Alert, ButtonLink, PageHeader } from '@/ui';
+import { Alert, ButtonLink, PageHeader, ThemeSwitch } from '@/ui';
+import { ownText } from '@/lib/own-key';
 
 /**
  * What a signed-out visitor sees (docs/16 § 16.6, `/login`).
@@ -35,7 +36,7 @@ export function LoginScreen({ reason, returnTo }: { reason?: string; returnTo?: 
   // An unknown code renders nothing rather than being echoed back. Whatever
   // arrives in a query string is somebody else's text until this map has
   // agreed to it.
-  const message = reason ? LOGIN_REASONS[reason] : undefined;
+  const message = ownText(LOGIN_REASONS, reason);
 
   // `returnTo` is already `safeReturnTo`'d by the route before it reaches
   // this component (this stays a plain function of its props, per the note
@@ -66,6 +67,13 @@ export function LoginScreen({ reason, returnTo }: { reason?: string; returnTo?: 
         گذرواژهٔ شما هرگز به این پورتال وارد نمی‌شود؛ احراز هویت در سامانهٔ مرکزی سازمان انجام
         می‌گیرد.
       </p>
+
+      {/* Outside any form (there is none) and after the way in, so the first
+          control reached by keyboard is still the sign-in link. This screen has
+          no shell and so no skip link to follow. */}
+      <div className="flex">
+        <ThemeSwitch />
+      </div>
     </main>
   );
 }

@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   AUDIT_CHANGES_MAX_ENTRIES,
-  auditChangeSchema,
   type AuditChange,
+  auditChangeSchema,
+  isoDateTime,
   plainText,
 } from '@rasta/contracts';
 
@@ -77,6 +78,12 @@ const correctionChangeSchema = auditChangeSchema.superRefine((change, ctx) => {
   }
 });
 
+// The ISO check runs first; keep a runtime string proof beside the conversion.
+function validatedInstant(value: unknown): string {
+  if (typeof value === 'string') return new Date(value).toISOString();
+  throw new TypeError('Expected a validated timestamp');
+}
+
 export const auditCorrectionCommandSchema = z
   .object({
     /** The audit record being corrected — its own id, not a source event id. */
@@ -89,8 +96,8 @@ export const auditCorrectionCommandSchema = z
      */
     occurredAt: z
       .string()
-      .datetime({ offset: true })
-      .transform((value) => new Date(value).toISOString()),
+      .check(isoDateTime({ offset: true }))
+      .transform((value) => validatedInstant(value)),
     reason: plainText().min(1).max(CORRECTION_REASON_MAX_LENGTH),
     changes: z.array(correctionChangeSchema).min(1).max(AUDIT_CHANGES_MAX_ENTRIES),
   })

@@ -3,6 +3,10 @@
  */
 import { fetchAssets, fetchDossier } from './assets';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * What the portal asks the gateway for, and what it keeps from the answer.
@@ -17,7 +21,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'dehyar',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -160,7 +164,9 @@ describe('the dossier', () => {
   const DOSSIER = {
     asset: ASSET,
     organizationName: 'دهیاری نمونه',
-    currentLocation: { id: 'LOC_1', coordinate: { lat: 35.7, lon: 51.4 } },
+    // Six decimals: no instant holds them (its seconds take three), so "not in the view" below
+    // cannot be decided by a timestamp (#452).
+    currentLocation: { id: 'LOC_1', coordinate: { lat: 35.689197, lon: 51.388974 } },
     compliance: {
       operable: false,
       blockers: ['INSURANCE_EXPIRED', 'INSPECTION_EXPIRED'],
@@ -231,7 +237,8 @@ describe('the dossier', () => {
     if (result.kind !== 'OK') throw new Error('expected a dossier');
 
     const serialised = JSON.stringify(result.data);
-    expect(serialised).not.toContain('51.4');
+    expect(serialised).not.toContain('35.689197');
+    expect(serialised).not.toContain('51.388974');
     expect(serialised).not.toContain('workOrderId');
     // The references are rendered (EXP-002 slice 7); a field beyond them is not kept.
     expect(result.data.documents).toEqual([

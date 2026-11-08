@@ -1,5 +1,5 @@
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   UnprocessableEventError,
   invalidPayloadError,
@@ -167,13 +167,13 @@ export class TimelineConsumer implements OnModuleInit, OnApplicationShutdown {
     // normal operation, not an error.
     if (!projection) return 'SKIPPED';
 
-    const parsed = timelineSourceSchema.safeParse(envelope.payload);
+    const parsed = legacyParse(timelineSourceSchema, envelope.payload);
     if (!parsed.success) {
       // The event is one we project, but it does not name an asset: a producer
       // defect no retry fixes. Dead-lettered at once, before the marker, so the
       // dossier entry is not lost and a corrected replay is still applied
       // (audit L7-26, docs/07 § 7.6).
-      throw invalidPayloadError(envelope, parsed.error, TIMELINE_SOURCE_FIELDS);
+      throw invalidPayloadError(envelope, parsed.refusal, TIMELINE_SOURCE_FIELDS);
     }
 
     // Without a tenant there is no organization to scope the write to. For an

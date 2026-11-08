@@ -7,6 +7,14 @@ import type { ReadResult, Transaction } from '@/server/transactions';
 import { TransactionDetailScreen } from './[id]/TransactionDetailScreen';
 import { DisputeCommandForm } from './[id]/DisputeCommandForm';
 import type { DisputeFormState } from './[id]/form-state';
+import { bindingOf } from '@/test/unresolved-binding';
+
+// Each test renders the transaction screen or a dispute form and runs jest-axe over it (40 scans;
+// the file took 56 s on main 61a13bbc). On a loaded CI runner the first test passed jest's 5 s
+// default (train run 40171771172, PR #402 run 40173125770), and the axe run it left behind failed
+// every later test. The contracts and tenders screens have the same allowance; task 239 looks for
+// why this file is slow.
+jest.setTimeout(20_000);
 
 /**
  * What `/transactions/[id]` renders: every outcome the read can hand back, the
@@ -49,7 +57,7 @@ afterEach(() => {
 });
 
 const CSRF = 'csrf-token-for-this-session';
-const BINDING = { owner: 'owner-tag', session: 'session-tag' };
+const BINDING = bindingOf('owner-tag', 'session-tag');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
@@ -260,6 +268,24 @@ describe('the dispute state, as the record says it', () => {
     await expectAccessible(container);
   });
 
+  it.each([
+    ['Dispute resolved: SETTLE', 'اعتراض با ادامهٔ تسویه به پایان رسید'],
+    ['Dispute resolved: REFUND', 'اعتراض با بازگشت وجه به پایان رسید'],
+  ])('shows the saga’s machine resolution %j in Persian', (machine, persian) => {
+    const { container } = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'PENDING_SETTLEMENT',
+        disputeResolvedAt: '2026-10-03T09:00:00.000Z',
+        disputeResolution: machine,
+        resolvedDisputeId: 'TXD_A',
+      }),
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain(persian);
+    expect(text).not.toContain('Dispute resolved');
+  });
+
   it('resolved before D-060: says when, and that the one text may be either', async () => {
     const { container } = renderScreen(
       ok({
@@ -458,6 +484,30 @@ describe('the dispute state, as the record says it', () => {
     renderScreen(ok(DISPUTED));
     expect(window.location.search).toBe('?flash=FORGED');
     window.history.replaceState(null, '', '/');
+  });
+});
+
+// #824 r1, F2: HELD is economic-service's claim of escrow, and only its proof backs it.
+describe('what HELD says on the detail (FU-138)', () => {
+  it.each([
+    ['false', false],
+    ['missing', undefined],
+  ])(
+    'with its proof %s: no «در وثیقه», on the badge or in the dispute’s sentence',
+    (_c, heldProven) => {
+      for (const row of [HELD, { ...DISPUTED, status: 'HELD' }]) {
+        const { container, unmount } = renderScreen(ok({ ...row, heldProven }));
+        expect(container.textContent).not.toContain('در وثیقه');
+        expect(container.textContent).toContain('وثیقه اثبات‌نشده');
+        unmount();
+      }
+    },
+  );
+
+  it('with its proof: «در وثیقه»', () => {
+    const { container } = renderScreen(ok({ ...HELD, heldProven: true }));
+    expect(container.textContent).toContain('در وثیقه');
+    expect(container.textContent).not.toContain('اثبات‌نشده');
   });
 });
 

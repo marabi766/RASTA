@@ -1,8 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
+import type { SamplingSignal } from '../src/audit/sampling-loop';
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
+import { expectNotDisclosed, instant, thisRun } from '@rasta/testing';
 import { TenderEvidenceUnmappableError, genesisReceipt } from '../src/audit/tender-evidence';
 import { TenderEvidenceRepository } from '../src/audit/tender-evidence.repository';
 import { TenderGapMonitor } from '../src/audit/tender-gap-monitor';
@@ -22,6 +24,9 @@ import { internalToken, startApi, systemAdmin, type ApiHarness } from './api-hel
 
 const DELIVERY = { topic: 'rasta.construction.v1', partition: 0, offset: '0' } as EventDelivery;
 const hash = (): string => createHash('sha256').update(randomBytes(16)).digest('hex');
+
+/** A sample that is never abandoned. */
+const LIVE_SAMPLE: SamplingSignal = { abandoned: false, throwIfAbandoned: () => undefined };
 
 describe('the tender-evidence projection', () => {
   let prisma: PrismaService;
@@ -239,15 +244,19 @@ describe('the tender-evidence projection', () => {
       const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId));
       const second = receipt('BID_SUBMITTED', tenderId, first.receipt);
       const repository = new TenderEvidenceRepository(prisma);
-      const monitor = new TenderGapMonitor(repository, {
-        AUDIT_TENDER_GAP_ALERT_SECONDS: 60,
-      } as never);
+      const monitor = new TenderGapMonitor(
+        repository,
+        {
+          AUDIT_TENDER_GAP_ALERT_SECONDS: 60,
+        } as never,
+        prisma,
+      );
       const gauge = async (name: string): Promise<number> =>
         (await registry.getSingleMetric(name)!.get()).values[0]?.value ?? 0;
 
       await consumer.handle(second.event, DELIVERY);
       const before = await failures('tender_chain_gap_overdue');
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
       // Held, but not for long enough yet: no alert.
       expect(await failures('tender_chain_gap_overdue')).toBe(before);
       expect(await gauge('rasta_audit_tender_pending_links')).toBeGreaterThanOrEqual(1);
@@ -257,8 +266,8 @@ describe('the tender-evidence projection', () => {
         `UPDATE tender_receipt_pending SET held_at = now() - interval '10 minutes' WHERE tender_id = $1`,
         tenderId,
       );
-      await monitor.sample();
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
+      await monitor.sample(LIVE_SAMPLE);
       expect(await failures('tender_chain_gap_overdue')).toBe(before + 1);
       expect(await gauge('rasta_audit_tender_pending_oldest_age_seconds')).toBeGreaterThanOrEqual(
         600,
@@ -268,14 +277,14 @@ describe('the tender-evidence projection', () => {
       expect(await gauge('rasta_audit_tender_overdue_links')).toBeGreaterThanOrEqual(1);
 
       await consumer.handle(first.event, DELIVERY);
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
       expect(await heldFor(tenderId)).toBe(0);
       expect(await failures('tender_chain_gap_overdue')).toBe(before + 1);
     });
 
     it('counts overdue gaps over every held row, not a bounded sample', async () => {
       const repository = new TenderEvidenceRepository(prisma);
-      const baseline = await repository.pendingSummary(60);
+      const baseline = await repository.pendingSummary(60, LIVE_SAMPLE);
       const tenderId = id('TND');
       await consumer.handle(receipt('BID_SUBMITTED', tenderId, hash()).event, DELIVERY);
       await migrator.client.$executeRawUnsafe(
@@ -292,7 +301,7 @@ describe('the tender-evidence projection', () => {
         hash(),
       );
 
-      const summary = await repository.pendingSummary(60);
+      const summary = await repository.pendingSummary(60, LIVE_SAMPLE);
 
       expect(summary.overdueCount - baseline.overdueCount).toBe(1100);
       expect(summary.held - baseline.held).toBe(1101);
@@ -443,6 +452,8 @@ describe('the tender-evidence projection', () => {
         { tenantId: BIDDER },
         { tenantId: undefined },
         { aggregateId: id('TND-OTHER') },
+        // Only the service that owns tenders may extend a tender's chain.
+        { producer: 'procurement-service' },
       ]) {
         const wrong = receipt('BID_SUBMITTED', tenderId, genesis, {}, envelopeOverrides);
         await expect(consumer.handle(wrong.event, DELIVERY)).rejects.toMatchObject({
@@ -452,7 +463,7 @@ describe('the tender-evidence projection', () => {
 
       expect((await chainOf(tenderId)).links).toEqual([]);
       expect(await heldFor(tenderId)).toBe(0);
-      expect(await failures('tender_evidence_mismatch')).toBe(before + 3);
+      expect(await failures('tender_evidence_mismatch')).toBe(before + 4);
     });
 
     it('refuses a receipt for a tender whose chain belongs to another organization', async () => {
@@ -507,7 +518,25 @@ describe('the tender-evidence projection', () => {
         `SELECT * FROM tender_receipt_link WHERE tender_id = $1`,
         tenderId,
       );
-      expect(JSON.stringify(rows)).not.toMatch(/1250000000|secret|ciphertext-must-not-leak/);
+      // The price, the note and the ciphertext are in the event, not in the row. Every column the
+      // run generated is verified against the event first and set aside (#452).
+      const sent = first.event.payload as Record<string, string>;
+      expectNotDisclosed(rows, [/1250000000|secret|ciphertext-must-not-leak/], {
+        metadata: {
+          '0.bid_id': sent.bidId!,
+          '0.tender_id': tenderId,
+          '0.organization_id': OWNER,
+          '0.bidder_organization_id': BIDDER,
+          '0.source_event_id': first.event.eventId,
+          '0.receipt': first.receipt,
+          '0.previous_receipt': sent.previousReceipt!,
+          '0.content_commitment': sent.contentCommitment!,
+          '0.ciphertext_sha256': sent.ciphertextSha256!,
+          '0.received_at': sent.receivedAt!,
+          '0.recorded_at': instant(thisRun()),
+        },
+        input: first.event,
+      });
       expect(Object.keys(rows[0]!).sort()).toEqual(
         [
           'bid_id',
@@ -644,7 +673,12 @@ describe('the tender-evidence projection', () => {
         outcome: 'REFUSED',
         accessedAt: new Date().toISOString(),
       };
-      for (const overrides of [{ tenantId: BIDDER }, { aggregateId: id('TND-OTHER') }]) {
+      for (const overrides of [
+        { tenantId: BIDDER },
+        { aggregateId: id('TND-OTHER') },
+        // Only the service that owns tenders may record a read of a bid.
+        { producer: 'procurement-service' },
+      ]) {
         await expect(
           consumer.handle(envelope('BID_ACCESSED', tenderId, payload, overrides), DELIVERY),
         ).rejects.toMatchObject({ name: 'TenderEvidenceIdentityError' });

@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { PROCUREMENT_RFQ_EVENTS, PROCUREMENT_RFQ_EVENT_SCHEMAS } from '@rasta/contracts';
+import {
+  isoDateTime,
+  PROCUREMENT_QUOTATION_EVENT_SCHEMAS,
+  PROCUREMENT_QUOTATION_EVENTS,
+  PROCUREMENT_RFQ_EVENT_SCHEMAS,
+  PROCUREMENT_RFQ_EVENTS,
+  describeLegacyRefusal,
+  legacyParse,
+} from '@rasta/contracts';
 
 /**
  * Events published by procurement-service, on `rasta.procurement.v1` (ADR-070 § 9).
@@ -17,7 +25,9 @@ import { PROCUREMENT_RFQ_EVENTS, PROCUREMENT_RFQ_EVENT_SCHEMAS } from '@rasta/co
  * and `RFQ_CANCELLED`. Their names and payload schemas are cross-service contracts in
  * `@rasta/contracts` (`events/procurement-rfq.ts`: audit-service's RFQ evidence consumer, plan PR 7,
  * reads them), composed into the one table below so every event this service publishes is
- * validated the same way.
+ * validated the same way. Plan PR 8 adds the quotation's — `QUOTATION_SUBMITTED`,
+ * `QUOTATION_REVISED` (each a receipt-chain link, which audit-service's RFQ evidence consumer holds)
+ * and `QUOTATION_WITHDRAWN` — from `events/procurement-quotation.ts`, keyed by the RFQ too.
  *
  * The payloads are defined here because this service owns them (ADR-032); the only cross-service
  * contract in `packages/contracts` is the audit trail.
@@ -40,6 +50,7 @@ export const PROCUREMENT_EVENTS = {
   AGGREGATION_CANCELLED: 'AGGREGATION_CANCELLED',
   AGGREGATION_SETTING_CHANGED: 'AGGREGATION_SETTING_CHANGED',
   ...PROCUREMENT_RFQ_EVENTS,
+  ...PROCUREMENT_QUOTATION_EVENTS,
 } as const;
 
 export type ProcurementEventName = keyof typeof PROCUREMENT_EVENTS;
@@ -54,7 +65,7 @@ const demandCount = z.number().int().min(0).max(2_147_483_647);
 /** `demandIdsDigest` of the same demands: lowercase hex SHA-256. */
 const demandIdsSha256 = z.string().regex(/^[0-9a-f]{64}$/);
 /** ISO 8601 in UTC, the form every event of the platform carries a time in. */
-const instant = z.string().datetime({ offset: false });
+const instant = z.string().check(isoDateTime({ offset: false }));
 
 const windowFacts = {
   aggregationId: id,
@@ -208,6 +219,7 @@ export const PROCUREMENT_EVENT_SCHEMAS = {
   AGGREGATION_CANCELLED: aggregationCancelledPayload,
   AGGREGATION_SETTING_CHANGED: aggregationSettingChangedPayload,
   ...PROCUREMENT_RFQ_EVENT_SCHEMAS,
+  ...PROCUREMENT_QUOTATION_EVENT_SCHEMAS,
 } as const satisfies Record<ProcurementEventName, z.ZodTypeAny>;
 
 export type ProcurementEventPayload<N extends ProcurementEventName> = z.infer<
@@ -224,10 +236,10 @@ export function validateProcurementPayload<N extends ProcurementEventName>(
   payload: unknown,
 ): ProcurementEventPayload<N> {
   const schema = PROCUREMENT_EVENT_SCHEMAS[eventName];
-  const parsed = schema.safeParse(payload);
+  const parsed = legacyParse(schema, payload);
   if (!parsed.success) {
     throw new Error(
-      `${eventName} payload does not match its published contract: ${parsed.error.message}`,
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
     );
   }
   return parsed.data as ProcurementEventPayload<N>;

@@ -1,11 +1,16 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
-import { apiErrorSchema as sharedApiErrorSchema } from '@rasta/contracts';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
+import {
+  publishedApiErrorSchema as apiErrorSchema,
+  isOptionalField,
+  objectShapeOf,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  toJsonSchema,
+} from '@rasta/nest-common';
 import { AggregationController, DemandController } from '../demand/demand.controller';
 import { DemandService } from '../demand/demand.service';
 import { AggregationSettingController } from '../setting/setting.controller';
@@ -21,6 +26,13 @@ import {
   withdrawDemandSchema,
 } from '../demand/dto';
 import { AggregationRfqController, RfqController } from '../rfq/rfq.controller';
+import { QuotationController } from '../quotation/quotation.controller';
+import { QuotationService } from '../quotation/quotation.service';
+import {
+  putQuotationSchema,
+  quotationReceiptViewSchema,
+  withdrawQuotationSchema,
+} from '../quotation/dto';
 import { RfqService } from '../rfq/rfq.service';
 import { cancelRfqSchema, issueRfqSchema, listRfqsQuerySchema, rfqViewSchema } from '../rfq/dto';
 import { IdempotencyStore } from '../shared/idempotency';
@@ -42,27 +54,13 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
  *   - the same suite provokes the documented statuses against the real API.
  *
  * Payload shapes come from the Zod schemas the pipes validate with (`src/demand/dto.ts`),
- * converted by `zod-schema.ts`; Nest supplies paths, methods and parameters from the decorators.
+ * converted by `toJsonSchema`; Nest supplies paths, methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/procurement-service openapi:generate`.
  */
 
 /** Pinned so the committed document is deterministic. */
 export const PROCUREMENT_VERSION = '0.1.0';
-
-const errorDetailSchema = z
-  .object({ path: z.string(), message: z.string(), code: z.string().optional() })
-  .strict();
-
-/**
- * The platform error envelope exactly as `AllExceptionsFilter` emits it: `correlationId` and
- * `timestamp` always, `traceId` and `path` when the request context has them, `details` only when
- * non-empty. Taken from the shared schema so the two cannot drift (PR-327 r1 F3: a strict local copy
- * without `timestamp` and `path` refused every real error body); only strictness is this service's.
- */
-const apiErrorSchema = sharedApiErrorSchema
-  .extend({ details: z.array(errorDetailSchema).optional() })
-  .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>
   z
@@ -88,6 +86,11 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/rfqs/{id}': { status: '200', schema: rfqViewSchema },
   'POST /v1/rfqs/{id}/close': { status: '200', schema: rfqViewSchema },
   'POST /v1/rfqs/{id}/cancel': { status: '200', schema: rfqViewSchema },
+  'PUT /v1/rfqs/{id}/quotations/mine': { status: '200', schema: quotationReceiptViewSchema },
+  'POST /v1/rfqs/{id}/quotations/mine/withdraw': {
+    status: '200',
+    schema: quotationReceiptViewSchema,
+  },
 };
 
 /** Every command takes a strict body. */
@@ -98,6 +101,8 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/aggregation-settings': recordAggregationSettingSchema,
   'POST /v1/aggregations/{id}/rfq': issueRfqSchema,
   'POST /v1/rfqs/{id}/cancel': cancelRfqSchema,
+  'PUT /v1/rfqs/{id}/quotations/mine': putQuotationSchema,
+  'POST /v1/rfqs/{id}/quotations/mine/withdraw': withdrawQuotationSchema,
 };
 
 /**
@@ -113,7 +118,11 @@ const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
  * The commands that ask another service before they write, fail closed (ADR-070 § 7): issuing an
  * RFQ asks supplier-service for each invitee's standing (and needs a configured KEK).
  */
-const UPSTREAM_COMMANDS: ReadonlySet<string> = new Set(['POST /v1/aggregations/{id}/rfq']);
+const UPSTREAM_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/aggregations/{id}/rfq',
+  // A quotation asks for the supplier's own standing (plan PR 8), and needs a configured KEK.
+  'PUT /v1/rfqs/{id}/quotations/mine',
+]);
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
 const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
@@ -123,6 +132,8 @@ const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/aggregations/{id}/rfq': 'rfqIssue',
   'POST /v1/rfqs/{id}/close': 'rfqClose',
   'POST /v1/rfqs/{id}/cancel': 'rfqCancellation',
+  'PUT /v1/rfqs/{id}/quotations/mine': 'quotation',
+  'POST /v1/rfqs/{id}/quotations/mine/withdraw': 'quotation',
 };
 
 /** `Retry-After` on a command's in-flight 409: optional, only that 409 carries it. */
@@ -169,12 +180,20 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/rfqs': listRfqsQuerySchema,
 };
 
+/** The replay fence's header, as every keyed command reads it (FU-156, PM decision D-125). */
+const REPLAY_DEADLINE_DESCRIPTION =
+  'Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. ' +
+  "Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. " +
+  'Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. ' +
+  'A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. ' +
+  'A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.';
+
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
-  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
+  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.',
   404: 'Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.',
-  409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.',
+  409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.',
   422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE).',
   500: 'Unexpected server error.',
   503: 'A service this command must ask first, fail closed, is unavailable, and nothing is written (UPSTREAM_UNAVAILABLE): supplier-service, for an invitee’s standing — unreachable, or answering anything but its contract — or no key-encryption key configured (PROCUREMENT_RFQ_KEKS) to wrap the RFQ’s sealing key.',
@@ -225,11 +244,13 @@ export function buildProcurementOpenApiDocument(app: INestApplication): OpenAPIO
     AggregationController,
     AggregationRfqController,
     RfqController,
+    QuotationController,
     AggregationSettingController,
   ],
   providers: [
     { provide: DemandService, useValue: {} },
     { provide: RfqService, useValue: {} },
+    { provide: QuotationService, useValue: {} },
     { provide: AggregationSettingService, useValue: {} },
     { provide: IdempotencyStore, useValue: {} },
   ],
@@ -276,7 +297,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       if (idempotent) {
         // Nest's `@ApiHeader` has no schema; replaced with the truth: required, bounded.
         operation.parameters = operation.parameters.filter(
-          (parameter) => !isHeader(parameter, 'idempotency-key'),
+          (parameter) =>
+            !isHeader(parameter, 'idempotency-key') &&
+            !isHeader(parameter, 'idempotency-replay-deadline'),
         );
         operation.parameters.push({
           name: 'Idempotency-Key',
@@ -285,6 +308,14 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           description:
             'Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for PROCUREMENT_IDEMPOTENCY_TTL_HOURS (24 by default).',
           schema: { type: 'string', minLength: 8, maxLength: 255 },
+        });
+        // FU-156: every keyed command reads it, through the one store (`shared/idempotency.ts`).
+        operation.parameters.push({
+          name: 'Idempotency-Replay-Deadline',
+          in: 'header',
+          required: false,
+          description: REPLAY_DEADLINE_DESCRIPTION,
+          schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
         });
       }
 
@@ -380,42 +411,14 @@ function isOperation(value: unknown): value is MutableOperation {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
   return Object.entries(shape).map(([name, member]) => ({
     name,
     in: 'query',
-    required: !member.isOptional(),
+    required: !isOptionalField(member),
     schema: toJsonSchema(member),
   }));
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodEffects ||
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current =
-        typeName === z.ZodFirstPartyTypeKind.ZodEffects
-          ? current._def.schema
-          : current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

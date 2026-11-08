@@ -60,6 +60,18 @@ const uncommented = (text) =>
     .map((line) => line.replace(/(^|\s)#.*$/, ''))
     .join('\n');
 
+/**
+ * How a problem names `KAFKA_SASL_PASSWORD_<stem>`: by name when the stem is a
+ * known principal's — a service's, a bootstrap-only one or a tool's — and as a
+ * placeholder otherwise, since that name came from the file read (#385 r4).
+ */
+function passwordNameShown(stem, services) {
+  const known = new Set([...services.map(serviceStem), ...BOOTSTRAP_ONLY, ...TOOLS]);
+  return known.has(stem)
+    ? `KAFKA_SASL_PASSWORD_${stem}`
+    : 'a KAFKA_SASL_PASSWORD_* named for no known principal';
+}
+
 /** Problems in `.env.example`: any Kafka password it assigns that is not a service's own. */
 export function checkEnvExample(text, services) {
   const allowed = new Set(services.map(serviceStem));
@@ -68,7 +80,7 @@ export function checkEnvExample(text, services) {
     const match = /^\s*KAFKA_SASL_PASSWORD_([A-Z0-9_]+)\s*=/.exec(line);
     if (match && !allowed.has(match[1])) {
       problems.push(
-        `.env.example assigns KAFKA_SASL_PASSWORD_${match[1]}, which is not a service's own`,
+        `.env.example assigns ${passwordNameShown(match[1], services)}, which is not a service's own`,
       );
     }
   }
@@ -90,12 +102,23 @@ export function checkLocalEnv(text, services) {
     const match = /^\s*(?:export\s+)?KAFKA_SASL_PASSWORD_([A-Z0-9_]+)\s*=/.exec(line);
     if (match && !allowed.has(match[1])) {
       problems.push(
-        `.env assigns KAFKA_SASL_PASSWORD_${match[1]}, which is not a service's own and which every ` +
+        `.env assigns ${passwordNameShown(match[1], services)}, which is not a service's own and which every ` +
           'service would load; bootstrap-only credentials belong in infrastructure/docker/kafka/bootstrap.env',
       );
     }
   }
   return problems;
+}
+
+/** The stems a bootstrap problem names: the known ones, and a count of the rest (#385 r4). */
+function assignedShown(assigned) {
+  const known = new Set([...BOOTSTRAP_ONLY, ...TOOLS]);
+  const named = assigned.filter((stem) => known.has(stem));
+  const others = assigned.length - named.length;
+  return [
+    ...named,
+    ...(others > 0 ? [`${others} other(s) named for no known principal`] : []),
+  ].join(', ');
 }
 
 /** Problems in the bootstrap example: it must hold exactly the bootstrap-only credentials. */
@@ -106,7 +129,7 @@ export function checkBootstrapExample(text) {
   return JSON.stringify([...assigned].sort()) === JSON.stringify([...BOOTSTRAP_ONLY].sort())
     ? []
     : [
-        `bootstrap.env.example must assign exactly ${BOOTSTRAP_ONLY.join(', ')}; it assigns ${assigned.join(', ') || 'nothing'}`,
+        `bootstrap.env.example must assign exactly ${BOOTSTRAP_ONLY.join(', ')}; it assigns ${assignedShown(assigned) || 'nothing'}`,
       ];
 }
 

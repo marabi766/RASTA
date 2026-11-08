@@ -177,7 +177,7 @@ export const calibrationStressId = (pair) => `pair-${pair}-stress`;
  */
 export function planCalibrationRun({ pairs } = {}) {
   if (typeof pairs !== 'number' || !Number.isInteger(pairs)) {
-    throw new Error(`calibration pairs must be an integer, got ${JSON.stringify(pairs)}`);
+    throw new Error('calibration pairs must be an integer');
   }
   if (pairs < MIN_CALIBRATION_PAIRS || pairs > MAX_CALIBRATION_PAIRS) {
     throw new Error(
@@ -271,7 +271,8 @@ export function parseEvidenceArgs(argv) {
       slotRaw = arg.slice('--slot='.length);
       if (slotRaw === '') return fail('--slot needs a value');
     } else if (arg.startsWith('-')) {
-      return fail(`unknown option ${JSON.stringify(arg)}`);
+      // Not repeated: only an option that matched is ever echoed (#385 r6).
+      return fail(`unknown option at position ${i + 1}; it is not repeated`);
     } else {
       positional.push(arg);
     }
@@ -288,12 +289,12 @@ export function parseEvidenceArgs(argv) {
   }
   if (pairsRaw === null) return fail('--calibrate requires --pairs');
   if (!/^\d+$/.test(pairsRaw)) {
-    return fail(`--pairs must be a positive integer, got ${JSON.stringify(pairsRaw)}`);
+    return fail('--pairs must be a positive integer; its value is not repeated');
   }
   const pairs = Number(pairsRaw);
   if (pairs < MIN_CALIBRATION_PAIRS || pairs > MAX_CALIBRATION_PAIRS) {
     return fail(
-      `--pairs must be between ${MIN_CALIBRATION_PAIRS} and ${MAX_CALIBRATION_PAIRS}, got ${pairs}`,
+      `--pairs must be between ${MIN_CALIBRATION_PAIRS} and ${MAX_CALIBRATION_PAIRS}; its value is not repeated`,
     );
   }
   if (slotRaw === null) return fail('--calibrate requires --slot');
@@ -301,10 +302,10 @@ export function parseEvidenceArgs(argv) {
   // rather than read, and so is a leading zero — `07` and `7` must not both be
   // spellings of one slot in a recorded invocation.
   if (!/^\d+$/.test(slotRaw)) {
-    return fail(`--slot must be a positive integer, got ${JSON.stringify(slotRaw)}`);
+    return fail('--slot must be a positive integer; its value is not repeated');
   }
   if (/^0\d/.test(slotRaw)) {
-    return fail(`--slot must not have a leading zero, got ${JSON.stringify(slotRaw)}`);
+    return fail('--slot must not have a leading zero; its value is not repeated');
   }
   const slot = Number(slotRaw);
   if (!isCampaignSlot(slot)) {

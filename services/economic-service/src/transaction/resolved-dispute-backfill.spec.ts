@@ -47,7 +47,9 @@ describe('parseResolvedDisputeBackfillArgs', () => {
     [['--lock-timeout-ms', '99'], /100..10000/],
     [['--max-batches'], /--max-batches needs a value/],
     [['--after', '--apply'], /--after needs a value/],
-    [['--dry'], /Unknown option --dry/],
+    // Not repeated (#385 r6): only an option that matched is echoed.
+    [['--dry'], /^Unknown option at position 1; it is not repeated$/],
+    [['constructor', '1'], /^Unknown option at position 1; it is not repeated$/],
   ])('refuses %j', (argv, message) => {
     expect(() => parseResolvedDisputeBackfillArgs(argv)).toThrow(message);
   });

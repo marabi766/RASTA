@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { refusedBeforeSending } from '@rasta/config';
 import { z } from 'zod';
 
+import { credentialFetch } from './credential-fetch';
+import { credentialHeaders, type GatewayCredential } from './session-organization';
 import { MAX_REQUEST_TIMEOUT_MS } from './unresolved-request-policy';
 
 /**
@@ -68,7 +71,8 @@ export class GatewayRequestError extends Error {
 /**
  * The request may have reached the platform, but no answer it could be judged
  * by came back: the connection failed after it was opened, this portal's own
- * deadline passed, or a 2xx arrived whose body would not parse.
+ * deadline passed, a redirect was refused (`credentialFetch`), or a 2xx
+ * arrived whose body would not parse.
  *
  * A read treats it like any other unavailable gateway — it still *is* a
  * `GatewayRequestError`, with the status it always had. A write must not
@@ -90,7 +94,8 @@ export class GatewayOutcomeUnknownError extends GatewayRequestError {
 
 /**
  * The request provably never left this portal (connection refused, DNS failure
- * …, see `neverSent`): nothing reached the platform, so nothing happened. A
+ * …, see `neverSent`; or the transport refused an altered runtime before
+ * sending, `refusedBeforeSending`): nothing reached the platform, so nothing happened. A
  * `GatewayRequestError` with status 503 as before — every reader treats it so —
  * but a write can tell it from a 503 that came back from the platform, which
  * may follow a commit (`write.ts` carries it as `neverSent`).
@@ -150,7 +155,16 @@ export function gatewayUrl(baseUrl: string, path: string): string {
 export interface GatewayCall {
   readonly baseUrl: string;
   readonly path: string;
-  readonly accessToken: string;
+  /**
+   * The bearer **and** the organization this call acts for, minted from the
+   * session by `tenantCredential` (or, for the person's own record only,
+   * `personalCredential`) in `session-organization.ts` — never a bare token.
+   * Sent as `Authorization` and `X-Organization-Id`, so the guard acts for the
+   * organization the session is pinned to and refuses the call if the token
+   * no longer grants it; it is never answered for the token's active
+   * organization instead (audit F2, task 118).
+   */
+  readonly credential: GatewayCredential;
   readonly method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   readonly body?: unknown;
   /** Reused when the caller already has one; a fresh one otherwise. */
@@ -191,6 +205,66 @@ export interface GatewayResponse<T> {
   readonly correlationId: string;
 }
 
+const REQUEST_PROPERTIES = new Set([
+  'baseUrl',
+  'path',
+  'credential',
+  'method',
+  'body',
+  'correlationId',
+  'idempotencyKey',
+  'replayDeadline',
+  'fetchImpl',
+  'timeoutMs',
+]);
+const WRITE_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const FIELD_TYPES = [
+  ['correlationId', 'string'],
+  ['idempotencyKey', 'string'],
+  ['replayDeadline', 'number'],
+  ['timeoutMs', 'number'],
+  ['fetchImpl', 'function'],
+] as const;
+/** What only a write may carry, even as `undefined`. */
+const WRITE_PROPERTIES = ['body', 'idempotencyKey', 'replayDeadline'] as const;
+
+/**
+ * The request as one snapshot of its own data properties, taken before anything reads it
+ * (FU-219): a getter, a proxy trap that runs later, an inherited or unknown property is refused, so
+ * nothing the caller's object does can change the method after this decides it. A read is GET with
+ * no body, idempotency key or replay deadline (not even `undefined`); a write names its method.
+ */
+function snapshotRequest(input: GatewayCall, write: boolean): GatewayCall {
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  if (Object.getOwnPropertySymbols(descriptors).length > 0)
+    throw new Error('unclassified gateway request property');
+  for (const key of Object.getOwnPropertyNames(descriptors)) {
+    if (!REQUEST_PROPERTIES.has(key)) throw new Error('unclassified gateway request property');
+    const descriptor = descriptors[key]!;
+    if (!Object.hasOwn(descriptor, 'value'))
+      throw new Error('gateway request needs own data properties');
+    snapshot[key] = descriptor.value;
+  }
+  if (
+    typeof snapshot.baseUrl !== 'string' ||
+    typeof snapshot.path !== 'string' ||
+    !Object.hasOwn(snapshot, 'credential')
+  )
+    throw new Error('gateway request needs own data properties');
+  // What reaches a header or the deadline is a primitive of its type, so no caller code runs later.
+  for (const [key, type] of FIELD_TYPES)
+    if (snapshot[key] !== undefined && typeof snapshot[key] !== type)
+      throw new Error(`gateway request ${key} must be a ${type}`);
+  const method = snapshot.method ?? 'GET';
+  if (write ? !WRITE_METHODS.has(method as string) : method !== 'GET')
+    throw new Error(write ? 'gateway write needs a write method' : 'gateway read sends only GET');
+  if (!write && WRITE_PROPERTIES.some((key) => Object.hasOwn(snapshot, key)))
+    throw new Error('gateway read refuses write properties');
+  snapshot.method = method;
+  return Object.freeze(snapshot) as unknown as GatewayCall;
+}
+
 /**
  * One authenticated call, with the correlation id the platform follows.
  *
@@ -198,8 +272,30 @@ export interface GatewayResponse<T> {
  * two people's requests is the worst bug this file could have, and opting out
  * once here is cheaper than remembering it at every call site.
  */
-export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
+export async function callGateway<T>(
+  input: Omit<GatewayCall, 'method' | 'body' | 'idempotencyKey' | 'replayDeadline'> & {
+    readonly method?: 'GET';
+  },
+): Promise<GatewayResponse<T>> {
+  return exchangeGateway<T>(snapshotRequest(input, false));
+}
+
+/**
+ * Only write.ts may import this entry, enforced by the write-classifier guard (named import,
+ * called, never handed on). The limit is static on purpose: a module gives a function no
+ * identity for its importer, so a run-time check could prove only that one module holds it.
+ */
+export async function callGatewayWrite<T>(input: GatewayCall): Promise<GatewayResponse<T>> {
+  return exchangeGateway<T>(snapshotRequest(input, true));
+}
+
+async function exchangeGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
+  // Decide from the snapshot before URL coercion, credential checks or body serialization.
+  const method = call.method;
   const url = gatewayUrl(call.baseUrl, call.path);
+  // Before anything else: a credential this portal did not mint is refused
+  // here, not sent.
+  const identity = credentialHeaders(call.credential);
   if (
     call.replayDeadline !== undefined &&
     (call.idempotencyKey === undefined ||
@@ -209,26 +305,33 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     throw new Error('a replay deadline needs an idempotency key and a positive safe integer');
   }
   const correlationId = call.correlationId ?? randomUUID();
-  const fetchImpl = call.fetchImpl ?? fetch;
+  // Absent: credentialFetch's own fetch, the only raw one (Q-155 boundary).
+  const fetchImpl = call.fetchImpl;
 
   let response: Response;
   try {
-    response = await fetchImpl(url, {
-      method: call.method ?? 'GET',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${call.accessToken}`,
-        'x-correlation-id': correlationId,
-        ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
-        ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
-        ...(call.replayDeadline === undefined
-          ? {}
-          : { 'idempotency-replay-deadline': String(call.replayDeadline) }),
+    // Never follows a redirect: the bearer token, and a write's key and body,
+    // are sent to this URL once and nowhere else (Q-155).
+    response = await credentialFetch(
+      url,
+      {
+        method,
+        headers: {
+          accept: 'application/json',
+          ...identity,
+          'x-correlation-id': correlationId,
+          ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
+          ...(call.replayDeadline === undefined
+            ? {}
+            : { 'idempotency-replay-deadline': String(call.replayDeadline) }),
+        },
+        body: call.body === undefined ? undefined : JSON.stringify(call.body),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
       },
-      body: call.body === undefined ? undefined : JSON.stringify(call.body),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
-    });
+      fetchImpl,
+    );
   } catch (error) {
     // A refused connection, a DNS failure, a reset, or this function's own
     // timeout above all reject `fetch` rather than answering it, and none of
@@ -237,8 +340,14 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     // failure as one here — rather than in each of those modules — is what
     // makes that mapping actually total (`docs/16 § ۱۶٫۱۱`). Only a failure
     // before anything was sent is a plain one; after that, whether the
-    // platform acted is unknown.
-    if (neverSent(error)) throw new GatewayNeverSentError(correlationId);
+    // platform acted is unknown. A refused redirect is one of those: the
+    // request was sent and answered with a 3xx that says nothing about whether
+    // it was applied, so a write it answered is unconfirmed, never `neverSent`.
+    // The transport's own refusal of an altered runtime (FU-249) is thrown
+    // before it sends, so it is never-sent too — never an unknown outcome that
+    // would hold a write nobody sent.
+    if (refusedBeforeSending(error) || neverSent(error))
+      throw new GatewayNeverSentError(correlationId);
     throw new GatewayOutcomeUnknownError(503, correlationId, 'TRANSPORT');
   }
 

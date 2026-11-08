@@ -1,15 +1,21 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { ModulesContainer, NestFactory, Reflector } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { apiErrorSchema as sharedApiErrorSchema } from '@rasta/contracts';
 import {
   tenderApprovalRequestViewSchema,
   listTenderApprovalsQuerySchema,
 } from '../tender/tender-approval.dto';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
-import { toJsonSchema } from './zod-schema';
+import {
+  ALLOW_SERVICE_KEY,
+  publishedApiErrorSchema as apiErrorSchema,
+  isOptionalField,
+  objectShapeOf,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  toJsonSchema,
+} from '@rasta/nest-common';
 import type { RefusalArea } from '../shared/refusal';
 import { thresholdPreviewSchema } from '../tender/procurement-thresholds';
 import { PUBLICATION_REFUSALS, type PublicationRefusal } from '../tender/publication';
@@ -18,6 +24,8 @@ import type { OpeningRefusal } from '../tender/tender-open.service';
 import type { EvaluationRefusal } from '../tender/evaluation.service';
 import { AWARD_REFUSALS, type AwardRefusal } from '../tender/award.service';
 import type { TenderApprovalRefusal } from '../tender/tender-approval.errors';
+import { InternalProjectController } from '../project/internal-project.controller';
+import { ProjectCompletionService, projectCompletionFactSchema } from '../project/completion-fact';
 import { ProjectController } from '../project/project.controller';
 import { ProjectService } from '../project/project.service';
 import { NeedService } from '../project/need.service';
@@ -144,7 +152,7 @@ import {
  *   - the same suite provokes every documented status against the real API.
  *
  * Payload shapes come from the Zod schemas the pipes validate with
- * (`src/project/dto.ts`), converted by `zod-schema.ts`; Nest supplies paths,
+ * (`src/project/dto.ts`), converted by `toJsonSchema`; Nest supplies paths,
  * methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/construction-service openapi:generate`.
@@ -152,20 +160,6 @@ import {
 
 /** Pinned so the committed document is deterministic. */
 export const CONTRACT_VERSION = '0.1.0';
-
-const errorDetailSchema = z
-  .object({ path: z.string(), message: z.string(), code: z.string().optional() })
-  .strict();
-
-/**
- * The platform error envelope exactly as `AllExceptionsFilter` emits it: `correlationId` and
- * `timestamp` always, `traceId` and `path` when the request context has them, `details` only when
- * non-empty. Taken from the shared schema so the two cannot drift; only `details` and strictness are
- * construction's own.
- */
-const apiErrorSchema = sharedApiErrorSchema
-  .extend({ details: z.array(errorDetailSchema).optional() })
-  .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>
   z
@@ -192,6 +186,10 @@ export const RESPONSE_BODIES: Record<
 > = {
   'POST /v1/projects': { status: '201', schema: projectViewSchema },
   'GET /v1/projects': { status: '200', schema: cursorPageOf(projectSummaryViewSchema) },
+  'GET /v1/internal/projects/{id}/completion': {
+    status: '200',
+    schema: projectCompletionFactSchema,
+  },
   'GET /v1/projects/{id}': { status: '200', schema: projectViewSchema },
   'PATCH /v1/projects/{id}': { status: '200', schema: projectViewSchema },
   'POST /v1/projects/{id}/cancel': { status: '200', schema: projectViewSchema },
@@ -377,6 +375,7 @@ const IDEMPOTENT = new Set([
 const VERSIONED = new Set([
   'PATCH /v1/projects/{id}',
   'POST /v1/projects/{id}/cancel',
+  'POST /v1/projects/{id}/needs',
   'PATCH /v1/projects/{id}/needs/{needId}',
   'POST /v1/projects/{id}/needs/{needId}/submit',
   'POST /v1/projects/{id}/needs/{needId}/withdraw',
@@ -701,7 +700,7 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR). A user token without `rasta_uid` (the platform user id) on a route that records or compares who acted — proposing, approving or withdrawing a bid opening; creating, submitting or approving an approval policy; creating or publishing a tender; deciding on, scoring, standing down from or completing the evaluation of bids — is 403 with a fixed message (#188). On evaluation, a person who stood down from the bid under another user id (RECUSED) or already evaluates it under another user id (SAME_PERSON_AS_EVALUATOR) — one person is one evaluator. Approval gates of a tender (CON-002 PR 11): deciding a tender approval as the person who made the request (separation of duties through the shared helper; the same person under two user ids or another issuer is one person); on an award approval, a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST — also on reading it), and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (APPROVER_IS_EVALUATOR). Refusals on the caller’s own tender are audited in the tender approval log.',
   404: 'Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed. On the owner’s side of a tender’s bids and its evaluation, ownership is checked before any role: another organization’s caller gets this 404 whatever roles it holds (#223 F3).',
-  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.',
+  409: 'Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.',
   422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished; opening the bids of a tender that is not CLOSED (NOT_CLOSED), reading one that is not opened (NOT_OPENED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY) — nothing is opened; evaluating (ADR-067): a tender that is not EVALUATING (NOT_EVALUATING), a bid not in the state the command needs (BID_NOT_OPENED, BID_NOT_QUALIFIED, BID_NOT_EVALUABLE), a second and different decision on a bid (BID_ALREADY_DECIDED), a qualification of a contractor supplier-service no longer finds eligible (BIDDER_NOT_ELIGIBLE), a criterion the tender does not have (UNKNOWN_CRITERION), a score outside what the criterion allows (SCORE_OUT_OF_RANGE), more evaluators than CONSTRUCTION_EVALUATION_MAX_EVALUATORS (EVALUATOR_LIMIT), completing with no qualified bid (NO_QUALIFIED_BID) or with one not scored in full or an opened bid undecided (EVALUATION_INCOMPLETE). ACTOR_IDENTITY_UNKNOWN (#188): a separation of duties cannot be proven because a record names no stable identity (written before issuer and subject were recorded, or under another issuer) — the bid-opening proposer, a policy’s author or submitter, a tender’s creator or publisher, or another evaluator of the bid; never treated as another person. Awarding (ADR-067 § 3): a tender that is not EVALUATED (NOT_EVALUATED), a bid that is not a qualified one of it (BID_NOT_QUALIFIED), a choice of any rank but the single first without a justification (JUSTIFICATION_REQUIRED), a winner supplier-service no longer finds eligible (WINNER_NOT_ELIGIBLE — nothing falls back to the next rank), an awarder the records cannot show to be a different person from the evaluators (ACTOR_IDENTITY_UNKNOWN), the approval gate (APPROVAL_POLICY_REQUIRED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY). Approval gates of a tender (CON-002 PR 11): publishing, awarding or cancelling with no active approval policy for the workflow, or one with no step that applies (APPROVAL_POLICY_REQUIRED — the platform never approves by default); a request whose maker cannot be told from its approver, or an approver of an award who cannot be told from the evaluators (ACTOR_IDENTITY_UNKNOWN); cancelling with the reason code NO_QUALIFIED_BID when the tender is not EVALUATING with no qualified bid (REASON_CODE_NOT_APPLICABLE).',
   500: 'Unexpected server error.',
   503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066). Opening or reading bids: audit-service, which holds the receipt chain and its head, is unreachable or has not yet received the newest receipts, or the key-encryption key is not available — never answered from this service’s own copy of the chain (ADR-066 § 2). Evaluating bids: identity-service, which says who the caller is now, or — for a qualification — supplier-service, which says whether the contractor is still eligible, cannot be reached; nothing is done (fail closed). A contractor reading its own opened bid: audit-service or the key-encryption key as for the owner. Awarding: identity-service, supplier-service (the winner’s standing now), audit-service or the key-encryption key cannot be reached; nothing is awarded.',
@@ -725,6 +724,72 @@ const DESCRIPTION =
   'publication, bids and evaluation follow, and the planned surface is in ' +
   'docs/api/construction-service.tender.planned.openapi.json.';
 
+/**
+ * Every route carrying `@AllowService`, and what else is true of it that no decorator states.
+ * `users`: whether a user (bearer) token may also call it — `refused` is enforced in the
+ * service (`completion-fact.ts`), not by the guard. The token requirement itself is derived
+ * from the decorator (FU-008); this table only completes it, and the generator refuses to run
+ * when a route has `@AllowService` but no entry here, or an entry but no `@AllowService`.
+ */
+export const SERVICE_ROUTES: Record<
+  string,
+  {
+    users: 'accepted' | 'refused';
+    /** Appended to the derived service-token sentence of the 403. */
+    serviceNote?: string;
+    /** A status's text replaced (`null`: not documented on this route). */
+    errors?: Partial<Record<string, string | null>>;
+  }
+> = {
+  'GET /v1/internal/projects/{id}/completion': {
+    users: 'refused',
+    serviceNote: 'A service token signed for no tenant is SERVICE_TENANT_CONTEXT_INVALID as well.',
+    errors: {
+      400: null,
+      404: 'Project not found in the signed tenant; the same response for missing and other-tenant projects.',
+    },
+  },
+  'GET /v1/tenders/{id}/award': { users: 'accepted' },
+};
+
+/**
+ * `operationId` → the services its handler's `@AllowService` admits (`undefined`: none), read
+ * with the same precedence as `AuthGuard` (handler over class). Fails closed: an operation whose
+ * handler cannot be found, or an empty allowlist (which admits every service), throws.
+ */
+export function serviceCallersByOperation(
+  app: INestApplication,
+  operationIds: readonly string[],
+): Map<string, readonly string[] | undefined> {
+  type Target = Parameters<Reflector['getAllAndOverride']>[1][number];
+  const handlers = new Map<string, [Target, Target]>();
+  for (const nestModule of app.get(ModulesContainer).values()) {
+    for (const { metatype } of nestModule.controllers.values()) {
+      if (typeof metatype !== 'function') continue;
+      for (const name of Object.getOwnPropertyNames(metatype.prototype)) {
+        const handler: unknown = metatype.prototype[name];
+        if (name === 'constructor' || typeof handler !== 'function') continue;
+        const id = `${metatype.name}_${name}`;
+        const seen = handlers.get(id);
+        if (seen && seen[0] !== handler) throw new Error(`OpenAPI: two handlers named ${id}`);
+        handlers.set(id, [handler, metatype]);
+      }
+    }
+  }
+  const reflector = new Reflector();
+  const result = new Map<string, readonly string[] | undefined>();
+  for (const operationId of operationIds) {
+    const found = handlers.get(operationId.replace(/_v\d+$/, ''));
+    if (!found) throw new Error(`OpenAPI: no handler found for operation ${operationId}`);
+    const allowed = reflector.getAllAndOverride<string[] | undefined>(ALLOW_SERVICE_KEY, found);
+    if (allowed?.length === 0) {
+      throw new Error(`OpenAPI: ${operationId} has an empty @AllowService; name its callers`);
+    }
+    result.set(operationId, allowed);
+  }
+  return result;
+}
+
 /** Builds the finished document for a booted application. */
 export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPIObject {
   const document = SwaggerModule.createDocument(
@@ -734,9 +799,17 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
       .setDescription(DESCRIPTION)
       .setVersion(CONTRACT_VERSION)
       .addBearerAuth()
+      .addApiKey({ type: 'apiKey', in: 'header', name: 'X-Internal-Token' }, 'internalToken')
       .build(),
   );
-  return enrichOpenApiDocument(document);
+  const operationIds = Object.values(document.paths ?? {}).flatMap((item) =>
+    Object.values(item).flatMap((operation) =>
+      isOperation(operation) && typeof operation.operationId === 'string'
+        ? [operation.operationId]
+        : [],
+    ),
+  );
+  return enrichOpenApiDocument(document, serviceCallersByOperation(app, operationIds));
 }
 
 /**
@@ -746,6 +819,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
 @Module({
   controllers: [
     ProjectController,
+    InternalProjectController,
     ProjectLifecycleController,
     PolicyController,
     ApprovalController,
@@ -767,6 +841,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     { provide: AwardService, useValue: {} },
     { provide: TenderApprovalService, useValue: {} },
     { provide: ProjectService, useValue: {} },
+    { provide: ProjectCompletionService, useValue: {} },
     { provide: TenderService, useValue: {} },
     { provide: CriteriaService, useValue: {} },
     { provide: NeedService, useValue: {} },
@@ -785,7 +860,10 @@ export async function buildDocumentationApp(): Promise<INestApplication> {
   return app;
 }
 
-export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
+export function enrichOpenApiDocument(
+  document: OpenAPIObject,
+  serviceCallers: ReadonlyMap<string, readonly string[] | undefined>,
+): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
@@ -796,9 +874,29 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
+      // From the handler's `@AllowService`, never from the path (FU-008). Unknown ⇒ throw.
+      const id = operation.operationId;
+      if (typeof id !== 'string' || !serviceCallers.has(id)) {
+        throw new Error(`OpenAPI: ${key} has no reflected @AllowService metadata`);
+      }
+      const services = serviceCallers.get(id);
+      const serviceRoute = SERVICE_ROUTES[key];
+      if ((services === undefined) !== (serviceRoute === undefined)) {
+        throw new Error(`OpenAPI: ${key} and SERVICE_ROUTES disagree about @AllowService`);
+      }
       // `addBearerAuth()` declares the scheme; it does not apply it. Without
-      // this the contract would describe endpoints anybody can call.
-      operation.security ??= [{ bearer: [] }];
+      // this the contract would describe endpoints anybody can call. Assigned, not
+      // defaulted: a Swagger decorator never outranks the guard's own metadata.
+      operation.security = [
+        ...(serviceRoute?.users === 'refused' ? [] : [{ bearer: [] }]),
+        ...(services ? [{ internalToken: [] }] : []),
+      ];
+      const serviceRefusal = services
+        ? `${serviceRoute?.users === 'refused' ? 'Every user token is refused. ' : ''}` +
+          `A service token is accepted only from ${services.join(', ')}; any other service is refused. ` +
+          'An X-Organization-Id that differs from the signed tenant is SERVICE_TENANT_CONTEXT_INVALID.' +
+          (serviceRoute?.serviceNote ? ` ${serviceRoute.serviceNote}` : '')
+        : undefined;
 
       // The header is read with `@Headers`, which Nest documents as a required
       // parameter with no schema. Replaced with the truth: optional, bounded.
@@ -819,7 +917,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           schema: toJsonSchema(z.string().min(1).max(255)),
         });
       }
-      if (key === 'POST /v1/projects') {
+      if (key === 'POST /v1/projects' || key === 'POST /v1/projects/{id}/needs') {
         operation.parameters.push({
           name: 'Idempotency-Replay-Deadline',
           in: 'header',
@@ -828,7 +926,10 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
             'Optional; only with an Idempotency-Key (otherwise 400 VALIDATION_FAILED, as for any value that is not one canonical integer: no sign, no leading zero, no space, once). ' +
             'The last instant, in milliseconds since the epoch, this request may be executed under its key. ' +
             'A value later than claim time + retention − B on the receiving replica (B = 2 · CONSTRUCTION_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message): nothing is written, and the answer depends on nothing stored. It is never clamped. Otherwise the first claim stores the value as sent. ' +
-            'The portal and this service are bound to one constant, PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts), and refuse to start when their own settings break it, so a conforming client does not meet the refusal. ' +
+            (key === 'POST /v1/projects'
+              ? 'The portal and this service are bound to one constant, PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts), and refuse to start when their own settings break it, so a conforming client does not meet the refusal. '
+              : '') +
+            'Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. ' +
             'A stored record is forgotten (reclaimed or purged) only when its expiry is more than B in the past; another requester or body meets IDEMPOTENCY_KEY_REUSED until then. ' +
             "Past the stored deadline on this service's clock, the same request is refused with 409 REPLAY_WINDOW_CLOSED before anything is written: that attempt did nothing, an earlier one under the key may have. " +
             "A first claim whose value is already behind this service's clock is refused the same way. A request without the header, and a record written before the deadline existed, behave as before (an expired key is reusable).",
@@ -870,6 +971,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       }
 
       for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {
+        const override = serviceRoute?.errors?.[status];
+        if (override === null) continue;
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
         if (
@@ -891,7 +994,13 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           continue;
         }
         operation.responses[status] ??= {
-          description,
+          description:
+            override ??
+            (status === '403' && serviceRefusal
+              ? serviceRoute?.users === 'refused'
+                ? serviceRefusal
+                : `${description} On this route, unlike the rest, service tokens are not all refused: ${serviceRefusal}`
+              : description),
           ...(status === '409' && IDEMPOTENT.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
@@ -950,6 +1059,7 @@ export function formatDocument(document: OpenAPIObject, filePath: string): strin
 interface MutableOperation {
   requestBody?: unknown;
   parameters?: unknown[];
+  operationId?: string;
   responses?: Record<string, unknown>;
   security?: Record<string, string[]>[];
 }
@@ -967,42 +1077,14 @@ function isHeader(value: unknown, name: string): boolean {
   );
 }
 
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
   return Object.entries(shape).map(([name, member]) => ({
     name,
     in: 'query',
-    required: !member.isOptional(),
+    required: !isOptionalField(member),
     schema: toJsonSchema(member),
   }));
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodEffects ||
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current =
-        typeName === z.ZodFirstPartyTypeKind.ZodEffects
-          ? current._def.schema
-          : current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import {
+  DLQ_REASONS,
+  type EventEnvelope,
+  isoDateTime,
+  legacyParse,
+  requireLegacyRefusal,
+  type LegacyRefusal,
+} from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 
 /**
@@ -80,7 +87,7 @@ export const CONTRACT_REFUSAL_REASONS = [
 export const CONTRACT_REFUSAL_SIDES = ['EMPLOYER', 'CONTRACTOR', 'APPROVER'] as const;
 
 const id = z.string().min(1).max(128);
-const instant = z.string().datetime({ offset: true });
+const instant = z.string().check(isoDateTime({ offset: true }));
 
 const authorityRefused = z
   .object({
@@ -138,25 +145,30 @@ export function toContractRefusalProjection(
 ): ContractRefusalProjection | null {
   if (delivery.topic !== CONTRACT_TOPIC) return null;
   if (envelope.eventName === CONTRACT_REFUSAL_EVENTS.AUTHORITY) {
-    const parsed = authorityRefused.safeParse(envelope.payload);
-    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.error);
+    const parsed = legacyParse(authorityRefused, envelope.payload);
+    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.refusal);
     return { action: parsed.data.action, reason: parsed.data.reason };
   }
   if (envelope.eventName === CONTRACT_REFUSAL_EVENTS.SIGNATURE) {
-    const parsed = signatureRefused.safeParse(envelope.payload);
-    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.error);
+    const parsed = legacyParse(signatureRefused, envelope.payload);
+    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.refusal);
     return { action: 'SIGN_CONTRACT', reason: parsed.data.reason };
   }
   if (envelope.eventName === CONTRACT_REFUSAL_EVENTS.POLICY_APPROVAL) {
-    const parsed = policyApprovalRefused.safeParse(envelope.payload);
-    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.error);
+    const parsed = legacyParse(policyApprovalRefused, envelope.payload);
+    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.refusal);
     return { action: POLICY_APPROVAL_ACTION, reason: parsed.data.reason };
   }
   return null;
 }
 
-function unprocessable(eventName: string, error: z.ZodError): UnprocessableEventError {
-  const issues = error.issues.map((issue) => `${issue.path.join('.') || '(root)'}:${issue.code}`);
+/** The dead-letter refusal: schema paths and zod 3 codes only (S-09). Exported for its tests. */
+export function unprocessable(eventName: string, refusal: LegacyRefusal): UnprocessableEventError {
+  // zod 3's codes, which these diagnostics have always carried, translated
+  // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
+  const issues = requireLegacyRefusal(refusal, 'unprocessable').issues.map(
+    (issue) => `${issue.path.join('.') || '(root)'}:${issue.code}`,
+  );
   return new UnprocessableEventError(
     DLQ_REASONS.VALIDATION_FAILED,
     `${eventName} does not match the contract refusal projection (${issues.join(', ')})`,

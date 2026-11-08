@@ -211,14 +211,14 @@ export function formatFindings(findings) {
 // -----------------------------------------------------------------------------
 // The derived matrix (L7-35)
 //
-// Since images are built on pull requests too, the `containers` matrix is no
-// longer a list in the workflow: it is the output of the `container-scope`
-// job, which runs `scripts/container-scope.mjs` — every services/*/Dockerfile
-// on a push to main, the affected ones on a pull request. The guard then has
-// two things to hold: that the matrix really is that output, and that the
-// push-to-main path really asks for all of them (`--all`). What `--all`
-// returns is compared with the git-tracked Dockerfiles exactly as a written
-// list used to be.
+// The `containers` matrix is not a list in the workflow: it is the output of
+// the `container-scope` job, which runs `scripts/container-scope.mjs --run` —
+// every services/*/Dockerfile on a push to main, the affected ones on a
+// merge-train run, none on an ordinary pull request. The guard then has two
+// things to hold: that the matrix really is that output, and that the
+// push-to-main run really selects all of them. `deriveAll` is the real
+// script run with a push-to-main environment; its answer is compared with the
+// git-tracked Dockerfiles exactly as a written list used to be.
 // -----------------------------------------------------------------------------
 
 /** The job that decides which images to build. */
@@ -239,24 +239,25 @@ export function matrixIsDerived(workflowYaml, jobName = CONTAINERS_JOB) {
  * The services the `containers` job builds on a push to main.
  *
  * A written list is parsed as before. A derived matrix is resolved with
- * `deriveAll` — the real `container-scope.mjs --all` — after checking that the
- * scope job's push path calls it with `--all`; without that, main could build
- * only what the last commit touched and the guard would not know.
+ * `deriveAll` — the real `container-scope.mjs --run` under a push-to-main
+ * environment — after checking that the scope job calls it with `--run`;
+ * without that, main could build only what the last commit touched and the
+ * guard would not know.
  */
 export function resolveMatrixServices(workflowYaml, deriveAll, jobName = CONTAINERS_JOB) {
   if (!matrixIsDerived(workflowYaml, jobName)) {
     return extractMatrixServices(workflowYaml, jobName);
   }
   const scope = jobBlock(workflowYaml, SCOPE_JOB).map(stripComment).join('\n');
-  if (!/node scripts\/container-scope\.mjs --all/.test(scope)) {
+  if (!/node scripts\/container-scope\.mjs --run/.test(scope)) {
     throw new Error(
       `the '${jobName}' matrix is derived, but the '${SCOPE_JOB}' job never runs ` +
-        '`node scripts/container-scope.mjs --all`, so a push to main would not build every image',
+        '`node scripts/container-scope.mjs --run`, so a push to main would not build every image',
     );
   }
   const services = deriveAll();
   if (!Array.isArray(services) || services.length === 0) {
-    throw new Error(`'container-scope.mjs --all' returned no services`);
+    throw new Error(`'container-scope.mjs --run' returned no services`);
   }
   return services;
 }

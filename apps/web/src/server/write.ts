@@ -1,17 +1,20 @@
 import { createHash } from 'node:crypto';
-import { UNSUPPORTED_CHARACTERS } from '@rasta/contracts';
+import { ERROR_STATUS, UNSUPPORTED_CHARACTERS } from '@rasta/contracts';
 import type { z } from 'zod';
 
 import { toPersianDigits } from '@/lib/format';
 import {
-  callGateway,
+  callGatewayWrite,
   GatewayNeverSentError,
   GatewayOutcomeUnknownError,
   GatewayRequestError,
   type GatewayProblem,
 } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
+import { inheritUnconfirmed } from './unconfirmed-retry';
 import type { WebSession } from './session';
+import { ownValue, ownText } from '@/lib/own-key';
 
 /**
  * Writing through the gateway, and turning every way it can end into
@@ -53,16 +56,29 @@ export type WriteResult<T, F extends string> =
    *  non-disclosure 404. */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
   /**
-   * Refused before it could act: nothing was written. `neverSent` is set when
-   * the request provably never left this portal (connection refused, DNS …):
-   * unlike a 503 the platform answered, which may follow a commit, that one is
-   * known not to have reached anything — a write need not remember it as
-   * unresolved.
+   * The write **provably did nothing** in this attempt (FU-189, PR-880 F2;
+   * checklist A1) — the one answer a form may render as "nothing changed":
+   *
+   *   - a refusal the platform proved ({@link isProvenRefusal}: a documented
+   *     `4xx` code answered with its own status) that no kind above names —
+   *     `429 RATE_LIMIT_EXCEEDED`, `401`, `409 REPLAY_WINDOW_CLOSED` …;
+   *   - `neverSent`: the request provably never left this portal (connection
+   *     refused, DNS …), so it reached nothing.
+   *
+   * Never a `5xx` the platform answered: a post-commit read can fail, and an
+   * upstream reset after the commit surfaces as `503`, so every such answer is
+   * `UNKNOWN_OUTCOME` — decided here, once, for every caller, so a caller that
+   * maps this kind to "failed, you can resend" is right by construction
+   * (`write-classifier.guard.spec.ts` holds every gateway write to this writer).
    */
   | {
       readonly kind: 'UNAVAILABLE';
       readonly status: number;
       readonly correlationId: string;
+      /**
+       * The platform error `code` (docs/06 § 6.7) of the proven refusal; absent on `neverSent`.
+       */
+      readonly code?: string;
       readonly neverSent?: true;
       /**
        * The owning service refused because the replay deadline this write carried is behind its own
@@ -98,6 +114,22 @@ export type WriteResult<T, F extends string> =
  * the platform sends one second, and a wrong header must not lock a form.
  */
 export const MAX_IN_PROGRESS_WAIT_SECONDS = 30;
+
+/**
+ * Whether a `4xx` answer **proves** that this attempt wrote nothing (PR-830 r1
+ * F1, checklist A1): its body parsed as the platform's error, and its `code` is
+ * one of the platform's documented codes answered with that code's own status
+ * (`ERROR_STATUS`, the one table every service's exception filter answers by).
+ * Everything else — no body, a body that is not the platform's error (a
+ * proxy's or load balancer's page), a code the platform does not document, or
+ * a documented code under another status — proves nothing about the write and
+ * is `UNKNOWN_OUTCOME`, never "nothing changed". One rule for every write, so
+ * no caller can reach a refusal state on weaker evidence.
+ */
+export function isProvenRefusal(status: number, code: string | undefined | null): boolean {
+  if (status < 400 || status >= 500 || typeof code !== 'string') return false;
+  return ownValue(ERROR_STATUS, code) === status;
+}
 
 /**
  * How a service's error details map onto a form.
@@ -229,11 +261,11 @@ export function mapProblemToFields<F extends string>(
   const unplaced: string[] = [];
   const textOf = (message: string, path: string | null): string => {
     const known =
-      mapping.messages?.[message] ??
+      ownText(mapping.messages, message) ??
       mapping.patterns?.find(([pattern]) => pattern.test(message))?.[1] ??
-      COMMON_MESSAGES[message] ??
+      ownText(COMMON_MESSAGES, message) ??
       commonPatternText(message) ??
-      mapping.byCode?.[problem.code];
+      ownText(mapping.byCode, problem.code);
     if (known !== undefined) return known;
     // Nothing maps this sentence: say the generic one, never the service's.
     reportUnmappedMessage({ status, code: problem.code, path, message });
@@ -241,10 +273,8 @@ export function mapProblemToFields<F extends string>(
   };
 
   for (const detail of problem.details ?? []) {
-    const field = mapping.paths[detail.path];
-    const text =
-      (detail.code !== undefined ? mapping.byDetailCode?.[detail.code] : undefined) ??
-      textOf(detail.message, detail.path);
+    const field = ownValue(mapping.paths, detail.path);
+    const text = ownText(mapping.byDetailCode, detail.code) ?? textOf(detail.message, detail.path);
     if (field === undefined) {
       unplaced.push(text);
       continue;
@@ -261,17 +291,9 @@ export function mapProblemToFields<F extends string>(
   return { fieldErrors, message: textOf(problem.message, null) };
 }
 
-export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
+interface WriteCallBase<S extends z.ZodTypeAny, F extends string> {
   readonly path: string;
   readonly body: unknown;
-  /**
-   * The submission id — sent as `Idempotency-Key`; see `submission.ts`. Left out
-   * for a service that takes no key (supplier-service's six writes): sending one
-   * would suggest a retry is safe, and it is not.
-   */
-  readonly submissionId?: string;
-  /** The last instant this write may be executed under its key (needs `submissionId`); see `GatewayCall.replayDeadline`. */
-  readonly replayDeadline?: number;
   /** What the created resource must look like; everything else is dropped. */
   readonly schema: S;
   readonly mapping: FieldMapping<F>;
@@ -286,19 +308,63 @@ export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
   readonly fetchImpl?: typeof fetch;
 }
 
+/**
+ * The default, and the shape every write takes unless it says otherwise: the
+ * submission id is **required** and sent as `Idempotency-Key` (see
+ * `submission.ts`), so a resend replays rather than repeats.
+ */
+interface KeyedWriteCall<S extends z.ZodTypeAny, F extends string> extends WriteCallBase<S, F> {
+  readonly idempotency?: 'KEYED';
+  /** The submission id — sent as `Idempotency-Key`; see `submission.ts`. */
+  readonly submissionId: string;
+  /** The last instant this write may be executed under its key; see `GatewayCall.replayDeadline`. */
+  readonly replayDeadline?: number;
+}
+
+/**
+ * The one exception, stated at the call: an endpoint that takes no key
+ * (supplier-service's six writes). No key is sent — sending one would suggest a
+ * resend is safe, and it is not — and the caller owns what an ambiguous answer
+ * means. `submissionId` cannot be given here, so a key cannot be half-wired.
+ */
+interface UnkeyedWriteCall<S extends z.ZodTypeAny, F extends string> extends WriteCallBase<S, F> {
+  readonly idempotency: 'NONE';
+  readonly submissionId?: never;
+  /** A deadline belongs to a key; with none sent there is nothing to bound. */
+  readonly replayDeadline?: never;
+}
+
+/**
+ * A write. Leaving out `submissionId` does not compile unless the call says
+ * `idempotency: 'NONE'` (`write.type-spec.ts` proves both directions; Codex
+ * review of PR 366, finding 5).
+ */
+export type WriteCall<S extends z.ZodTypeAny, F extends string> =
+  KeyedWriteCall<S, F> | UnkeyedWriteCall<S, F>;
+
 export async function writeThroughGateway<S extends z.ZodTypeAny, F extends string>(
   session: WebSession,
   call: WriteCall<S, F>,
 ): Promise<WriteResult<z.infer<S>, F>> {
+  // Sent while retrying a send whose outcome is unknown: only a success or "in
+  // progress" is about that send; every other answer is about this attempt only
+  // (`unconfirmed-retry.ts`, FU-173).
+  return inheritUnconfirmed(await dispatchWrite(session, call));
+}
+
+async function dispatchWrite<S extends z.ZodTypeAny, F extends string>(
+  session: WebSession,
+  call: WriteCall<S, F>,
+): Promise<WriteResult<z.infer<S>, F>> {
   try {
-    const response = await callGateway<unknown>({
+    const response = await callGatewayWrite<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: call.path,
       method: call.method ?? 'POST',
       body: call.body,
-      accessToken: session.accessToken,
-      idempotencyKey: call.submissionId,
-      replayDeadline: call.replayDeadline,
+      credential: tenantCredential(session),
+      idempotencyKey: call.idempotency === 'NONE' ? undefined : call.submissionId,
+      replayDeadline: call.idempotency === 'NONE' ? undefined : call.replayDeadline,
       fetchImpl: call.fetchImpl,
     });
 
@@ -313,9 +379,20 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     const { status, correlationId, problem } = error;
     if (error instanceof GatewayOutcomeUnknownError)
       return { kind: 'UNKNOWN_OUTCOME', correlationId };
-    // UPSTREAM_TIMEOUT: the gateway forwarded the write and gave up waiting —
-    // the same unknown, one hop further on.
-    if (status === 504) return { kind: 'UNKNOWN_OUTCOME', correlationId };
+    // No byte left this portal: known, and known to have done nothing.
+    if (error instanceof GatewayNeverSentError) {
+      return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
+    }
+    // The request reached the platform. Before any status is mapped to a
+    // refusal, everything that does not PROVE this attempt wrote nothing is
+    // unconfirmed (PR-830 r1 F1, FU-189): a bodyless 403/404, an unknown or
+    // mismatched code — and every `5xx`, whose body is never read: a 500 from a
+    // read after the commit, a 502/503 from a reset after it, a 504
+    // (UPSTREAM_TIMEOUT: the gateway forwarded it and gave up waiting). Below
+    // this line every answer is a `4xx` carrying a documented code.
+    if (!isProvenRefusal(status, problem?.code)) {
+      return { kind: 'UNKNOWN_OUTCOME', correlationId };
+    }
     if (status === 409 && problem?.code === 'CONFLICT' && error.retryAfterSeconds !== null) {
       return {
         kind: 'IN_PROGRESS',
@@ -328,7 +405,13 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     }
     // Before the generic 409 below, which would turn it into a message on a field.
     if (status === 409 && problem?.code === 'REPLAY_WINDOW_CLOSED') {
-      return { kind: 'UNAVAILABLE', status, correlationId, replayWindowClosed: true };
+      return {
+        kind: 'UNAVAILABLE',
+        status,
+        correlationId,
+        code: problem.code,
+        replayWindowClosed: true,
+      };
     }
     if (status === 403) {
       const reasons = (problem?.details ?? []).flatMap((detail) =>
@@ -344,9 +427,11 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
         ...mapProblemToFields(problem, call.mapping, status),
       };
     }
-    if (error instanceof GatewayNeverSentError) {
-      return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
-    }
-    return { kind: 'UNAVAILABLE', status, correlationId };
+    return {
+      kind: 'UNAVAILABLE',
+      status,
+      correlationId,
+      ...(problem ? { code: problem.code } : {}),
+    };
   }
 }

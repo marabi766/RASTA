@@ -164,10 +164,7 @@ test('the maintenance command refuses a role that does not own the table, and va
 
     assert.equal(vacuum.status, 1, `${vacuum.stdout}${vacuum.stderr}`);
     const [refusal] = vacuum.events.filter((e) => e.type === 'refused');
-    assert.match(
-      refusal.reason,
-      new RegExp(`${new URL(RUNTIME_URL).username} does not own ${schema}\\.outbox_message`),
-    );
+    assert.match(refusal.reason, /command refused \(code not-table-owner\); diagnostics withheld/);
     assert.deepEqual(
       vacuum.events.filter((e) => e.type === 'vacuum'),
       [],
@@ -184,13 +181,15 @@ test('the maintenance command takes its credential from the environment only', (
   const placeholder = 'postgresql://placeholder@127.0.0.1:1/none';
   const viaArgv = run(VACUUM, ['--service', 'document', '--url', placeholder], {});
   assert.equal(viaArgv.status, 1);
-  assert.match(viaArgv.events[0].reason, /Unknown option "--url"/);
+  // Refused by its position, never repeated (#385 r6).
+  assert.match(viaArgv.events[0].reason, /command refused \(code usage\); diagnostics withheld/);
+  assert.ok(!viaArgv.stdout.includes('--url'), 'the option was echoed');
   assert.ok(!viaArgv.stdout.includes(placeholder), 'the argument was echoed');
 
   const unset = run(VACUUM, ['--service', 'document'], {});
   assert.equal(unset.status, 1);
   assert.match(
     unset.events.find((e) => e.type === 'refused').reason,
-    /DATABASE_URL_DOCUMENT_MIGRATOR is not set/,
+    /command refused \(code database-url-unset\); diagnostics withheld/,
   );
 });

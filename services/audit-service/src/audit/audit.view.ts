@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * What a caller receives, and the columns deliberately withheld.
@@ -64,9 +65,9 @@ export const auditEventViewSchema = z
   .object({
     id: z.string(),
     /** When it happened in the domain. The sort key, and the partition key. */
-    occurredAt: z.string().datetime({ offset: true }),
+    occurredAt: z.string().check(isoDateTime({ offset: true })),
     /** When this store wrote the row. The gap between the two is consumer lag. */
-    recordedAt: z.string().datetime({ offset: true }),
+    recordedAt: z.string().check(isoDateTime({ offset: true })),
 
     actorType: z.enum(['USER', 'SERVICE', 'SYSTEM', 'ANONYMOUS']),
     actorId: z.string().nullable(),

@@ -21,6 +21,8 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import type { OfferedReturnCommand } from '../ReturnCommands';
 import { ReturnDetailScreen } from './ReturnDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/returns/[id]` route — one return request (EXP-003, RUN-005).
@@ -54,7 +56,7 @@ export default async function ReturnPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(href)}`);
 
-  const flash = (await searchParams)[FLASH_PARAM];
+  const flash = (await pageParams(session, searchParams))[FLASH_PARAM];
   const notice = readFlash(
     session,
     typeof flash === 'string' ? flash : undefined,
@@ -73,7 +75,7 @@ export default async function ReturnPage({
   // What inventory lists is a claim; only shipments borne out by this request
   // are its goods (`isShipmentOfRequest`, PR 336 review 1, finding 1).
   const shipments = result.kind === 'OK' && listed ? assessShipments(result.data, listed) : null;
-  const caller = returnCallerOf(session.accessToken);
+  const caller = returnCallerOf(session);
 
   const productNames =
     order?.kind === 'OK'
@@ -94,8 +96,9 @@ export default async function ReturnPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

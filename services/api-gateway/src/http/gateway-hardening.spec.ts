@@ -10,7 +10,7 @@ import {
   type RequestContext,
 } from '@rasta/nest-common';
 import { GatewayController } from '../proxy/gateway.controller';
-import { ProxyService } from '../proxy/proxy.service';
+import { ProxyService, READINESS_PATH, type ProxyOptions } from '../proxy/proxy.service';
 import type { RateLimiter, RateLimitRule } from '../proxy/rate-limiter';
 import type { GatewayEnv } from '../config/env';
 import type { ServiceUrls } from '../config/routes';
@@ -82,7 +82,7 @@ function recordingLimiter() {
 
 function proxyTo(
   upstream: Upstream,
-  options = { timeoutMs: 2000, failureThreshold: 100, resetAfterMs: 1000 },
+  options: ProxyOptions = { timeoutMs: 2000, failureThreshold: 100, resetAfterMs: 1000 },
 ): ProxyService {
   const every = [
     'IDENTITY',
@@ -305,7 +305,9 @@ describe('L1-03: anonymous rate limits key on the client, not the ingress', () =
         forwardedFor ? { 'x-forwarded-for': forwardedFor } : {},
         'POST',
       );
-      const key = gateway.keys.find((entry) => entry.scope === 'ip:registration-requests');
+      const key = gateway.keys.find(
+        (entry) => entry.scope === 'ip:registration-requests:collection-post',
+      );
       if (!key) throw new Error('no anonymous budget was consumed');
       return key.identifier;
     } finally {
@@ -444,7 +446,7 @@ describe('L1-06: a non-platform 5xx body is replaced, never reflected', () => {
   });
 
   it('counts a malformed 5xx toward the circuit breaker exactly once', async () => {
-    // Recorded with every other >= 500 before the body is read; the malformed
+    // Decided once the body is in, like every other >= 500; the malformed
     // branch must neither skip that nor add a second failure for one response.
     upstream.respond = (res) => {
       res.writeHead(502, { 'content-type': 'text/html' });
@@ -464,10 +466,10 @@ describe('L1-06: a non-platform 5xx body is replaced, never reflected', () => {
       );
 
     await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
-    expect(proxy.circuitStates().identity).toEqual({ failures: 1, open: false });
+    expect(proxy.circuitStates().identity).toEqual({ failures: 1, open: false, state: 'CLOSED' });
 
     await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
-    expect(proxy.circuitStates().identity).toEqual({ failures: 2, open: false });
+    expect(proxy.circuitStates().identity).toEqual({ failures: 2, open: false, state: 'CLOSED' });
   });
 
   it('forwards only the allow-listed fields of a valid envelope', async () => {
@@ -525,7 +527,7 @@ describe('L1-06: a non-platform 5xx body is replaced, never reflected', () => {
       );
 
     await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
-    expect(proxy.circuitStates().identity).toEqual({ failures: 1, open: false });
+    expect(proxy.circuitStates().identity).toEqual({ failures: 1, open: false, state: 'CLOSED' });
   });
 
   it('passes a platform error envelope through unchanged', async () => {
@@ -636,6 +638,27 @@ describe('Retry-After from the owning service reaches the caller', () => {
     }
   });
 
+  it('answers a browser’s preflight for a keyed command with its replay deadline (PR-844 r1 F2)', async () => {
+    const gateway = await startGateway({ upstream, context: userContext, corsOrigins: [origin] });
+    try {
+      const response = await gateway.send(
+        '/v1/warehouses',
+        {
+          origin,
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'idempotency-key,idempotency-replay-deadline',
+        },
+        'OPTIONS',
+      );
+      expect(response.status).toBe(204);
+      expect(String(response.headers['access-control-allow-headers']).split(',')).toEqual(
+        expect.arrayContaining(['idempotency-key', 'idempotency-replay-deadline']),
+      );
+    } finally {
+      await gateway.close();
+    }
+  });
+
   it('never repeats a service’s CORS headers — without a gateway policy there are none', async () => {
     // No `GATEWAY_CORS_ORIGINS`: the gateway grants no origin, so a service's
     // wildcard must not grant one on its behalf.
@@ -713,12 +736,19 @@ describe('an open circuit answers 503 with Retry-After from the breaker’s rema
       res.writeHead(500, { 'content-type': 'text/plain' });
       res.end('boom');
     };
-    const proxy = proxyTo(upstream, { timeoutMs: 2000, failureThreshold: 1, resetAfterMs });
+    // The breaker's own clock (monotonic in production), moved by the test.
+    let clock = 1_000_000;
+    const proxy = proxyTo(upstream, {
+      timeoutMs: 2000,
+      failureThreshold: 1,
+      organizationsToOpen: 1,
+      resetAfterMs,
+      now: () => clock,
+    });
     const forward = () => runWithContext(userContext, () => proxy.forward(request));
-    const clock = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
     await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
     expect(proxy.circuitStates().identity?.open).toBe(true);
-    clock.mockReturnValue(1_000_000 + at);
+    clock = 1_000_000 + at;
     return forward().then(
       () => {
         throw new Error('the open circuit let the request through');
@@ -731,7 +761,8 @@ describe('an open circuit answers 503 with Retry-After from the breaker’s rema
     const error = await refusedAt(30_000, 10_500); // 19.5 s left
     expect(error.code).toBe('UPSTREAM_UNAVAILABLE');
     expect(error.retryAfterSeconds).toBe(20);
-    expect(upstream.received).toHaveLength(1); // the refusal never reached the service
+    // The refusal never reached the service; the gateway's own readiness check did (FU-113).
+    expect(upstream.received).toEqual(['/v1/users/me', READINESS_PATH]);
   });
 
   it('is at least 1 when under a second remains', async () => {

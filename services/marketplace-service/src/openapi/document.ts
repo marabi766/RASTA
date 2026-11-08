@@ -1,7 +1,16 @@
+import type { INestApplication } from '@nestjs/common';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
-import { toJsonSchema, type JsonSchema } from './zod-schema';
+import {
+  applyOperationSecurity,
+  INTERNAL_TOKEN_SCHEME,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  routeAccessByOperation,
+  toJsonSchema,
+  type JsonSchema,
+  type ServiceRouteUsers,
+} from '@rasta/nest-common';
 import {
   cancelOrderSchema,
   confirmReceiptSchema,
@@ -149,24 +158,29 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/internal/returns/{id}/dispatch-reservation': [...COMMON, 404, 409, 422],
 };
 
-/**
- * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
- * else. `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as a
- * user — so the internal routes cannot be described by the bearer scheme (contract-service's
- * document says the same).
- */
-export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+export { INTERNAL_TOKEN_SCHEME };
 
-/** The `X-Internal-Token` scheme `main.ts` declares beside the bearer one. */
-export const INTERNAL_TOKEN_API_KEY = {
-  type: 'apiKey' as const,
-  in: 'header',
-  name: 'X-Internal-Token',
-  description:
-    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+/**
+ * Every `@AllowService` route (FU-075) and whether a user token is still admitted there. Which
+ * token a route takes is read from the guard's own metadata (`applyOperationSecurity`,
+ * @rasta/nest-common); this table states only what no decorator does — `users-refused` is
+ * enforced in the service (`dispatch-source.ts`) — and must match the decorators exactly.
+ */
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/returns/{id}': 'users-refused',
+  'POST /v1/internal/returns/{id}/dispatch-reservation': 'users-refused',
 };
 
-const isInternal = (path: string): boolean => path.startsWith('/v1/internal/');
+/**
+ * The published `security` of every operation, from the guard's metadata on `app`: the bearer
+ * token on every user route, the internal token alone on the routes above.
+ */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
 
 /** What 403 and 404 mean on an internal route, which answers one named service and no user. */
 const INTERNAL_STATUS_TEXT: Record<number, string> = {
@@ -232,9 +246,9 @@ export function enrichOpenApiDocument(
       if (!isOperation(operation)) continue;
 
       const key = `${method.toUpperCase()} ${path}`;
-
-      // An internal route answers a service's internal token only, which is not a bearer token.
-      if (isInternal(path)) operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
+      // A route only a service may call has its own 403/404 text; its security is
+      // `publishOperationSecurity`'s, from the guard's metadata (FU-075), never from the path.
+      const internal = SERVICE_ROUTES[key] === 'users-refused';
 
       const body = REQUEST_BODIES[key];
       if (body) {
@@ -290,9 +304,7 @@ export function enrichOpenApiDocument(
       for (const status of ERRORS[key] ?? []) {
         operation.responses[String(status)] = {
           description:
-            (isInternal(path) ? INTERNAL_STATUS_TEXT[status] : undefined) ??
-            STATUS_TEXT[status] ??
-            'Error',
+            (internal ? INTERNAL_STATUS_TEXT[status] : undefined) ?? STATUS_TEXT[status] ?? 'Error',
           ...(status === 409 && IDEMPOTENT_ROUTES.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
@@ -332,7 +344,6 @@ function toQueryParameters(schema: JsonSchema): Record<string, unknown>[] {
 }
 
 interface MutableOperation {
-  security?: Record<string, string[]>[];
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;

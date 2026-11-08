@@ -13,6 +13,7 @@ import {
 } from './outbox-purge';
 import {
   MANUALLY_SKIPPED_PREFIX,
+  OUTBOX_NOW,
   purgePublishedSql,
   type OutboxPurgeTxRunner,
   type OutboxSqlClient,
@@ -543,8 +544,9 @@ describe('purgePublishedSql', () => {
     expect(lock).toContain('pg_try_advisory_xact_lock');
     expect(lock).toContain('current_schema()');
     expect(del).toContain('published_at IS NOT NULL');
-    expect(del).toContain('published_at < now() - make_interval(secs => 604800)');
-    expect(del).toContain('created_at < now() - make_interval(secs => 604800)');
+    const clock = OUTBOX_NOW.replace(/\s+/g, ' ');
+    expect(del).toContain(`published_at < ${clock} - make_interval(secs => 604800)`);
+    expect(del).toContain(`created_at < ${clock} - make_interval(secs => 604800)`);
     expect(del).toContain(`last_error NOT LIKE '${MANUALLY_SKIPPED_PREFIX}%'`);
     expect(del).toContain('LIMIT 1000 FOR UPDATE SKIP LOCKED');
     // Re-checked on the locked row, not only in the selection.

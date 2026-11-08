@@ -26,11 +26,15 @@
  * broker, except where a case starts a second one on purpose.
  *
  * Malformed describe output, failing alters and a second writer come from a
- * wrapper `KAFKA_BIN` inside the container: it logs every call, then runs the
+ * wrapper `KAFKA_BIN` (set in a copy of the script directory) inside the container: it logs every call, then runs the
  * real tool — mangling a describe, refusing an alter, or running a hook
  * between the real call and its answer, when told to.
  */
 import './disposable-broker.mjs';
+import { withBrokerDefault as restoreBrokerDefault } from './broker-default.mjs';
+import { deleteBrokerDefault } from './broker-default-delete.mjs';
+import { connectionFor } from './kafka-acl-lib.mjs';
+import { readFileSync } from 'node:fs';
 import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -53,7 +57,9 @@ const RUN = randomUUID().slice(0, 8);
 const WORK = `/tmp/itest-limits-${RUN}`;
 const BIN = `${WORK}/bin`;
 const REAL = '/opt/kafka/bin';
-const ADMIN = ['--bootstrap-server', 'kafka:9094', '--command-config', '/tmp/admin.properties'];
+// Every broker-default read, SET and (via its cluster ID) DELETE goes here.
+const BOOTSTRAP = 'kafka:9094';
+const ADMIN = ['--bootstrap-server', BOOTSTRAP, '--command-config', '/tmp/admin.properties'];
 const BOUND = contracts.DLQ_ADDED_HEADERS_MAX_BYTES;
 const room = (sourceLimit) => contracts.deadLetterMessageMaxBytes(sourceLimit);
 const PLANNED = contracts.TOPIC_MESSAGE_MAX_BYTES;
@@ -155,12 +161,10 @@ async function provision(topicsFile, shim = {}) {
     'KAFKA_BOOTSTRAP=kafka:9094',
     '-e',
     `TOPICS_FILE=${topicsFile}`,
-    '-e',
-    `KAFKA_BIN=${BIN}`,
     ...env,
     CONTAINER,
     'bash',
-    '/bootstrap/create-topics.sh',
+    `${WORK}/bootstrap/create-topics.sh`,
   ]);
   return { ...run, calls: (await inContainer(`cat ${calls}`)).split('\n').filter(Boolean) };
 }
@@ -219,6 +223,12 @@ const WRAPPER = [
   .replaceAll('__REAL__', REAL);
 
 await inContainer(`mkdir -p ${BIN}`);
+// create-topics.sh declares `readonly KAFKA_BIN=/opt/kafka/bin` as a literal, the one form the image-pin check
+// reads (FU-224), so no environment can move it. The wrapped runs use a COPY of the directory whose declaration
+// names the wrapper directory; the siblings the script reads by its own path come with the copy.
+await inContainer(
+  `cp -r /bootstrap ${WORK}/bootstrap && sed -i 's#^readonly KAFKA_BIN=.*#readonly KAFKA_BIN=${BIN}#' ${WORK}/bootstrap/create-topics.sh && grep -c '^readonly KAFKA_BIN=${BIN}$' ${WORK}/bootstrap/create-topics.sh`,
+);
 for (const tool of ['kafka-configs.sh', 'kafka-topics.sh', 'kafka-consumer-groups.sh']) {
   await inContainer(`cat > ${BIN}/${tool} && chmod 755 ${BIN}/${tool}`, WRAPPER);
 }
@@ -242,8 +252,30 @@ async function brokerDefault() {
   return found[0];
 }
 
+/**
+ * The cluster that serves the broker-default reads and SETs above, resolved
+ * once through the same container endpoint. The direct DELETE must reach this
+ * cluster or refuse (FU-006); unresolved output refuses here.
+ */
+async function readSetClusterId() {
+  const run = await docker([
+    'exec',
+    CONTAINER,
+    `${REAL}/kafka-cluster.sh`,
+    'cluster-id',
+    '--bootstrap-server',
+    BOOTSTRAP,
+    '--config',
+    '/tmp/admin.properties',
+  ]);
+  const match = run.status === 0 ? /^Cluster ID: (\S+)\n?$/.exec(run.stdout) : null;
+  if (!match) throw new Error('BROKER_DEFAULT broker UNCONFIRMED');
+  return match[1];
+}
+const READ_SET_CLUSTER_ID = await readSetClusterId();
+
 async function setBrokerDefault(bytes) {
-  await kafka('kafka-configs.sh', [
+  const args = [
     '--alter',
     '--entity-type',
     'brokers',
@@ -251,7 +283,14 @@ async function setBrokerDefault(bytes) {
     ...(bytes === undefined
       ? ['--delete-config', 'message.max.bytes']
       : ['--add-config', `message.max.bytes=${bytes}`]),
-  ]);
+  ];
+  if (bytes !== undefined) return kafka('kafka-configs.sh', args);
+  // Incremental DELETE is idempotent and reaches Kafka even when a describe
+  // is stale/absent. It preserves every other broker-default config.
+  return deleteBrokerDefault({
+    ...connectionFor('admin', process.env, (path) => readFileSync(path, 'utf8')),
+    clusterId: READ_SET_CLUSTER_ID,
+  });
 }
 
 /**
@@ -260,13 +299,7 @@ async function setBrokerDefault(bytes) {
  * re-set, or deleted if there was none — whether `work` passed or threw.
  */
 async function withBrokerDefault(bytes, work) {
-  const before = await brokerDefault();
-  if (bytes !== before) await setBrokerDefault(bytes);
-  try {
-    return await work();
-  } finally {
-    if ((await brokerDefault()) !== before) await setBrokerDefault(before);
-  }
+  return restoreBrokerDefault(bytes, work, { read: brokerDefault, set: setBrokerDefault });
 }
 
 /** Waits until `topic` reports `bytes` as its effective limit. */
@@ -286,7 +319,7 @@ async function writeHook(scenario, lines) {
 
 /** A second create-topics.sh, on the real tools, provisioning `topicsFile`. */
 const secondProvisioner = (topicsFile) =>
-  `TOPICS_FILE=${topicsFile} KAFKA_BIN=${REAL} bash /bootstrap/create-topics.sh`;
+  `TOPICS_FILE=${topicsFile} bash /bootstrap/create-topics.sh`;
 
 after(async () => {
   await docker(['exec', CONTAINER, 'rm', '-rf', WORK]);
@@ -706,6 +739,51 @@ describe('create-topics.sh, max.message.bytes on a real broker', () => {
       });
     });
   });
+
+  // Every caller above uses the same reconciliation boundary; exercise it with
+  // actual broker writes while injecting only the lost response/stale describe.
+  for (const before of [undefined, 1_100_000]) {
+    for (const failure of ['setup', 'work', ...(before === undefined ? ['absence-refusal'] : [])]) {
+      test(`broker restoration after ${failure} with stale describe, original ${before}`, async () => {
+        await withBrokerDefault(before, async () => {
+          let reads = 0;
+          let writes = 0;
+          await assert.rejects(
+            restoreBrokerDefault(
+              3 * MIB,
+              async () => {
+                throw new Error('work failed');
+              },
+              {
+                read: async () => {
+                  reads += 1;
+                  // Snapshot original; stale once, or throughout the refusal window.
+                  if (reads <= 2 || failure === 'absence-refusal') return before;
+                  return brokerDefault();
+                },
+                set: async (value) => {
+                  writes += 1;
+                  // A refused deletion never confirms compensation.
+                  if (failure === 'absence-refusal' && writes > 1) {
+                    throw new Error('deletion refused');
+                  }
+                  const result = await setBrokerDefault(value);
+                  if (writes === 1 && failure === 'setup') throw new Error('setup response lost');
+                  return result;
+                },
+                pause: failure === 'absence-refusal' ? async () => {} : undefined,
+              },
+            ),
+            failure === 'absence-refusal'
+              ? /BROKER_DEFAULT restoration UNCONFIRMED/
+              : /setup response lost|work failed/,
+          );
+          assert.equal(writes, failure === 'absence-refusal' ? 21 : 2);
+          assert.equal(await brokerDefault(), failure === 'absence-refusal' ? 3 * MIB : before);
+        });
+      });
+    }
+  }
 
   // ------------------------------------------------ the cluster default, restored (r5 F2)
   test('the cluster default message.max.bytes is put back as it was — an absent override deleted again, an existing one re-set — also when the case fails', async () => {

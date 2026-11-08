@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { OpenAPIObject } from '@nestjs/swagger';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
+import { organizationIdSchema } from '@rasta/contracts';
+import { searchSuppliersQuerySchema } from '../supplier/dto';
 import { enrichOpenApiDocument } from './document';
 
 /**
@@ -188,7 +191,60 @@ describe('query parameters', () => {
       (parameter: { name: string }) => parameter.name,
     );
 
-    expect(names.sort()).toEqual(['capability', 'cursor', 'limit', 'qualifiedFor', 'status']);
+    expect(names.sort()).toEqual([
+      'capability',
+      'cursor',
+      'limit',
+      'organizationId',
+      'qualifiedFor',
+      'status',
+    ]);
+  });
+
+  it('marks post-preprocess organizationId list constraints as omitted (FU-019)', () => {
+    const document = enrichOpenApiDocument(withPaths({ '/v1/suppliers': { get: {} } }));
+    const parameter = (
+      op(document, '/v1/suppliers', 'get').parameters as {
+        name: string;
+        required: boolean;
+        schema: { type: string; minItems: number; maxItems: number };
+      }[]
+    ).find((p) => p.name === 'organizationId');
+
+    expect(parameter?.required).toBe(false);
+    expect(parameter?.schema).toEqual({
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+  });
+
+  it('omits post-preprocess item patterns while runtime still refuses malformed ids (FU-120)', () => {
+    const document = enrichOpenApiDocument(withPaths({ '/v1/suppliers': { get: {} } }));
+    const schema = (
+      op(document, '/v1/suppliers', 'get').parameters as {
+        name: string;
+        schema: { anyOf?: { type: string; items?: { type: string; pattern?: string } }[] };
+      }[]
+    ).find((p) => p.name === 'organizationId')?.schema;
+    expect(schema).toEqual({
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const runtime = (id: string) =>
+      searchSuppliersQuerySchema.safeParse({ organizationId: id }).success;
+    for (const bad of [
+      'bad',
+      '',
+      'ORG_1',
+      'org-lower',
+      'ORG_01JBQ0000000000000000000AI',
+      'X'.repeat(60),
+    ]) {
+      expect([bad, runtime(bad)]).toEqual([bad, false]);
+      expect([bad, organizationIdSchema.safeParse(bad).success]).toEqual([bad, false]);
+    }
+    for (const good of ['ORG_01JBQ0000000000000000000AA', 'ORG-UNION-YAZD', 'ORG-BATCH-7']) {
+      expect([good, runtime(good)]).toEqual([good, true]);
+      expect([good, organizationIdSchema.safeParse(good).success]).toEqual([good, true]);
+    }
   });
 
   it('marks the capability required on ListQualifiedFor', () => {
@@ -289,5 +345,25 @@ describe('route ordering in the controller', () => {
     );
 
     expect(controller).not.toMatch(/'AUDITOR'/);
+  });
+});
+
+describe('the published error envelope (audit 10-26 F3)', () => {
+  it('accepts the error bodies the shared filter really sends, on every route', () => {
+    const operations = { get: {}, post: {} };
+    const document = enrichOpenApiDocument(
+      withPaths({
+        '/v1/suppliers': operations,
+        '/v1/suppliers/{id}': operations,
+        '/v1/suppliers/{id}/suspend': operations,
+        '/v1/suppliers/{id}/qualifications': operations,
+        '/v1/suppliers/{id}/qualifications/{qualificationId}/approve': operations,
+        '/v1/suppliers/qualified': operations,
+        '/v1/suppliers/qualifications': operations,
+        '/v1/suppliers/standing-snapshot': operations,
+        '/v1/suppliers/standing-snapshot/{organizationId}': operations,
+      }),
+    );
+    expect(errorEnvelopeProblems(document)).toEqual([]);
   });
 });

@@ -22,6 +22,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -58,6 +59,9 @@ import { RfqClose } from './rfq/rfq-close';
 import { RfqService } from './rfq/rfq.service';
 import { RfqCloseService } from './rfq/rfq-close.service';
 import { RfqCloseSweeper } from './rfq/rfq-close.sweeper';
+import { QuotationController } from './quotation/quotation.controller';
+import { QuotationRepository } from './quotation/quotation.repository';
+import { QuotationService } from './quotation/quotation.service';
 import { SupplierStandingClient } from './rfq/supplier-standing.client';
 import { EnvKekProvider } from './rfq/key-provider';
 import { loadProcurementEnv, SERVICE_NAME, type ProcurementEnv } from './config/env';
@@ -96,11 +100,15 @@ import {
     AggregationController,
     AggregationRfqController,
     RfqController,
+    QuotationController,
     AggregationSettingController,
     HealthController,
     MetricsController,
   ],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: () => loadProcurementEnv() },
 
     {
@@ -178,6 +186,9 @@ import {
       useFactory: (env: ProcurementEnv) =>
         new EnvKekProvider(env.PROCUREMENT_RFQ_KEKS, env.PROCUREMENT_RFQ_KEK_CURRENT),
     },
+    // ADR-070 § 4, plan PR 8: an invited supplier's sealed quotation and the RFQ's receipt chain.
+    QuotationRepository,
+    QuotationService,
     {
       provide: RfqCloseSweeper,
       inject: [RfqRepository, RfqCloseService, ENV],
@@ -194,8 +205,10 @@ import {
     // Idempotent commands (docs/06 § 6.8): this service's own store for every command.
     {
       provide: IdempotencyStore,
-      inject: [PrismaService, ENV],
-      useFactory: (prisma: PrismaService, env: ProcurementEnv) => new IdempotencyStore(prisma, env),
+      inject: [PrismaService, ENV, DatabaseClock],
+      // The database clock is the replay fence's last word (FU-156): read after the claim's insert.
+      useFactory: (prisma: PrismaService, env: ProcurementEnv, clock: DatabaseClock) =>
+        new IdempotencyStore(prisma, env, clock),
     },
 
     {

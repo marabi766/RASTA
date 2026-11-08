@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
@@ -9,10 +10,12 @@ import {
 } from '@/lib/organization-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 export type { ReadResult };
 
@@ -34,13 +37,13 @@ export type { ReadResult };
 const organizationSchema = z.object({
   id: z.string(),
   name: z.string(),
-  shortName: z.string().nullable().default(null),
-  externalCode: z.string().nullable().default(null),
+  shortName: z.string().nullable().prefault(null),
+  externalCode: z.string().nullable().prefault(null),
   type: z.string(),
   status: z.string(),
-  parentId: z.string().nullable().default(null),
-  path: z.string().nullable().default(null),
-  depth: z.number().default(0),
+  parentId: z.string().nullable().prefault(null),
+  path: z.string().nullable().prefault(null),
+  depth: z.number().prefault(0),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -57,7 +60,7 @@ export async function fetchOrganization(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: `/v1/organizations/${encodeURIComponent(organizationId)}`,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = organizationSchema.safeParse(response.data);
@@ -97,7 +100,7 @@ export function updateOrganizationFormValues(form: FormData): UpdateOrganization
  */
 export const updateOrganizationFormSchema = z
   .object({
-    name: z.string().trim().min(1, 'نام سازمان را وارد کنید').max(200),
+    name: z.string().trim().min(1, formMessage('نام سازمان را وارد کنید')).max(200),
     shortName: z
       .string()
       .trim()
@@ -122,12 +125,12 @@ export type ParsedUpdateOrganizationForm =
 export function parseUpdateOrganizationForm(
   values: UpdateOrganizationFormValues,
 ): ParsedUpdateOrganizationForm {
-  const parsed = updateOrganizationFormSchema.safeParse(values);
+  const parsed = legacyParse(updateOrganizationFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, UPDATE_ORGANIZATION_FIELDS),
+    fieldErrors: firstIssuePerField(parsed.refusal, UPDATE_ORGANIZATION_FIELDS),
   };
 }
 

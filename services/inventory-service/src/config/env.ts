@@ -1,15 +1,20 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
-import { RETURN_DISPOSITIONS } from '@rasta/contracts';
+import { INVENTORY_MAX_REPLAY_WINDOW_SECONDS, RETURN_DISPOSITIONS } from '@rasta/contracts';
 import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
-import { inventoryOperationBudgets } from './operation-budgets';
+import { inventoryOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
 
 export const SERVICE_NAME = 'inventory-service';
 
@@ -26,6 +31,16 @@ export const DEFAULT_PORT = '3109';
  */
 const REFUSED_ROLES = ['AUDITOR', 'SYSTEM_ADMIN'] as const;
 
+const REPLAY_WINDOW_DOES_NOT_FIT = fixed(
+  'INVENTORY_IDEMPOTENCY_TTL_HOURS · 3600 − B − INVENTORY_CLOCK_SKEW_SECONDS must be at least ' +
+    `${INVENTORY_MAX_REPLAY_WINDOW_SECONDS} s (INVENTORY_MAX_REPLAY_WINDOW_SECONDS), with ` +
+    'B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + 7 s: otherwise a window the shared bound allows could ' +
+    'be refused by the replay fence',
+);
+const UNKNOWN_DISPOSITION = fixed(
+  `Unknown disposition in INVENTORY_RETURN_DISPOSITIONS_ALLOWED (${RETURN_DISPOSITIONS.join(', ')})`,
+);
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -38,14 +53,17 @@ function commaList() {
 
 /** A non-empty list of platform roles that names neither refused role. */
 function roleList(name: string) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
-      .min(1, `${name} must name at least one role`)
+      .array(z.enum(PLATFORM_ROLES, { error: unknownRole }))
+      .min(1, fixed(`${name} must name at least one role`))
       .refine(
         (roles) => !roles.some((role) => (REFUSED_ROLES as readonly string[]).includes(role)),
         {
-          message: `${name} may not name ${REFUSED_ROLES.join(' or ')} (docs/09 § 9.3, Q-103)`,
+          message: fixed(
+            `${name} may not name ${REFUSED_ROLES.join(' or ')} (docs/09 § 9.3, Q-103)`,
+          ),
         },
       ),
   );
@@ -118,6 +136,9 @@ function roleList(name: string) {
  *                                       How long a completed command's response is replayed,
  *                                       and how long an in-flight claim holds its key before a
  *                                       retry may take it over (docs/06 § 6.8).
+ *   INVENTORY_CLOCK_SKEW_SECONDS       The clock-offset bound the replay fence rests on (FU-171):
+ *                                       TTL · 3600 − (2 · skew + 7) − skew must be at least
+ *                                       INVENTORY_MAX_REPLAY_WINDOW_SECONDS, or the boot fails.
  *
  * No unit of measure, no low-stock threshold (Q-106), no partial issue (Q-107), no warehouse
  * lifecycle (Q-108), no control on a negative adjustment beyond the operator role (Q-109), no
@@ -130,21 +151,21 @@ export const inventoryEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     INVENTORY_OPERATOR_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('INVENTORY_OPERATOR_ROLES')),
 
     INVENTORY_READER_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('INVENTORY_READER_ROLES')),
 
     INVENTORY_CONSIGNEE_READER_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('INVENTORY_CONSIGNEE_READER_ROLES')),
 
     INVENTORY_RESERVATION_MAX_TTL_SECONDS: z.coerce
@@ -152,16 +173,16 @@ export const inventoryEnvSchema = baseEnvSchema
       .int()
       .min(60)
       .max(366 * 24 * 60 * 60)
-      .default(7 * 24 * 60 * 60),
+      .prefault(7 * 24 * 60 * 60),
 
     INVENTORY_RESERVATION_SWEEP_INTERVAL_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(30),
-    INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
-    INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+      .prefault(30),
+    INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(100),
+    INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
 
     /**
      * Q-133 (RUN-005, ADR-048 § 1): which dispositions a return shipment may be resolved with —
@@ -174,13 +195,11 @@ export const inventoryEnvSchema = baseEnvSchema
       .pipe(
         z.array(
           z.enum(RETURN_DISPOSITIONS, {
-            errorMap: () => ({
-              message: `Unknown disposition in INVENTORY_RETURN_DISPOSITIONS_ALLOWED (${RETURN_DISPOSITIONS.join(', ')})`,
-            }),
+            error: UNKNOWN_DISPOSITION,
           }),
         ),
       )
-      .default(''),
+      .prefault(''),
 
     /**
      * Q-133 (4) (Codex r1 on #313): what a return shipment of which nothing arrived resolves to is
@@ -191,17 +210,17 @@ export const inventoryEnvSchema = baseEnvSchema
      */
     INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED: z
       .enum(['true', 'false'])
-      .default('false')
+      .prefault('false')
       .transform((value) => value === 'true'),
 
-    INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+    INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).prefault(5000),
 
     /**
      * marketplace-service, which owns the return request (ADR-048 § 2). Before a return shipment
      * is recorded, the request is read there and its dispatch reserved (A-13, ADR-061 § 4; Codex
      * r1 on #336) — over REST with an internal token signed for the supplier, never its database.
      */
-    MARKETPLACE_SERVICE_URL: z.string().url().default('http://localhost:3106'),
+    MARKETPLACE_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3106'),
     /**
      * How long each of those two exchanges may take, body included. Both run before the
      * command's transaction, never inside it; one that does not answer in time refuses the
@@ -212,18 +231,56 @@ export const inventoryEnvSchema = baseEnvSchema
       .int()
       .min(200)
       .max(10_000)
-      .default(3000),
+      .prefault(3000),
 
-    INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
     INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(900)
-      .default(120),
+      .prefault(120),
+
+    /**
+     * The largest offset of any replica's clock (and the database's) from true time, in seconds
+     * (FU-171, PM decision D-133). The replay fence (`shared/idempotency.ts`) compares a clock with a
+     * deadline the caller fixed and keeps the response for another replica to find, so its budget is
+     * `B = 2 · skew + margin`: a deadline must end `B` before the retention, and a completed response
+     * is kept at least `B` past it. Beyond this offset the guarantee is void — alarm on a clock offset
+     * above half of it. At its largest (300) B is 607 s.
+     */
+    INVENTORY_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).prefault(30),
+  })
+  .superRefine((env, ctx) => {
+    // A window of the shared bound's size must be accepted on the slowest legal clock:
+    //   TTL − B − skew ≥ K        (B = 2 · skew + margin)
+    // Otherwise an honest client could meet the 400: fail the boot instead.
+    if (replayWindowRoomSeconds(env) < INVENTORY_MAX_REPLAY_WINDOW_SECONDS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['INVENTORY_IDEMPOTENCY_TTL_HOURS'],
+        message: REPLAY_WINDOW_DOES_NOT_FIT,
+      });
+    }
   });
 
+export const INVENTORY_ENV_MESSAGES = seal();
+
 export type InventoryEnv = z.infer<typeof inventoryEnvSchema>;
+
+/**
+ * The longest replay window (seconds) this service can accept on its slowest legal clock:
+ * `TTL − B − skew`. The boot check holds it at or above `INVENTORY_MAX_REPLAY_WINDOW_SECONDS`.
+ */
+export function replayWindowRoomSeconds(
+  env: Pick<InventoryEnv, 'INVENTORY_IDEMPOTENCY_TTL_HOURS' | 'INVENTORY_CLOCK_SKEW_SECONDS'>,
+): number {
+  return (
+    env.INVENTORY_IDEMPOTENCY_TTL_HOURS * 3600 -
+    replayFenceBudgetMs(env.INVENTORY_CLOCK_SKEW_SECONDS) / 1000 -
+    env.INVENTORY_CLOCK_SKEW_SECONDS
+  );
+}
 
 /**
  * Loads and validates the environment, once, at startup.
@@ -248,7 +305,7 @@ export function loadInventoryEnv(source: NodeJS.ProcessEnv = process.env): Inven
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: inventoryOperationBudgets },
+    { operationBudgets: inventoryOperationBudgets, fixedMessages: INVENTORY_ENV_MESSAGES },
   );
 }
 

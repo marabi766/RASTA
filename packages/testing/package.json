@@ -14,10 +14,11 @@
     "lint": "eslint src",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --passWithNoTests",
-    "test:unit": "jest --passWithNoTests"
+    "test:unit": "jest"
   },
   "dependencies": {
     "@rasta/contracts": "workspace:*",
+    "jose": "^5.9.6",
     "ulid": "^2.3.0"
   },
   "devDependencies": {

@@ -21,6 +21,10 @@ import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 import { localDateFromIso } from './drivers';
 import { EMPTY_RECORD_INSPECTION_FORM, EMPTY_RECORD_POLICY_FORM } from '@/lib/asset-record-fields';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * The two record commands: who is offered the forms, what a person may type and
@@ -36,7 +40,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -357,7 +361,7 @@ describe('sending', () => {
         body,
       });
       expect(calls[0]!.headers['idempotency-key']).toBe('sub_abc');
-      expect(calls[0]!.headers.authorization).toBe('Bearer access-token-value');
+      expect(calls[0]!.headers.authorization).toBe(`Bearer ${ACCESS_TOKEN_VALUE}`);
     },
   );
 
@@ -471,7 +475,7 @@ describe('sending', () => {
           ASSET,
           INSPECTION_BODY,
           's',
-          recording(status, { code: 'X', message: 'y' }).impl,
+          recording(status, { code: kind, message: 'y' }).impl,
         ),
       ).toMatchObject({ kind });
     });

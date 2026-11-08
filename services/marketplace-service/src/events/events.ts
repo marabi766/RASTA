@@ -4,6 +4,8 @@ import {
   RETURN_DISPATCH_EVENT_SCHEMAS,
   RETURN_REQUEST_EVENTS,
   RETURN_REQUEST_EVENT_SCHEMAS,
+  describeLegacyRefusal,
+  legacyParse,
 } from '@rasta/contracts';
 
 /**
@@ -290,6 +292,22 @@ export const orderDisputeResolvedPayload = z.object({
   buyerOrganizationId: z.string(),
   supplierOrganizationId: z.string(),
   outcome: z.enum(['SETTLE', 'REFUND']),
+  /**
+   * Where the decision left the order (D-083): REFUND -> CANCELLING; SETTLE ->
+   * the status the dispute found it in — RECEIPT_CONFIRMED only for a dispute
+   * raised after the buyer confirmed receipt. A SETTLE is not a receipt.
+   * Additive: every decision since D-083 carries it, and an event written
+   * before it — when SETTLE always meant RECEIPT_CONFIRMED — does not.
+   */
+  orderStatus: z
+    .enum([
+      'FUNDS_HELD',
+      'CONFIRMED',
+      'AWAITING_RECEIPT_CONFIRMATION',
+      'RECEIPT_CONFIRMED',
+      'CANCELLING',
+    ])
+    .optional(),
   responsibility: responsibilityAttribution,
   resolvedBy: z.string(),
   resolvedAt: isoTimestamp,
@@ -298,10 +316,9 @@ export const orderDisputeResolvedPayload = z.object({
 /**
  * A buyer reviewed a completed order.
  *
- * `rating` only, with an optional comment. There is no computed score here:
- * supplier performance scoring belongs to supplier-service, which does not
- * exist, and a rating average produced here would be a second authority for a
- * number that service will own (ADR-041).
+ * `rating` is general satisfaction; optional `qualityRating` is the separate
+ * buyer quality answer (Q-56 / ADR-052 step 1-d). Absence means no QUALITY fact.
+ * Performance scores are computed only by supplier-service.
  */
 export const reviewSubmittedPayload = z.object({
   reviewId: z.string(),
@@ -309,6 +326,7 @@ export const reviewSubmittedPayload = z.object({
   buyerOrganizationId: z.string(),
   supplierOrganizationId: z.string(),
   rating: z.number().int().min(1).max(5),
+  qualityRating: z.number().int().min(1).max(5).optional(),
   submittedAt: isoTimestamp,
 });
 
@@ -475,7 +493,11 @@ export function validateMarketplacePayload<N extends MarketplaceEventName>(
 ): z.infer<(typeof MARKETPLACE_EVENT_SCHEMAS)[N]> {
   // The schema is selected by the same key as the return type; TypeScript
   // cannot correlate the two through a generic parameter, hence the assertion.
-  return MARKETPLACE_EVENT_SCHEMAS[eventName].parse(payload) as z.infer<
-    (typeof MARKETPLACE_EVENT_SCHEMAS)[N]
-  >;
+  const parsed = legacyParse(MARKETPLACE_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data as z.infer<(typeof MARKETPLACE_EVENT_SCHEMAS)[N]>;
 }

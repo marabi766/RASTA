@@ -1,4 +1,5 @@
 import { withUtcSession } from '@rasta/config';
+import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { newPrisma } from './helpers';
 import { ownerPrisma, raw, seedDraft } from './performance-helpers';
@@ -321,11 +322,13 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
   describe('the database itself (Codex review of #120, round 2 finding 2)', () => {
     /** The runtime role, connected to the maintenance database `postgres`. */
     let elsewhere: PrismaService;
+    let elsewhereUrl: string;
 
     beforeAll(() => {
       const url = new URL(withUtcSession(process.env.DATABASE_URL_SUPPLIER ?? ''));
       url.pathname = '/postgres';
-      elsewhere = new PrismaService(url.toString());
+      elsewhereUrl = url.toString();
+      elsewhere = new PrismaService(elsewhereUrl);
     });
 
     afterAll(async () => {
@@ -352,12 +355,29 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
       });
     });
 
+    it('refuses to take the database back with 42501', async () => {
+      await expect(
+        raw(() =>
+          elsewhere.client.$executeRawUnsafe(
+            'ALTER DATABASE "rasta_supplier" OWNER TO rasta_supplier',
+          ),
+        ),
+      ).rejects.toThrow(DENIED);
+    });
+
+    // A bare client: these two cannot run in a transaction block, which is where the service's
+    // client puts every raw statement, beside its session check (FU-188). So PostgreSQL would
+    // answer 25001 before it looked at the role, and the privilege would go unproven.
     it.each([
       ['drop its own database from another', 'DROP DATABASE "rasta_supplier" WITH (FORCE)'],
-      ['take the database back', 'ALTER DATABASE "rasta_supplier" OWNER TO rasta_supplier'],
       ['create a database', 'CREATE DATABASE "rasta_supplier_shadow_attempt"'],
     ])('refuses to %s with 42501', async (_label, sql) => {
-      await expect(raw(() => elsewhere.client.$executeRawUnsafe(sql))).rejects.toThrow(DENIED);
+      const bare = new PrismaClient({ datasources: { db: { url: elsewhereUrl } } });
+      try {
+        await expect(raw(() => bare.$executeRawUnsafe(sql))).rejects.toThrow(DENIED);
+      } finally {
+        await bare.$disconnect();
+      }
     });
 
     it('refuses CREATE and TEMP on its own database', async () => {

@@ -42,6 +42,8 @@ import { ContractCommands } from './ContractCommands';
 import { amendmentLabel, type ContractCommandOffers } from './contract-offers';
 import { StatementCommands, type OfferedStatementCommand } from './StatementCommands';
 import type { MilestoneOption } from './StatementCommandForm';
+import { contextHref } from '@/lib/page-context';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The contract detail (docs/16 § ۱۶٫۶, `/contracts/[id]`).
@@ -134,7 +136,7 @@ function AmendmentRow({
             slot="AMENDMENT"
             subjectId={amendment.id}
             subjectLabel={amendmentLabel(amendment)}
-            offered={commands.amendments[amendment.id] ?? []}
+            offered={ownValue(commands.amendments, amendment.id) ?? []}
             context={commands.context}
           />
         </div>
@@ -145,10 +147,12 @@ function AmendmentRow({
 
 /** The amendments, read separately and able to fail on their own, paged by `amendmentCursor`. */
 function AmendmentsSection({
+  context,
   contractId,
   result,
   commands,
 }: {
+  context: string;
   contractId: string;
   result: ReadResult<AmendmentPage>;
   commands: ContractCommandOffers | null;
@@ -201,7 +205,9 @@ function AmendmentsSection({
       {nextCursor ? (
         <div className="mt-4">
           <ButtonLink
-            href={`/contracts/${encodeURIComponent(contractId)}?amendmentCursor=${encodeURIComponent(nextCursor)}`}
+            href={contextHref(context, `/contracts/${encodeURIComponent(contractId)}`, {
+              amendmentCursor: nextCursor,
+            })}
             tone="secondary"
           >
             صفحهٔ بعدِ الحاقیه‌ها
@@ -240,7 +246,7 @@ function MilestoneRow({
             slot="MILESTONE"
             subjectId={milestone.id}
             subjectLabel={milestone.title}
-            offered={commands.milestones[milestone.id] ?? []}
+            offered={ownValue(commands.milestones, milestone.id) ?? []}
             context={commands.context}
             collapsedLabel={`ویرایش «${milestone.title}»`}
           />
@@ -349,10 +355,12 @@ export interface StatementDraftOffer {
 
 /** The statements, read separately and able to fail on their own, paged by `statementCursor`. */
 function StatementsSection({
+  context,
   contractId,
   result,
   draft,
 }: {
+  context: string;
   contractId: string;
   result: ReadResult<StatementPage>;
   draft: StatementDraftOffer | null;
@@ -408,7 +416,9 @@ function StatementsSection({
       {nextCursor ? (
         <div className="mt-4">
           <ButtonLink
-            href={`/contracts/${encodeURIComponent(contractId)}?statementCursor=${encodeURIComponent(nextCursor)}`}
+            href={contextHref(context, `/contracts/${encodeURIComponent(contractId)}`, {
+              statementCursor: nextCursor,
+            })}
             tone="secondary"
           >
             صفحهٔ بعدِ صورت‌وضعیت‌ها
@@ -421,6 +431,8 @@ function StatementsSection({
 }
 
 export interface ContractDetailScreenProps {
+  /** The organization tag this page's URLs carry (`server/page-context.ts`). */
+  readonly context: string;
   readonly result: ReadResult<ContractDetail>;
   /** `null` when the contract itself could not be read, so these were not asked. */
   readonly amendments: ReadResult<AmendmentPage> | null;
@@ -446,6 +458,7 @@ const SIGNING_NOTES: Readonly<Record<'NO_POLICY' | 'UNREAD' | 'INCOMPLETE', stri
 };
 
 export function ContractDetailScreen({
+  context,
   result,
   amendments,
   milestones,
@@ -531,13 +544,23 @@ export function ContractDetailScreen({
       </Section>
 
       {amendments ? (
-        <AmendmentsSection contractId={contract.id} result={amendments} commands={commands} />
+        <AmendmentsSection
+          context={context}
+          contractId={contract.id}
+          result={amendments}
+          commands={commands}
+        />
       ) : null}
       {milestones ? (
         <MilestonesSection contractId={contract.id} result={milestones} commands={commands} />
       ) : null}
       {statements ? (
-        <StatementsSection contractId={contract.id} result={statements} draft={draft} />
+        <StatementsSection
+          context={context}
+          contractId={contract.id}
+          result={statements}
+          draft={draft}
+        />
       ) : null}
     </div>
   );

@@ -1,3 +1,5 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { createWarehouseSchema } from '../warehouse/dto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
@@ -7,7 +9,8 @@ import {
   buildInventoryOpenApiDocument,
   formatDocument,
 } from './document';
-import { REFUSAL_REASONS } from '../shared/refusal';
+import { REFUSAL_REASONS, refusal, type ReasonOf, type RefusalArea } from '../shared/refusal';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
 
 /**
  * The committed contract is exactly what the generator produces.
@@ -38,6 +41,20 @@ describe('the committed OpenAPI document', () => {
 
   afterAll(async () => {
     await app.close();
+  });
+
+  it('omits transformed body constraints in the served document (FU-120)', () => {
+    const body = JSON.parse(
+      JSON.stringify(buildInventoryOpenApiDocument(app).paths['/v1/warehouses']!.post!.requestBody),
+    );
+    expect(body.content['application/json'].schema.properties.name).toEqual({
+      type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const field = createWarehouseSchema.shape.name;
+    expect(field.safeParse(' ' + 'a'.repeat(200) + ' ').success).toBe(true);
+    expect(field.safeParse('   ').success).toBe(false);
   });
 
   const committedPath = join(
@@ -109,13 +126,20 @@ describe('the committed OpenAPI document', () => {
     }
   });
 
-  it('requires an Idempotency-Key on every command and on nothing else', () => {
+  it('requires an Idempotency-Key on every command, offers its replay deadline (FU-171), and nothing else', () => {
     for (const { key, operation: op } of operations()) {
       const headers = op.parameters.filter((p) => p.in === 'header');
       if (key.startsWith('POST ')) {
         expect([key, headers]).toEqual([
           key,
-          [expect.objectContaining({ name: 'Idempotency-Key', required: true })],
+          [
+            expect.objectContaining({ name: 'Idempotency-Key', required: true }),
+            expect.objectContaining({
+              name: 'Idempotency-Replay-Deadline',
+              required: false,
+              schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
+            }),
+          ],
         ]);
         expect(op.responses['409']?.headers).toHaveProperty('Retry-After');
       } else {
@@ -171,6 +195,19 @@ describe('the committed OpenAPI document', () => {
     }
   });
 
+  it('lets a browser send every header a command publishes (PR-844 r1 F2)', () => {
+    const policy = /allowedHeaders:\s*\[([^\]]*)\]/.exec(
+      readFileSync(join(__dirname, '..', 'main.ts'), 'utf8'),
+    )?.[1];
+    const published = new Set(
+      operations().flatMap(({ operation: op }) =>
+        op.parameters.filter((p) => p.in === 'header').map((p) => p.name.toLowerCase()),
+      ),
+    );
+    expect(published).toContain('idempotency-replay-deadline');
+    for (const header of published) expect(policy).toContain(`'${header}'`);
+  });
+
   it('publishes the two internal routes for marketplace-service under the X-Internal-Token scheme, with no Idempotency-Key and no 404 (Q-133 (9))', () => {
     const document = buildInventoryOpenApiDocument(app);
     expect(document.components?.securitySchemes?.internalToken).toEqual(
@@ -219,5 +256,13 @@ describe('the committed OpenAPI document', () => {
       expect([key, op.responses['201'] !== undefined]).toEqual([key, created]);
       expect([key, op.responses['200'] !== undefined]).toEqual([key, !created]);
     }
+  });
+
+  it('accepts the error bodies the shared filter really sends, typed refusals included (audit 10-26 F3)', () => {
+    const refusalOf = (area: string, code: string) =>
+      refusal(area as RefusalArea, code as ReasonOf<RefusalArea>, 'Refused');
+    expect(
+      errorEnvelopeProblems(buildInventoryOpenApiDocument(app), { refusal: refusalOf }),
+    ).toEqual([]);
   });
 });

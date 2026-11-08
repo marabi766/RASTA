@@ -1,14 +1,16 @@
-import type { ZodIssue } from 'zod';
 import {
   AUDIT_EVENT_RECORDED,
   AUDIT_EVENT_RECORDED_VERSION,
   AUDIT_TRAIL_TOPIC,
-  EVENT_HEADERS,
   auditTrailPayloadSchemaV1,
-  eventEnvelopeSchema,
   type AuditTrailPayloadV1,
   type ErrorCode,
+  EVENT_HEADERS,
   type EventEnvelope,
+  eventEnvelopeSchema,
+  legacyParse,
+  requireLegacyRefusal,
+  type LegacyRefusal,
 } from '@rasta/contracts';
 import type { OutboxRow } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
@@ -177,8 +179,11 @@ export class AuditTrailContractError extends Error {
 
 const MAX_REPORTED_ISSUES = 10;
 
-function describeIssues(issues: readonly ZodIssue[]): string {
-  const described = issues.map(
+/** Paths and zod 3 codes of a refusal, bounded (S-09). Exported for its tests. */
+export function describeIssues(refusal: LegacyRefusal): string {
+  // zod 3's codes, which these diagnostics have always carried, translated
+  // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
+  const described = requireLegacyRefusal(refusal, 'describeIssues').issues.map(
     (issue) => `${issue.path.length === 0 ? '(root)' : issue.path.join('.')} ${issue.code}`,
   );
   const shown = described.slice(0, MAX_REPORTED_ISSUES).join(', ');
@@ -205,9 +210,9 @@ export function assertPublishableAuditTrailRow(row: OutboxRow): void {
     );
   }
 
-  const envelope = eventEnvelopeSchema.safeParse(row.payload);
+  const envelope = legacyParse(eventEnvelopeSchema, row.payload);
   if (!envelope.success) {
-    throw new AuditTrailContractError(`envelope ${describeIssues(envelope.error.issues)}`);
+    throw new AuditTrailContractError(`envelope ${describeIssues(envelope.refusal)}`);
   }
   if (envelope.data.eventName !== AUDIT_EVENT_RECORDED) {
     throw new AuditTrailContractError(`eventName is not ${AUDIT_EVENT_RECORDED}`);
@@ -222,9 +227,9 @@ export function assertPublishableAuditTrailRow(row: OutboxRow): void {
     throw new AuditTrailContractError('partition key differs from aggregateId');
   }
 
-  const payload = auditTrailPayloadSchemaV1.safeParse(envelope.data.payload);
+  const payload = legacyParse(auditTrailPayloadSchemaV1, envelope.data.payload);
   if (!payload.success) {
-    throw new AuditTrailContractError(`payload ${describeIssues(payload.error.issues)}`);
+    throw new AuditTrailContractError(`payload ${describeIssues(payload.refusal)}`);
   }
   if (payload.data.outcome !== REFUSAL_OUTCOME) {
     throw new AuditTrailContractError(`outcome is not ${REFUSAL_OUTCOME}`);

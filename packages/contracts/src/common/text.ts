@@ -31,7 +31,7 @@ export const UNSUPPORTED_CHARACTERS = 'Contains unsupported characters';
  * field's own bounds on it: `plainText().min(3).max(500)`.
  */
 export function plainText(): z.ZodString {
-  return z.string().trim().regex(WITHOUT_BIDI_CONTROL, UNSUPPORTED_CHARACTERS);
+  return z.string().regex(WITHOUT_BIDI_CONTROL, UNSUPPORTED_CHARACTERS).trim();
 }
 
 /**
@@ -150,7 +150,7 @@ export function containsBidiControl(value: unknown): boolean {
  * {@link UNSUPPORTED_CHARACTERS} message and names neither the key nor the path
  * into the value (S-09).
  */
-export function withoutBidiControlDeep<T extends z.ZodTypeAny>(schema: T): z.ZodEffects<T> {
+export function withoutBidiControlDeep<T extends z.ZodType>(schema: T): T {
   return schema.superRefine((value, ctx) => {
     if (containsBidiControl(value)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: UNSUPPORTED_CHARACTERS });

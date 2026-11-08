@@ -33,6 +33,9 @@ import type {
  *                           credentials can try to fetch a supplier's private
  *                           licence, bypassing this service's authorization.
  *   decision notes          written by a reviewer for the platform's record.
+ *                           Not even the private projection carries one to
+ *                           the supplier's own organization: see
+ *                           {@link DetailAudience}.
  *   actor identifiers       who submitted, who decided, who suspended. A
  *                           directory that named the operator who suspended a
  *                           competitor would be a directory of platform staff.
@@ -64,6 +67,7 @@ export interface QualificationRow {
   decidedBy: string | null;
   decidedAt: Date | null;
   decisionNote: string | null;
+  rejectionReason: string | null;
   evidence: EvidenceRow[];
 }
 
@@ -133,7 +137,29 @@ export function toDirectoryView(supplier: SupplierRow): SupplierDirectoryView {
   };
 }
 
-function toQualificationView(row: QualificationRow, supplierSuspended: boolean): QualificationView {
+/**
+ * Who a private projection is for, beyond having been admitted to read it.
+ *
+ * `reviewer` is `mayReadReviewerNote` (`access.ts`) for the supplier projected,
+ * decided by the caller of these functions — this file never reads the request
+ * context, so the projection stays testable without one. A `false` here drops
+ * the reviewer's decision note **from the payload**: the key is absent, not
+ * null, so "no note was written" and "a note you may not read" are never the
+ * same answer to the supplier (Codex review of PR 366, finding 1).
+ */
+export interface DetailAudience {
+  readonly reviewer: boolean;
+}
+
+/**
+ * One qualification, privately. The single projection of a qualification row —
+ * the supplier's detail, a decision's answer and the review queue all use it.
+ */
+export function toQualificationView(
+  row: QualificationRow,
+  supplierSuspended: boolean,
+  audience: DetailAudience,
+): QualificationView {
   return {
     id: row.id,
     capability: row.capability,
@@ -143,7 +169,8 @@ function toQualificationView(row: QualificationRow, supplierSuspended: boolean):
     submittedAt: row.submittedAt.toISOString(),
     decidedBy: row.decidedBy,
     decidedAt: row.decidedAt?.toISOString() ?? null,
-    decisionNote: row.decisionNote,
+    ...(audience.reviewer ? { decisionNote: row.decisionNote } : {}),
+    rejectionReason: row.rejectionReason,
     evidence: row.evidence.map((item) => ({ documentId: item.documentId, label: item.label })),
     current: isCurrentlyQualified({ state: row.state, supplierSuspended }),
   };
@@ -168,16 +195,18 @@ function toSuspensionView(row: SuspensionRow): SuspensionView {
  *
  * Built on top of the directory view rather than beside it, so a field can
  * never be public here and private there — the containment is structural.
- * `access.ts` decides *who* reaches this function; this file only decides what
- * it contains.
+ * `access.ts` decides *who* reaches this function, and whether they are a
+ * reviewer (`audience`); this file only decides what it contains.
  */
-export function toDetailView(supplier: SupplierRow): SupplierDetailView {
+export function toDetailView(supplier: SupplierRow, audience: DetailAudience): SupplierDetailView {
   const suspended = supplier.status === 'SUSPENDED';
 
   return {
     ...toDirectoryView(supplier),
     registeredBy: supplier.registeredBy,
-    qualifications: supplier.qualifications.map((row) => toQualificationView(row, suspended)),
+    qualifications: supplier.qualifications.map((row) =>
+      toQualificationView(row, suspended, audience),
+    ),
     suspensions: supplier.suspensions.map(toSuspensionView),
   };
 }

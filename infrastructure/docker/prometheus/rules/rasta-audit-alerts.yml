@@ -72,6 +72,20 @@ groups:
           description: '{{ $value }} bid receipts have waited past the gap alert time for a predecessor that has not arrived; rasta_audit_tender_pending_oldest_age_seconds is the age of the oldest. The tender cannot open its bids until the gap is closed.'
           runbook: docs/runbooks/audit-gap-detected.md
 
+      - alert: RastaAuditRfqChainGapOpen
+        # COM-007 PR 7: the same gauge-based alert as the tender chain, for a quotation
+        # receipt held for a predecessor that never arrived. Fires for as long as any
+        # receipt has waited past AUDIT_RFQ_GAP_ALERT_SECONDS and resolves only when the
+        # gap closes; the counter reason `rfq_chain_gap_overdue` still announces each new
+        # gap once, through RastaAuditIngestionFailure. `max` across replicas.
+        expr: max(rasta_audit_rfq_overdue_links) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'An RFQ quotation-receipt chain has an unresolved gap'
+          description: '{{ $value }} quotation receipts have waited past the gap alert time for a predecessor that has not arrived; rasta_audit_rfq_pending_oldest_age_seconds is the age of the oldest. The RFQ cannot open its quotations until the gap is closed.'
+          runbook: docs/runbooks/audit-gap-detected.md
+
       - alert: RastaAuditReconciliationEvidenceMissing
         # D-046. A payment-reconciliation audit row (RESOLVED or OPERATOR_ACTION)
         # written (recorded_at, not occurred_at, so a late delivery of an old

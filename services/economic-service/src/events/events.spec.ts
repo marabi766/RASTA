@@ -176,6 +176,7 @@ describe('payment events disclose that they are simulated', () => {
     ECONOMIC_EVENTS.PAYMENT_COMPLETED,
     ECONOMIC_EVENTS.PAYMENT_FAILED,
   ])('%s requires a `simulated` flag', (name) => {
+    const now = new Date().toISOString();
     const base: Record<string, unknown> = {
       paymentIntentId: 'PAY_1',
       organizationId: 'ORG-A',
@@ -185,9 +186,9 @@ describe('payment events disclose that they are simulated', () => {
       amountMinor: '1000',
       currency: 'IRR',
       provider: 'mock',
-      authorizedAt: new Date().toISOString(),
-      completedAt: new Date().toISOString(),
-      failedAt: new Date().toISOString(),
+      authorizedAt: now,
+      completedAt: now,
+      failedAt: now,
       reason: 'DECLINED',
     };
 

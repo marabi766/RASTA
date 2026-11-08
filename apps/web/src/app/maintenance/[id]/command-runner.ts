@@ -11,9 +11,12 @@ import { commandRequestId } from '@/server/maintenance-commands';
 import { mayDispatch } from '@/server/money-gate';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { WriteResult } from '@/server/write';
 
 import type { RequestCommandFormState } from './form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one path every command on `/maintenance/[id]` takes, whether it is about
@@ -78,6 +81,15 @@ export interface Command<V, B, F extends string, C = undefined> {
 
 export async function run<V, B, F extends string, C = undefined>(
   command: Command<V, B, F, C>,
+  /** The form's state before this post: a retry of an unresolved send stays unresolved. */
+  previous: RequestCommandFormState<V, F>,
+  form: FormData,
+): Promise<RequestCommandFormState<V, F>> {
+  return keepUnconfirmed(previous, form, () => attempt(command, form));
+}
+
+async function attempt<V, B, F extends string, C = undefined>(
+  command: Command<V, B, F, C>,
   form: FormData,
 ): Promise<RequestCommandFormState<V, F>> {
   const session = await currentSession();
@@ -131,7 +143,10 @@ export async function run<V, B, F extends string, C = undefined>(
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the request again, so it shows what the command did.
     redirect(
-      `/maintenance/${encodeURIComponent(requestId)}?${FLASH_PARAM}=${mintFlash(session, requestId, command.notice)}`,
+      withContext(
+        pageContext(session),
+        `/maintenance/${encodeURIComponent(requestId)}?${FLASH_PARAM}=${mintFlash(session, requestId, command.notice)}`,
+      ),
     );
   }
 
@@ -140,7 +155,10 @@ export async function run<V, B, F extends string, C = undefined>(
       const again = command.lookAgain?.(result.message);
       if (again) {
         redirect(
-          `/maintenance/${encodeURIComponent(requestId)}?${FLASH_PARAM}=${mintFlash(session, requestId, again)}`,
+          withContext(
+            pageContext(session),
+            `/maintenance/${encodeURIComponent(requestId)}?${FLASH_PARAM}=${mintFlash(session, requestId, again)}`,
+          ),
         );
       }
       return {

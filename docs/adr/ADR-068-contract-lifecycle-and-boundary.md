@@ -139,16 +139,17 @@ ADR-032 این را برای تعمیر ثابت کرده و اینجا همان
 
 ### ۸. پیکربندی (همه موقت و محافظه‌کارانه؛ هیچ مرجع، نرخ یا آستانه‌ای در کد نیست)
 
-| متغیر                               | پیش‌فرض                 | چه می‌کند                                                                            |
-| ----------------------------------- | ----------------------- | ------------------------------------------------------------------------------------ |
-| `CONTRACT_READER_ROLES`             | `ORGANIZATION_ADMIN`    | کدام نقش‌های سازمان کارفرما قرارداد را می‌خوانند (`AUDITOR` در راه‌اندازی رد می‌شود) |
-| `CONSTRUCTION_SERVICE_URL`          | `http://localhost:3110` | نشانی خواندن award                                                                   |
-| `CONTRACT_AWARD_REQUEST_TIMEOUT_MS` | `5000`                  | کل تبادل (Header، بدنه، Parse)؛ بی پاسخ در مهلت = در دسترس نیست                      |
-| `CONTRACT_AMENDMENT_ROLES`          | `ORGANIZATION_ADMIN`    | (PR 3) چه نقش‌هایی از کارفرما الحاقیه پیشنهاد می‌دهند؛ تهی = هیچ‌کس                  |
-| `CONTRACT_AMENDMENT_REASON_CODES`   | `SCOPE_CHANGE,…,OTHER`  | (PR 3) فهرست بستهٔ دلیل الحاقیه؛ کدهای توصیفی بی معنای حقوقی                         |
-| `CONTRACT_MILESTONE_ROLES`          | `ORGANIZATION_ADMIN`    | (PR 3) چه نقش‌هایی از کارفرما Milestone برنامه‌ریزی/ویرایش می‌کنند                   |
-| `CONTRACT_MILESTONE_LIMIT`          | `100`                   | (PR 3) بیشترین تعداد Milestone یک قرارداد؛ محافظت از سرویس، نه قاعدهٔ تجاری          |
-| `CONTRACT_CONSUMER_*`               | پیش‌فرض `EventConsumer` | تلاش دوباره و Backoff                                                                |
+| متغیر                               | پیش‌فرض                 | چه می‌کند                                                                                                                                                                                                                    |
+| ----------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTRACT_READER_ROLES`             | `ORGANIZATION_ADMIN`    | کدام نقش‌های سازمان کارفرما قرارداد را می‌خوانند (`AUDITOR` در راه‌اندازی رد می‌شود)                                                                                                                                         |
+| `CONSTRUCTION_SERVICE_URL`          | `http://localhost:3110` | نشانی خواندن award                                                                                                                                                                                                           |
+| `CONTRACT_AWARD_REQUEST_TIMEOUT_MS` | `5000`                  | کل تبادل (Header، بدنه، Parse)؛ بی پاسخ در مهلت = در دسترس نیست                                                                                                                                                              |
+| `CONTRACT_AMENDMENT_ROLES`          | `ORGANIZATION_ADMIN`    | (PR 3) چه نقش‌هایی از کارفرما الحاقیه پیشنهاد می‌دهند؛ تهی = هیچ‌کس                                                                                                                                                          |
+| `CONTRACT_AMENDMENT_REASON_CODES`   | `SCOPE_CHANGE,…,OTHER`  | (PR 3) فهرست بستهٔ دلیل الحاقیه؛ کدهای توصیفی بی معنای حقوقی                                                                                                                                                                 |
+| `CONTRACT_MILESTONE_ROLES`          | `ORGANIZATION_ADMIN`    | (PR 3) چه نقش‌هایی از کارفرما Milestone برنامه‌ریزی/ویرایش می‌کنند                                                                                                                                                           |
+| `CONTRACT_MILESTONE_LIMIT`          | `100`                   | (PR 3) بیشترین تعداد Milestone یک قرارداد؛ محافظت از سرویس، نه قاعدهٔ تجاری                                                                                                                                                  |
+| `CONTRACT_DEDUCTION_WRITER_ROLES`   | (تهی = هیچ‌کس)          | (CON-003-1، Q-125) چه نقش‌هایی از کارفرما تغییر ردیف کسر پیشنهاد می‌دهند؛ پیش‌فرض ندارد و `CONTRACTOR` پذیرفته نیست. تأییدکننده پیکربندی نمی‌شود: `SYSTEM_ADMIN` پلتفرم و نه پیشنهاددهنده (D-115)؛ چهارچشمی کلید خاموش ندارد |
+| `CONTRACT_CONSUMER_*`               | پیش‌فرض `EventConsumer` | تلاش دوباره و Backoff                                                                                                                                                                                                        |
 
 (PRهای بعد متغیرهای امضا، چهارچشمی و مرجع زنجیره‌ها را می‌آورند؛ هیچ‌کدام در PR 1 نیست.)
 
@@ -324,3 +325,34 @@ PR 1 بدون نوشتن هیچ API کاربریِ تغییردهنده مرز �
 - **مسیر Gateway تازه‌ای افزوده نشد:** همهٔ مسیرهای صورت‌وضعیت زیر `/v1/contracts/{id}/statements` است و پیشوند `contracts` (از نخستین Gateway؛ `contract-approval-policies` از #243) از پیش به `contract-service` می‌رود؛ `Idempotency-Key` را خود سرویس می‌خواهد (`400` بی آن).
 - **E2E** (`tests/e2e/specs/contract/01-contract-lifecycle.e2e-spec.ts`، همان بازیگران و قرارداد A): پیش‌نویس و ارسال، Snapshot دو زنجیره، تصمیم فنی سپس مالی به دست اشخاص متفاوت، `ALREADY_DECIDED_STATEMENT`، `MEMBER_OF_CONTRACTOR`، `NOT_STEP_AUTHORITY` (کارفرما و مشاور)، Replay تصمیم، `APPROVED_TOTAL_EXCEEDS_CAP`، `404` هر خواندن تازه برای سازمان دیگر، `AUDITOR` و `SYSTEM_ADMIN` طبق § ۷، و ترتیب رویدادها در `audit-service`.
 - **آزموده‌نشده:** کسر واقعی روی صورت‌وضعیت — هیچ مسیری ردیف کسر نمی‌نویسد (Q-125)؛ و خواندن تسویه (PR 6a) و تسویهٔ economic.
+
+## Implementation notes (CON-003 completion, task 1213 A — source confirmation, 2026-11-02)
+
+- **D-081 (PM decision; this ADR remains Proposed):** contract completion is driven by the verified
+  `PROJECT_COMPLETED` fact, not a user `complete` endpoint. Employer membership is not completion
+  authority. Construction already owns both the configured `project.completion` final approval
+  and Q-71's interim completion path (latest submitted progress at 100% when no steps apply).
+- **Source read:** `GET /v1/internal/projects/{id}/completion` in construction-service, reserved for
+  `contract-service` with a SERVICE token signed for the project owner's tenant (ADR-061/ADR-035).
+  All users and other services are refused. Missing tenant or a conflicting organization header
+  is `403`; another tenant's project and an absent project are the same `404 Project not found`.
+  The gateway has no route for the `internal` prefix.
+- **Fact contract:** `projectId`, `organizationId`, stored `status`, current `version`, and
+  `completedAt`/`completedBy` from the completion transition. Both completion fields are null
+  in every other state. One tenant-scoped SELECT reads all fields together. No amount, project
+  content, policy details or free text is disclosed; the read writes nothing. A consumer must
+  require `COMPLETED` and match the event's project, tenant, completion instant and actor;
+  `(projectId, version)` identifies the owner's source fact. Absence, mismatch and an unreadable
+  source must never be treated as completion.
+- **Scope split (Worker Rule 3):** this PR supplies and tests the source boundary. The dependent
+  contract-service consumer, persisted proof and database guard, shared settlement transition,
+  `CONTRACT_COMPLETED` schema/routing/audit, replay/concurrency tests and lifecycle/E2E proof are
+  the proposed stacked part B. Until B lands, the missing `SIGNED → COMPLETED` operation and
+  the SQL shortcut in `statement-settled.int-spec.ts` remain; CON-003 is not closed by part A.
+  B must evaluate settlement under the same contract lock, with each transition incrementing
+  the version, and keep unpaid APPROVED statements compatible with complete-then-settle.
+  No statement state is an extra completion precondition under D-081: unfinished statements
+  remain settlement blockers, and existing guards refuse further approval after completion.
+- **Unchanged open decision:** an APPROVED zero-net statement has no economic obligation
+  (Q-97 note (b)), stays open for settlement, and prevents contract settlement. Completion must
+  not silently imply that it was paid. Web remains a follow-up.

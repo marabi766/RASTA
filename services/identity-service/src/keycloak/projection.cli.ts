@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure, markRefusal } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -7,7 +7,18 @@ import { PrismaService } from '../prisma/prisma.service';
 import { IdentityRepository } from '../identity/identity.repository';
 import { KeycloakAdminClient } from './keycloak.client';
 import { KeycloakProjector } from './keycloak.projector';
-import { isClean, runProjectionCommand, type ProjectionCommandMode } from './projection.command';
+import { KeycloakWriteFences } from './keycloak-write-fence';
+import {
+  isClean,
+  PROJECTION_COMMAND_POOLS,
+  RECOVERY_STOP_MS,
+  runProjectionCommand,
+  tearDownProjectionCommand,
+  type ProjectionCommandMode,
+} from './projection.command';
+
+/** A refused command line: reported as `command refused (code usage)` (FU-023). */
+const usage = (message: string): Error => markRefusal(new Error(message), 'usage');
 
 /**
  * `pnpm --filter @rasta/identity-service keycloak:reconcile` / `keycloak:backfill`.
@@ -22,12 +33,15 @@ import { isClean, runProjectionCommand, type ProjectionCommandMode } from './pro
  * itself, before it reads a row or calls Keycloak (D-045, Codex on #177):
  * pointed at the migrator, it would otherwise read identity data and write
  * Keycloak attributes as the database owner. A refusal exits 2, naming the
- * role, never the URL.
+ * failure code, never the URL.
  */
 async function main(): Promise<number> {
-  const mode = process.argv[2];
-  if (mode !== 'reconcile' && mode !== 'backfill') {
-    throw new Error('usage: projection.cli.ts <reconcile|backfill>');
+  // Exactly one argument, the mode (#673 r1 F2): `backfill --dry-run` must not
+  // project every account because the prefix was valid. Checked before the
+  // environment, the database or Keycloak is touched.
+  const [mode, ...rest] = process.argv.slice(2);
+  if ((mode !== 'reconcile' && mode !== 'backfill') || rest.length > 0) {
+    throw usage('usage: projection.cli.ts <reconcile|backfill>');
   }
 
   assertNoMigratorCredentials(process.env);
@@ -42,8 +56,13 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const prisma = new PrismaService(env.DATABASE_URL);
+  const prisma = new PrismaService(env.DATABASE_URL, PROJECTION_COMMAND_POOLS.prisma);
+  const fencePool = new PrismaService(env.DATABASE_URL, PROJECTION_COMMAND_POOLS.fencePool);
   await prisma.onModuleInit();
+  await fencePool.onModuleInit();
+  let projector: KeycloakProjector | undefined;
+  let clean = false;
+  let tornDown = false;
   try {
     const repository = new IdentityRepository(prisma);
     const keycloak = new KeycloakAdminClient({
@@ -53,25 +72,60 @@ async function main(): Promise<number> {
       clientSecret: env.KEYCLOAK_BACKEND_CLIENT_SECRET,
       enabled: true,
     });
-    const projector = new KeycloakProjector(repository, keycloak);
+    const fences = new KeycloakWriteFences(fencePool);
+    projector = new KeycloakProjector(repository, keycloak, fences, {
+      writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
+    });
 
     const report = await runProjectionCommand(mode as ProjectionCommandMode, {
       repository,
       projector,
       keycloak,
+      fences,
     });
     // User ids only — never names, emails or roles in an operations log (S-09).
-    logger.info({ report }, `Keycloak ${mode}: ${report.accounts} accounts`);
-    return isClean(report) ? 0 : 1;
+    logger.info(
+      { report },
+      `Keycloak ${mode}: ${report.accounts} accounts, ` +
+        `${report.fences.outstanding} write fences outstanding` +
+        (report.fences.outstanding === 0
+          ? ' (the fence migration may be rolled back while every identity-service replica stays stopped)'
+          : ''),
+    );
+    clean = isClean(report);
   } finally {
-    await prisma.onModuleDestroy();
+    // Whatever ended the command — a thrown error included — no recovery
+    // projection of it reaches the database after the disconnect (#458 r1
+    // F2): none starts any more, and those running are cancelled and waited
+    // for first. Then both pools, last, by the same deadline (#458 r2/r3
+    // F2): each refuses new work, waits for every operation it admitted — a
+    // COMMIT included — then disconnects within what is left. Both are
+    // waited for even when one fails (#458 r3 F7): nothing exits while a pool
+    // is still closing. Anything still unwinding, unsettled or abandoned then
+    // makes the command unclean, loudly.
+    const left = await tearDownProjectionCommand(
+      { projector, pools: [fencePool, prisma] },
+      Date.now() + RECOVERY_STOP_MS,
+    );
+    tornDown =
+      left.recoveriesUnwinding === 0 &&
+      left.transactionsUnsettled === 0 &&
+      left.poolsAbandoned === 0;
+    if (!tornDown) {
+      logger.error(
+        left,
+        `Keycloak ${mode}: teardown reached its deadline with work still in flight; ` +
+          'it may still commit after the command exits — the run is not clean',
+      );
+    }
   }
+  return clean && tornDown ? 0 : 1;
 }
 
 main().then(
   (code) => process.exit(code),
   (error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${commandFailure(error)}\n`);
     process.exit(2);
   },
 );

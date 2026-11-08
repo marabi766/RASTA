@@ -6,6 +6,7 @@ import { buildAuditOpenApiDocument, ERROR_DESCRIPTIONS } from '../src/openapi/do
 import { cleanupRun, newMigratorPrisma } from './helpers';
 import { auditor, internalToken, startApi, systemAdmin, type ApiHarness } from './api-helpers';
 import { at, orgId, projectOrganization, queryWindow, seedAuditEvent } from './fixtures';
+import { PROBE_TRACEPARENT, httpErrorBodyProblems } from '@rasta/nest-common';
 
 /**
  * The published contract, checked against the service that answers it.
@@ -61,6 +62,8 @@ describe('the published OpenAPI contract (real application)', () => {
   const INTERNAL = '/v1/internal/audit-events/{id}';
   /** The tender's receipt chain and head, for construction-service alone (ADR-066 § 2). */
   const EVIDENCE = '/v1/internal/tender-evidence/{tenderId}/chain';
+  /** The RFQ's quotation-receipt chain and head, for procurement-service alone (ADR-070 § 4). */
+  const RFQ_EVIDENCE = '/v1/internal/rfq-evidence/{rfqId}/chain';
 
   beforeAll(async () => {
     migrator = newMigratorPrisma();
@@ -105,7 +108,7 @@ describe('the published OpenAPI contract (real application)', () => {
       // `DETAIL` because `/v1/audit-events` is a prefix of
       // `/v1/audit-events/{id}`.
       expect(Object.keys(document.paths ?? {}).sort()).toEqual(
-        [...PATHS, INTERNAL, EVIDENCE].sort(),
+        [...PATHS, INTERNAL, EVIDENCE, RFQ_EVIDENCE].sort(),
       );
     });
 
@@ -117,7 +120,7 @@ describe('the published OpenAPI contract (real application)', () => {
       expect(document.components?.securitySchemes?.internalToken).toMatchObject({
         type: 'apiKey',
         in: 'header',
-        name: 'x-internal-token',
+        name: 'X-Internal-Token',
       });
       // It requires the target's own instant, so the read is one partition.
       expect(
@@ -173,7 +176,7 @@ describe('the published OpenAPI contract (real application)', () => {
 
       expect(paths).not.toContain('/metrics');
       expect(paths.some((path) => path.includes('metrics') || path.includes('health'))).toBe(false);
-      expect(paths.sort()).toEqual([...PATHS, INTERNAL, EVIDENCE].sort());
+      expect(paths.sort()).toEqual([...PATHS, INTERNAL, EVIDENCE, RFQ_EVIDENCE].sort());
     });
   });
 
@@ -457,6 +460,43 @@ describe('the published OpenAPI contract (real application)', () => {
     it('documents the verification ceiling where a caller meets it', () => {
       expect(ERROR_DESCRIPTIONS[400]).toContain('AUDIT_MAX_VERIFICATION_RECORDS');
     });
+  });
+
+  it('accepts the error bodies the application really sends over HTTP, with and without a trace (audit 10-26 F3)', async () => {
+    const problems: string[] = [];
+    for (const traced of [true, false]) {
+      const headers: Record<string, string> = traced ? { traceparent: PROBE_TRACEPARENT } : {};
+      const answers = [
+        {
+          method: 'GET',
+          url: LIST,
+          response: await request(server).get(LIST).query(window).set(headers),
+        },
+        {
+          method: 'GET',
+          url: LIST,
+          response: await request(server)
+            .get(LIST)
+            .set(headers)
+            .set('Authorization', `Bearer ${systemAdmin()}`),
+        },
+      ];
+      expect(answers.map(({ response }) => response.status)).toEqual([401, 400]);
+      expect(answers[1]!.response.body).toMatchObject({ code: 'VALIDATION_FAILED' });
+      expect(answers[1]!.response.body.details.length).toBeGreaterThan(0);
+      for (const { method, url, response } of answers) {
+        problems.push(
+          ...httpErrorBodyProblems(document, {
+            method,
+            url,
+            status: response.status,
+            body: response.body,
+            traced,
+          }),
+        );
+      }
+    }
+    expect(problems).toEqual([]);
   });
 });
 

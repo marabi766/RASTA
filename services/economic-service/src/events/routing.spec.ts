@@ -377,7 +377,8 @@ const NAMES = Object.values(ECONOMIC_EVENTS);
 
 /** Resolves through the same entry point production uses. */
 function resolve<N extends EconomicEventName>(name: N) {
-  return resolvePartitionKey(name, PAYLOADS[name]);
+  // zod 4's output types do not correlate PAYLOADS[N] with N; each entry is checked where it is written.
+  return resolvePartitionKey(name, PAYLOADS[name] as never);
 }
 
 describe('every published economic event has a partition decision', () => {

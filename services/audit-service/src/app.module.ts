@@ -21,6 +21,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
@@ -40,7 +41,14 @@ import {
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditTrailConsumer } from './consumers/audit-trail.consumer';
 import { OpsReplayConsumer } from './consumers/ops-replay.consumer';
+import { RfqEvidenceConsumer } from './consumers/rfq-evidence.consumer';
 import { TenderEvidenceConsumer } from './consumers/tender-evidence.consumer';
+import { RfqEvidenceController } from './audit/rfq-evidence.controller';
+import { RfqEvidenceRepository } from './audit/rfq-evidence.repository';
+import { RfqEvidenceService } from './audit/rfq-evidence.service';
+import { RfqGapMonitor } from './audit/rfq-gap-monitor';
+import { SamplingLoop } from './audit/sampling-loop';
+import { PROCUREMENT_TOPIC, RFQ_EVIDENCE_CONSUMER } from './audit/rfq-evidence';
 import { TenderEvidenceController } from './audit/tender-evidence.controller';
 import { TenderEvidenceRepository } from './audit/tender-evidence.repository';
 import { TenderEvidenceService } from './audit/tender-evidence.service';
@@ -149,8 +157,12 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     AuditController,
     AuditInternalController,
     TenderEvidenceController,
+    RfqEvidenceController,
   ],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: (): AuditEnv => loadAuditEnv() },
 
     {
@@ -188,6 +200,9 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     TenderEvidenceRepository,
     TenderEvidenceService,
     TenderGapMonitor,
+    RfqEvidenceRepository,
+    RfqEvidenceService,
+    RfqGapMonitor,
     // D-046: payment-reconciliation audit rows that have no evidence row.
     ReconciliationEvidenceMonitor,
 
@@ -367,6 +382,36 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
         ),
     },
 
+    {
+      provide: RfqEvidenceConsumer,
+      inject: [ENV, LOGGER, RfqEvidenceRepository],
+      useFactory: (
+        env: AuditEnv,
+        logger: Logger,
+        repository: RfqEvidenceRepository,
+      ): RfqEvidenceConsumer =>
+        new RfqEvidenceConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                ...kafkaConnection(env, env.KAFKA_CLIENT_ID),
+                // Fixed: also this projection's `processed_event` key.
+                groupId: RFQ_EVIDENCE_CONSUMER,
+                // The procurement topic alone; the domain projector reads it too, as audit rows.
+                topics: [PROCUREMENT_TOPIC],
+                // Replay-safe: every write is idempotent on `(eventId, consumerName)`.
+                fromBeginning: true,
+                // A refused link is kept for an operator, never dropped.
+                deadLetterTopic: AUDIT_DEAD_LETTER_TOPIC,
+              },
+              handler,
+              consumerLogger(logger),
+            ),
+          repository,
+          logger,
+        ),
+    },
+
     // Authenticate, then authorize. Global, so an endpoint is closed unless it
     // opts out with `@Public` (AGENTS.md A-12, S-02).
     { provide: APP_GUARD, useClass: AuthGuard },
@@ -375,13 +420,27 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
   ],
 })
 export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
-  private gaugeTimer?: NodeJS.Timeout;
+  /** The capacity sampler: tracked, and stopped before the client disconnects (`beforeDisconnect`). */
+  private readonly gauges = new SamplingLoop(async (signal) => {
+    try {
+      const counts = await this.repository.partitionRowCounts();
+      for (const { partition, rows } of counts) {
+        // Abandoned at the shutdown deadline (the client may be gone): write nothing.
+        signal.throwIfAbandoned();
+        auditPartitionRows.set({ partition }, rows);
+      }
+    } catch {
+      // Upkeep must never take the service down; ingestion failures have
+      // their own counter and the relay's logging covers a persistent fault.
+    }
+  });
 
   constructor(
     private readonly projector: DomainProjectorConsumer,
     private readonly trail: AuditTrailConsumer,
     private readonly replay: OpsReplayConsumer,
     private readonly evidence: TenderEvidenceConsumer,
+    private readonly rfqEvidence: RfqEvidenceConsumer,
     private readonly repository: AuditRepository,
     @Inject(ENV) private readonly env: AuditEnv,
     private readonly prisma: PrismaService,
@@ -409,27 +468,16 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.trail.start();
     await this.replay.start();
     await this.evidence.start();
+    await this.rfqEvidence.start();
 
     // Sampled from the catalogue, never maintained by inc/dec: an arithmetic
     // gauge drifts on every restart, and a drifting capacity number is worse
     // than no capacity number.
-    const sample = async (): Promise<void> => {
-      try {
-        for (const { partition, rows } of await this.repository.partitionRowCounts()) {
-          auditPartitionRows.set({ partition }, rows);
-        }
-      } catch {
-        // Upkeep must never take the service down; ingestion failures have
-        // their own counter and the relay's logging covers a persistent fault.
-      }
-    };
-
-    void sample();
-    this.gaugeTimer = setInterval(() => void sample(), 60_000);
-    this.gaugeTimer.unref?.();
+    this.prisma.beforeDisconnect(() => this.gauges.stop());
+    this.gauges.start();
   }
 
   async onApplicationShutdown(): Promise<void> {
-    if (this.gaugeTimer) clearInterval(this.gaugeTimer);
+    await this.gauges.stop();
   }
 }

@@ -1,8 +1,10 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import type { PrismaClient } from '../src/generated/prisma';
 import {
   bidOpeningConflictChecksTotal,
@@ -131,7 +133,7 @@ describe('opening the bids of a tender', () => {
   const makeOverdue = (tenderId: string) =>
     sql(
       'the suite lets the deadline pass',
-      `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+      eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
          "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
     );
 
@@ -330,13 +332,9 @@ describe('opening the bids of a tender', () => {
           ),
         ),
       );
-      // The content never reaches an event or the log, and the key never does either.
-      const everything = JSON.stringify(
-        [await outboxFor(w.prisma, owner), rows],
-        (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value),
-      );
-      for (const marker of [...MARKERS, ...PRICES]) expect(everything).not.toContain(marker);
-      expect(everything).not.toMatch(/PRIVATE KEY|wrappedPrivateKey/i);
+      // No independent source for outbox/log keys or digests: search every value (#452).
+      const outbox = await outboxFor(w.prisma, owner);
+      expectNotDisclosed([outbox, rows], [...MARKERS, ...PRICES, /PRIVATE KEY|wrappedPrivateKey/i]);
     });
 
     it('unwraps the tender key only for the opening and zeroises what it unwrapped', async () => {
@@ -527,7 +525,7 @@ describe('opening the bids of a tender', () => {
       )!;
       await sql(
         'the suite gives back the claims it did not mean to take',
-        `UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL WHERE "close_fence" = 'fence-a' AND "id" <> '${tenderId}'`,
+        eligibilityClockSql`UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL WHERE "close_fence" = 'fence-a' AND "id" <> '${tenderId}'`,
       );
       expect(claimed).toBeDefined();
       // Closed by hand while the sweeper holds the claim, then opened.
@@ -733,23 +731,24 @@ describe('opening the bids of a tender', () => {
       expect(await codeOf(open(owner, tenderId))).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
 
       // Ahead: audit-service holds a receipt this service has no bid for.
+      // One instant: the link and the receipt it carries name the same receivedAt.
+      const receivedAt = new Date();
       const extra = {
         seq: 3,
         bidId: 'BID_01HZZZZZZZZZZZZZZZZZZZZZZZ',
         revision: 1,
-        receivedAt: new Date().toISOString(),
+        receivedAt: receivedAt.toISOString(),
         ciphertextSha256: 'b'.repeat(64),
         contentCommitment: 'c'.repeat(64),
         previousReceipt: honest.head,
         receipt: nextReceipt(tenderId, honest.head, {
           bidId: 'BID_01HZZZZZZZZZZZZZZZZZZZZZZZ',
           revision: 1,
-          receivedAt: new Date(),
+          receivedAt,
           ciphertextSha256: 'b'.repeat(64),
           contentCommitment: 'c'.repeat(64),
         }),
       };
-      extra.receivedAt = new Date().toISOString();
       w.evidence.served.set(tenderId, {
         ...honest,
         links: [...honest.links, extra],
@@ -969,9 +968,8 @@ describe('opening the bids of a tender', () => {
 
       expect(view).toMatchObject({ tenderId, opened: false, bidCount: 2, bids: [] });
       expect(view.receivedAt).toHaveLength(2);
-      const text = JSON.stringify(view);
-      for (const bidder of bidders) expect(text).not.toContain(bidder);
-      for (const marker of [...MARKERS, ...PRICES]) expect(text).not.toContain(marker);
+      // No independently verified path exemption: generated values stay searched (#452).
+      expectNotDisclosed(view, [...bidders, ...MARKERS, ...PRICES]);
       expect(unwrap).not.toHaveBeenCalled();
       expect(w.evidence.asked).toHaveLength(0);
       expect(await logOf(tenderId)).toEqual([

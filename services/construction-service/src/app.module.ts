@@ -24,6 +24,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -42,6 +43,8 @@ import { EventPublisher } from './events/publisher';
 import { ProjectRepository } from './project/project.repository';
 import { ProjectService } from './project/project.service';
 import { NeedService } from './project/need.service';
+import { InternalProjectController } from './project/internal-project.controller';
+import { ProjectCompletionService } from './project/completion-fact';
 import { ProjectController } from './project/project.controller';
 import { ProjectAccess } from './access/access';
 import { ProjectLifecycleController } from './project/lifecycle.controller';
@@ -154,6 +157,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
 @Module({
   controllers: [
     ProjectController,
+    InternalProjectController,
     ProjectLifecycleController,
     PolicyController,
     ApprovalController,
@@ -169,6 +173,9 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     MetricsController,
   ],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: () => loadConstructionEnv() },
 
     {
@@ -209,6 +216,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     ProjectRepository,
     TenderRepository,
     ProjectService,
+    ProjectCompletionService,
     TenderService,
     CriteriaRepository,
     CriteriaService,

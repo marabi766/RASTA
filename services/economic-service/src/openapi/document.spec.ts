@@ -1,4 +1,4 @@
-import { enrichOpenApiDocument, INTERNAL_TOKEN_SCHEME } from './document';
+import { enrichOpenApiDocument } from './document';
 import { INVALID_CURSOR_MESSAGE } from '../shared/cursor';
 import type { OpenAPIObject } from '@nestjs/swagger';
 
@@ -152,6 +152,29 @@ describe('enrichOpenApiDocument', () => {
       expect(create.responses['409']?.headers?.['Retry-After']).toBeDefined();
     },
   );
+
+  it('publishes reward rule creation as idempotent, with its key’s errors (economic audit F1)', () => {
+    // The service requires the key itself: the gateway's `rewards` prefix
+    // does not (api-gateway routes.ts), so it is this document that tells a
+    // client a retry is safe only with one.
+    const document = emptyDocument();
+    document.paths = { '/v1/rewards/rules': { post: nest('201') } } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const create = (enriched.paths['/v1/rewards/rules'] as Record<string, never>)
+      .post as unknown as {
+      parameters: { name: string; in: string; required: boolean }[];
+      responses: Record<string, { description?: string; headers?: Record<string, unknown> }>;
+    };
+    const key = create.parameters.find((parameter) => parameter.name === 'Idempotency-Key');
+    expect(key).toMatchObject({ in: 'header', required: true });
+    expect(Object.keys(create.responses).sort()).toEqual(
+      ['201', '400', '401', '403', '404', '409', '422', '500'].sort(),
+    );
+    expect(create.responses['400']?.description).toContain('Idempotency-Key');
+    expect(create.responses['409']?.description).toContain('idempotency key reused');
+    expect(create.responses['409']?.headers?.['Retry-After']).toBeDefined();
+  });
 
   it('documents the success body under the status the route declares, never a guessed one', () => {
     // `dispute` takes a body and answers 200 (`@HttpCode(200)`). Guessed from
@@ -324,32 +347,58 @@ describe('enrichOpenApiDocument', () => {
       };
     };
 
-    it('declares the internal token as an apiKey in X-Internal-Token, not a bearer token', () => {
-      const { enriched } = enrichedWith(INTERNAL);
-
-      expect(enriched.components?.securitySchemes?.[INTERNAL_TOKEN_SCHEME]).toMatchObject({
-        type: 'apiKey',
-        in: 'header',
-        name: 'X-Internal-Token',
-      });
-    });
-
-    it('requires that scheme alone on an internal route, with its own 403 and 404', () => {
+    // Its `security` is `publishOperationSecurity`'s, from the guard's metadata (FU-075,
+    // `operation-security.spec.ts`); the scheme is declared by @rasta/nest-common.
+    it('gives a route that refuses every user its own 403 and 404', () => {
       const { operation } = enrichedWith(INTERNAL);
 
-      expect(operation.security).toEqual([{ [INTERNAL_TOKEN_SCHEME]: [] }]);
+      expect(operation.security).toBeUndefined();
       expect(Object.keys(operation.responses).sort()).toEqual(['200', '401', '403', '404', '500']);
       expect(operation.responses['403']?.description).toContain('user token');
       expect(operation.responses['403']?.description).toContain('signed for no organization');
       expect(operation.responses['404']?.description).toContain('internal token is signed for');
     });
 
-    it('gives a public route neither the internal scheme nor the internal wording', () => {
+    it('gives any other route the ordinary wording', () => {
       const { operation } = enrichedWith('/v1/transactions/{id}');
 
       expect(operation.security).toBeUndefined();
       expect(operation.responses['403']?.description).toContain('AUDITOR');
     });
+  });
+
+  it('publishes the rule arrays without their bounds, as this service’s own converter did', () => {
+    // The shared converter publishes `minItems`/`maxItems`; this document has
+    // never carried them, and the replacement kept it byte-identical. When a
+    // change of its own publishes them, this test changes with the wrapper.
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/rewards/recognition-rules': { post: nest('201') },
+      '/v1/rewards/participation-rules': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const body = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          requestBody: {
+            content: { 'application/json': { schema: { properties: Record<string, unknown> } } };
+          };
+        }
+      ).requestBody.content['application/json'].schema.properties;
+
+    const recognition = body('/v1/rewards/recognition-rules');
+    const participation = body('/v1/rewards/participation-rules');
+    for (const array of [recognition.levels, recognition.badges, participation.contributions]) {
+      expect(array).toMatchObject({ type: 'array' });
+      expect(array).not.toHaveProperty('minItems');
+      expect(array).not.toHaveProperty('maxItems');
+    }
+    // Recognition names are bounded after trimming, not on the raw text.
+    expect(JSON.stringify(recognition)).toContain(
+      'Constraints after a value-changing step are omitted',
+    );
+    expect(JSON.stringify(recognition)).not.toContain('"maxLength":80');
   });
 
   it('leaves a route it knows nothing about with a success response and no body', () => {

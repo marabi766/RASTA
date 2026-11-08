@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { renderableDate } from './instant';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
-import { IRR, MoneyInputError, parseMoneyInput } from '@/lib/format';
+import { IRR, MoneyInputError, moneyInputMessage, parseMoneyInput } from '@/lib/format';
 import { TOP_UP_FIELDS, type TopUpFormField, type TopUpFormValues } from '@/lib/wallet-fields';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
@@ -45,8 +46,8 @@ const holdSchema = z.object({
   reference: z.string(),
   referenceType: z.string(),
   placedAt: renderableDate,
-  resolvedAt: z.string().nullable().default(null),
-  resolutionNote: z.string().nullable().default(null),
+  resolvedAt: z.string().nullable().prefault(null),
+  resolutionNote: z.string().nullable().prefault(null),
 });
 
 export type WalletHold = z.infer<typeof holdSchema>;
@@ -61,22 +62,36 @@ const transactionSchema = z.object({
   id: z.string(),
   transactionType: z.string(),
   status: z.string(),
+  /** Whether HELD is proven (`presentTransactionStatus`). Absent from an older service: not proven. */
+  heldProven: z.boolean().optional(),
+  /**
+   * What the transaction is for, fixed at creation (economic-service
+   * `grossAmountMinor`; `views.ts` `toTransactionView`). A string of whole minor
+   * units (the same shape the transaction detail accepts), never a number. It is **not** the net amount and **not** a statement
+   * that a hold is active: the net is zero until settlement, and whether funds
+   * are held is the wallet's holds list. Absent: `null`, shown as a dash.
+   */
+  grossAmountMinor: z
+    .string()
+    .regex(/^-?\d+$/, 'amount must be whole minor units')
+    .nullable()
+    .prefault(null),
   netAmountMinor: z.string(),
   currency: z.string(),
   occurredAt: renderableDate,
-  sourceType: z.string().nullable().default(null),
-  sourceReference: z.string().nullable().default(null),
-  disputeReason: z.string().nullable().default(null),
-  settledAt: z.string().nullable().default(null),
-  failureReason: z.string().nullable().default(null),
+  sourceType: z.string().nullable().prefault(null),
+  sourceReference: z.string().nullable().prefault(null),
+  disputeReason: z.string().nullable().prefault(null),
+  settledAt: z.string().nullable().prefault(null),
+  failureReason: z.string().nullable().prefault(null),
 });
 
 export type WalletTransaction = z.infer<typeof transactionSchema>;
 
 const transactionPageSchema = z.object({
   items: z.array(transactionSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type TransactionPage = z.infer<typeof transactionPageSchema>;
@@ -106,7 +121,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = schema.safeParse(response.data);
@@ -180,7 +195,7 @@ const topUpResultSchema = z.object({
   currency: z.string(),
   provider: z.string(),
   simulated: z.boolean(),
-  failureReason: z.string().nullable().default(null),
+  failureReason: z.string().nullable().prefault(null),
 });
 
 export type TopUpResult = z.infer<typeof topUpResultSchema>;
@@ -230,7 +245,7 @@ export function parseTopUpForm(values: TopUpFormValues): ParsedTopUpForm {
     return { ok: true, request: { amountMinor: minor.toString() } };
   } catch (cause) {
     if (cause instanceof MoneyInputError) {
-      return { ok: false, fieldErrors: { amountMinor: cause.message } };
+      return { ok: false, fieldErrors: { amountMinor: moneyInputMessage(cause.failure, IRR) } };
     }
     throw cause;
   }

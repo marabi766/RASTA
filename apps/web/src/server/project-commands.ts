@@ -24,8 +24,8 @@ import {
 } from '@/lib/project-commands';
 
 import type { WebServerEnv } from './env';
-import { tokenAuthority } from './realm-roles';
 import type { WebSession } from './session';
+import { sessionAuthority, type SessionTokens } from './session-organization';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 
@@ -80,7 +80,7 @@ const PLATFORM_ADMINISTRATOR = 'SYSTEM_ADMIN';
  * person it refuses is told so in fixed words.
  *
  * `roles` is the token's own set for an organization it resolves to
- * (`tokenWriteRoles`), null when there is none to read.
+ * (`sessionWriteRoles`), null when there is none to read.
  */
 export function canWriteProjects(
   roles: readonly string[] | null,
@@ -126,9 +126,9 @@ export interface DecidableStep {
  * `project-commands.contract.spec.ts`); it chooses what is drawn, and the
  * service decides again on every send.
  */
-export function mayDecide(accessToken: string, step: DecidableStep): boolean {
+export function mayDecide(session: SessionTokens, step: DecidableStep): boolean {
   if (step.status !== 'PENDING' || !isProjectWorkflow(step.workflowKey)) return false;
-  const authority = tokenAuthority(accessToken);
+  const authority = sessionAuthority(session);
   if (!authority || authority.organizationId === null) return false;
   if (authority.roles.includes(OVERSIGHT_ROLE)) return false;
   return (
@@ -215,6 +215,8 @@ export const updateProject = (
     path: projectPath(projectId),
     method: 'PATCH',
     body: { ...body, expectedVersion },
+    // Fenced by the version, not by a key (stated at the call since the key became required).
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping: UPDATE_FIELD_MAPPING,
     fetchImpl,
@@ -234,6 +236,7 @@ function postCommand<F extends string, B extends object>(
     // command to that version only, so a stale page — or a second send of this
     // one — cannot write.
     body: { ...body, expectedVersion },
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping,
     fetchImpl,

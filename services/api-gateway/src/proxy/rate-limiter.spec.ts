@@ -1,5 +1,7 @@
+import { inspect } from 'node:util';
 import { loadGatewayEnv } from '../config/env';
-import { RateLimiter } from './rate-limiter';
+import { Logger } from '@nestjs/common';
+import { RateLimiter, redisFailure } from './rate-limiter';
 
 /**
  * What `GATEWAY_RATE_LIMIT_FAIL_OPEN` actually decides, end to end.
@@ -21,12 +23,16 @@ import { RateLimiter } from './rate-limiter';
  * to be the same failure every time, on every machine, with no socket, no
  * reconnect timer and no open handle left behind.
  */
+const construction = jest.fn();
 const evalsha = jest.fn();
 const scriptLoad = jest.fn();
 
 jest.mock('ioredis', () => ({
   __esModule: true,
   default: class {
+    constructor() {
+      construction();
+    }
     on = jest.fn();
     quit = jest.fn().mockResolvedValue('OK');
     ping = jest.fn().mockRejectedValue(new Error('unreachable'));
@@ -133,4 +139,86 @@ describe('rate limiting when Redis is unreachable', () => {
 
     expect((await limiter.consume('user', 'user-1', RULE)).allowed).toBe(true);
   });
+});
+
+describe('what is logged about Redis (#385 r6)', () => {
+  // The sentinels of scripts/refusal-probes.mjs, as REDIS_URL's credentials
+  // and in what the client reports.
+  const SENTINEL = /sentinel|jz97|another[-_]secret/i;
+  const URL_WITH_CREDENTIALS = [
+    'redis://',
+    'private-sentinel-79',
+    ':',
+    'JZ97-another-secret',
+    '@cache.invalid:6379',
+  ].join('');
+  const leaky = (): Error =>
+    Object.assign(new Error(`connect ECONNREFUSED ${URL_WITH_CREDENTIALS}`), {
+      code: 'ECONNREFUSED',
+    });
+  let limiter: RateLimiter | undefined;
+
+  afterEach(async () => {
+    await limiter?.onModuleDestroy();
+    limiter = undefined;
+  });
+
+  it('an error event and a failed check are logged by class and code only', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    evalsha.mockRejectedValue(leaky());
+    scriptLoad.mockRejectedValue(leaky());
+    limiter = new RateLimiter(URL_WITH_CREDENTIALS, 'rasta', true);
+    const on = (limiter as unknown as { redis: { on: jest.Mock } }).redis.on;
+    const onError = on.mock.calls.find(([event]) => event === 'error')?.[1] as (e: Error) => void;
+    onError(leaky());
+    await limiter.consume('user', 'user-1', RULE);
+
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([
+      'Redis unavailable for rate limiting (REDIS_URL): Error ECONNREFUSED',
+      'Rate limit check failed (Error ECONNREFUSED); allowing the request',
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(SENTINEL);
+    warn.mockRestore();
+  });
+
+  it('redisFailure keeps only allowlisted classes and codes', () => {
+    expect(redisFailure(Object.assign(new Error('x'), { code: URL_WITH_CREDENTIALS }))).toBe(
+      'Error',
+    );
+    expect(redisFailure(Object.assign(new Error('x'), { name: URL_WITH_CREDENTIALS }))).toBe(
+      'unknown',
+    );
+    expect(redisFailure(URL_WITH_CREDENTIALS)).toBe('unknown');
+  });
+});
+
+test('redisFailure rejects identifier-shaped secrets in names and codes', () => {
+  const failure = Object.assign(new Error('private-sentinel-79'), {
+    name: 'PrivateSentinel79',
+    code: 'JZ97_ANOTHER_SECRET',
+  });
+  expect(JSON.stringify(redisFailure(failure))).not.toMatch(/sentinel|JZ97|another.secret/i);
+});
+
+test('Redis construction and invalid endpoint failures never retain foreign diagnostics', () => {
+  construction.mockImplementationOnce(() => {
+    throw Object.assign(new Error('private-sentinel-79 JZ97-another-secret'), {
+      name: 'PrivateSentinel79',
+      code: 'JZ97_ANOTHER_SECRET',
+      cause: new Error('private-sentinel-79'),
+    });
+  });
+  for (const endpoint of [
+    'redis://localhost:6379',
+    'data:private-sentinel-79:JZ97-another-secret',
+  ]) {
+    let failure: unknown;
+    try {
+      new RateLimiter(endpoint, 'rasta');
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(inspect(failure, { showHidden: true, depth: 10 })).not.toMatch(/sentinel|JZ97/i);
+  }
 });

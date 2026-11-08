@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import {
@@ -673,7 +674,7 @@ describe('the payment reconciliation operator path (real database)', () => {
       );
       await runUnscoped('the suite leases the task as a sweeper would', () =>
         prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task
+          eligibilityClockSql`UPDATE payment_reconciliation_task
               SET status = 'PENDING', lease_until = now() + interval '1 minute', lease_token = 'SWEEPER'
             WHERE payment_intent_id = $1`,
           made.intentId,
@@ -724,13 +725,13 @@ describe('the payment reconciliation operator path (real database)', () => {
       const setTask = (sql: string) =>
         runUnscoped('the suite moves the task as the reconciler would', () =>
           prisma.client.$executeRawUnsafe(
-            `UPDATE payment_reconciliation_task SET ${sql} WHERE payment_intent_id = $1`,
+            eligibilityClockSql`UPDATE payment_reconciliation_task SET ${sql} WHERE payment_intent_id = $1`,
             made.intentId,
           ),
         );
 
       // PENDING and due: a sweeper may still claim and settle it.
-      await setTask(`status = 'PENDING', next_attempt_at = now()`);
+      await setTask(eligibilityClockSql`status = 'PENDING', next_attempt_at = now()`);
       await expect(
         as(organizationId, 'USR-ALICE', () =>
           operator.propose(made.intentId, proposal('DECLINED')),
@@ -738,7 +739,9 @@ describe('the payment reconciliation operator path (real database)', () => {
       ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
 
       // PENDING and claimed by a sweeper.
-      await setTask(`lease_until = now() + interval '1 minute', lease_token = 'SWEEPER'`);
+      await setTask(
+        eligibilityClockSql`lease_until = now() + interval '1 minute', lease_token = 'SWEEPER'`,
+      );
       await expect(
         as(organizationId, 'USR-ALICE', () =>
           operator.propose(made.intentId, proposal('DECLINED')),
@@ -980,7 +983,7 @@ describe('the payment reconciliation operator path (real database)', () => {
       const made = await escalatedUnknown(`${organizationId}-LEASED`, 100n);
       await runUnscoped('the suite leases the task', () =>
         prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task
+          eligibilityClockSql`UPDATE payment_reconciliation_task
               SET status = 'PENDING', lease_until = now() + interval '1 minute', lease_token = 'SWEEPER'
             WHERE payment_intent_id = $1`,
           made.intentId,

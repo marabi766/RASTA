@@ -1,5 +1,7 @@
-import { corsOrigins, loadInventoryEnv } from './env';
-import { inventoryOperationBudgets } from './operation-budgets';
+import { envEnumProbes } from '@rasta/config';
+import { INVENTORY_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import { corsOrigins, inventoryEnvSchema, loadInventoryEnv, replayWindowRoomSeconds } from './env';
+import { inventoryOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
   KAFKA_BROKERS: 'localhost:9092',
@@ -11,6 +13,39 @@ const base: NodeJS.ProcessEnv = {
 };
 
 const load = (overrides: NodeJS.ProcessEnv = {}) => loadInventoryEnv({ ...base, ...overrides });
+
+describe('the replay fence budget (FU-171, PM decision D-133)', () => {
+  it('defaults to a 30 s skew: B = 2 · 30 s + 7 s', () => {
+    expect(load().INVENTORY_CLOCK_SKEW_SECONDS).toBe(30);
+    expect(replayFenceBudgetMs(30)).toBe(67_000);
+  });
+
+  it.each([['-1'], ['301'], ['1.5']])('refuses a skew of %s at startup', (skew) => {
+    expect(() => load({ INVENTORY_CLOCK_SKEW_SECONDS: skew })).toThrow();
+  });
+
+  it('holds TTL − B − skew at or above INVENTORY_MAX_REPLAY_WINDOW_SECONDS, at the edge', () => {
+    // 1 h: 3 600 − (2s + 7) − s ≥ 3 300  ⇔  s ≤ 97.
+    expect(
+      replayWindowRoomSeconds({
+        INVENTORY_IDEMPOTENCY_TTL_HOURS: 1,
+        INVENTORY_CLOCK_SKEW_SECONDS: 97,
+      }),
+    ).toBe(INVENTORY_MAX_REPLAY_WINDOW_SECONDS + 2);
+    expect(
+      load({ INVENTORY_IDEMPOTENCY_TTL_HOURS: '1', INVENTORY_CLOCK_SKEW_SECONDS: '97' })
+        .INVENTORY_CLOCK_SKEW_SECONDS,
+    ).toBe(97);
+    expect(() =>
+      load({ INVENTORY_IDEMPOTENCY_TTL_HOURS: '1', INVENTORY_CLOCK_SKEW_SECONDS: '98' }),
+    ).toThrow(/INVENTORY_MAX_REPLAY_WINDOW_SECONDS/);
+    // A longer retention leaves room for the largest skew.
+    expect(
+      load({ INVENTORY_IDEMPOTENCY_TTL_HOURS: '2', INVENTORY_CLOCK_SKEW_SECONDS: '300' })
+        .INVENTORY_CLOCK_SKEW_SECONDS,
+    ).toBe(300);
+  });
+});
 
 describe('the provisional defaults (Q-102, Q-103)', () => {
   const env = load();
@@ -207,5 +242,41 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
     expect(() =>
       load({ INVENTORY_LOCK_TIMEOUT_MS: '100', DATABASE_STATEMENT_TIMEOUT_MS: '12500' }),
     ).toThrow(/not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/);
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    inventoryEnvSchema,
+    (source) => loadInventoryEnv(source),
+    base,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining([
+        'NODE_ENV',
+        'LOG_LEVEL',
+        'KAFKA_SASL_MECHANISM',
+        'INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED',
+      ]),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

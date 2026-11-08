@@ -383,7 +383,7 @@ describe('who may write a project', () => {
 
   it('the roles default to ORGANIZATION_ADMIN in the service and in the portal alike', () => {
     expect(squash(readSource(...SERVICE, 'config', 'env.ts'))).toContain(
-      "CONSTRUCTION_PROJECT_ROLES:z.string().default('ORGANIZATION_ADMIN')",
+      "CONSTRUCTION_PROJECT_ROLES:z.string().prefault('ORGANIZATION_ADMIN')",
     );
     expect(squash(readSource('apps', 'web', 'src', 'server', 'env.ts'))).toContain(
       "WEB_PROJECT_ROLES:roleList('WEB_PROJECT_ROLES','ORGANIZATION_ADMIN')",
@@ -432,7 +432,7 @@ describe('who may decide a step', () => {
     const text = squash(access)!;
     expect(text).toContain('inboxScope()');
     expect(squash(topLevelConst(approvalDto, 'inboxQuerySchema').getText())).toContain(
-      ".extend({status:z.enum(APPROVAL_STATES).default('PENDING')})",
+      ".extend({status:z.enum(APPROVAL_STATES).prefault('PENDING')})",
     );
   });
 });

@@ -1,7 +1,9 @@
+import { policyRejectionSchema } from '../policy/dto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
-import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { ERROR_CODES, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
 import {
   INTERNAL_TOKEN_SCHEME,
   RESPONSE_BODIES,
@@ -9,6 +11,7 @@ import {
   buildDocumentationApp,
   formatDocument,
 } from './document';
+import { REFUSAL_REASONS, refusal, type ReasonOf, type RefusalArea } from '../shared/refusal';
 
 /**
  * The committed contract is exactly what the generator produces.
@@ -26,6 +29,22 @@ describe('the committed OpenAPI document', () => {
 
   afterAll(async () => {
     await app.close();
+  });
+
+  it('omits transformed body constraints in the served document (FU-120)', () => {
+    const body = JSON.parse(
+      JSON.stringify(
+        buildContractOpenApiDocument(app).paths['/v1/contract-approval-policies/{id}/reject']!.post!
+          .requestBody,
+      ),
+    );
+    expect(body.content['application/json'].schema.properties.reason).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const field = policyRejectionSchema.shape.reason;
+    expect(field.safeParse(' ' + 'a'.repeat(500) + ' ').success).toBe(true);
+    expect(field.safeParse('   ').success).toBe(false);
   });
 
   const committedPath = join(
@@ -241,15 +260,18 @@ describe('the committed OpenAPI document', () => {
       },
     );
 
-    it('cancel names a closed reason code and a bounded note without bidirectional controls', () => {
+    it('cancel names a raw reason code and marks post-trim note constraints as omitted', () => {
       const body = operation('cancel').requestBody.content['application/json']!.schema as {
         required: string[];
         properties: Record<string, { pattern?: string; maxLength?: number }>;
       };
       expect(body.required).toEqual(['reasonCode']);
       expect(body.properties.reasonCode?.pattern).toBe('^[A-Z][A-Z0-9_]{1,63}$');
-      expect(body.properties.note?.maxLength).toBe(1000);
-      expect(body.properties.note?.pattern).toBe(WITHOUT_BIDI_CONTROL.source);
+      expect(body.properties.note).toEqual({
+        type: 'string',
+        pattern: WITHOUT_BIDI_CONTROL.source,
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
     });
 
     it('types each refusal’s details by area with the closed codes answered with that status (docs/06 § 6.7)', () => {
@@ -356,7 +378,11 @@ describe('the committed OpenAPI document', () => {
         'application/json'
       ]!.schema as { properties: Record<string, { type?: string; maxLength?: number }> };
       expect(request.properties.deltaMinor?.type).toBe('string');
-      expect(request.properties.reasonText?.maxLength).toBe(1000);
+      expect(request.properties.reasonText).toEqual({
+        type: 'string',
+        pattern: WITHOUT_BIDI_CONTROL.source,
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
       const milestone = operation('/v1/contracts/{id}/milestones', 'post').requestBody!.content[
         'application/json'
       ]!.schema as { required: string[]; properties: Record<string, { pattern?: string }> };
@@ -598,5 +624,21 @@ describe('the committed OpenAPI document', () => {
     expect(Object.keys(document.paths ?? {}).some((path) => path.startsWith('/health'))).toBe(
       false,
     );
+  });
+
+  it('accepts the error bodies the shared filter really sends, typed refusals included (audit 10-26 F3)', () => {
+    const refusalOf = (area: string, code: string) => {
+      const status = (REFUSAL_REASONS as Record<string, Record<string, number>>)[area]![code]!;
+      const errorCode =
+        status === 403
+          ? ERROR_CODES.FORBIDDEN
+          : status === 409
+            ? ERROR_CODES.INVALID_STATE_TRANSITION
+            : ERROR_CODES.BUSINESS_RULE_VIOLATION;
+      return refusal(errorCode, 'Refused', area as RefusalArea, [code as ReasonOf<RefusalArea>]);
+    };
+    expect(
+      errorEnvelopeProblems(buildContractOpenApiDocument(app), { refusal: refusalOf }),
+    ).toEqual([]);
   });
 });

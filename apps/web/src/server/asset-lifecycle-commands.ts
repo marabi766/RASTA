@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import {
   CHANGE_STATUS_TARGETS,
@@ -19,6 +20,7 @@ import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Commissioning, changing the status of, and decommissioning a machine,
@@ -73,7 +75,7 @@ export const canDecommissionAsset = (roles: readonly string[]): boolean =>
 
 const fa = (value: number): string => toPersianDigits(String(value));
 
-const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
+const BIDI_CONTROL_MESSAGE = formMessage('این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد');
 
 /**
  * A reason, as asset-service takes it: trimmed text of `min` to `max`
@@ -91,9 +93,9 @@ function reasonText(label: string, min: number, max: number) {
     .pipe(
       z
         .string()
-        .min(1, `${label} را بنویسید`)
-        .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .min(1, formMessage(`${label} را بنویسید`))
+        .min(min, formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`))
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
     );
 }
@@ -115,7 +117,7 @@ export const activateFormValues = (): ActivateAssetFormValues => ({});
 export const changeStatusFormSchema = z
   .object({
     status: z.enum(CHANGE_STATUS_TARGETS, {
-      errorMap: () => ({ message: 'وضعیت تازه را از فهرست انتخاب کنید' }),
+      error: formMessage('وضعیت تازه را از فهرست انتخاب کنید'),
     }),
     reason: reasonText(
       'دلیل تغییر',
@@ -143,11 +145,11 @@ export function parseChangeStatusForm(
   values: ChangeStatusFormValues,
   shownStatus: string,
 ): ParsedLifecycleForm<ChangeStatusBody, ChangeStatusField> {
-  const parsed = changeStatusFormSchema.safeParse(values);
+  const parsed = legacyParse(changeStatusFormSchema, values);
   if (!parsed.success) {
     return {
       ok: false,
-      fieldErrors: firstIssuePerField(parsed.error, (value): value is ChangeStatusField =>
+      fieldErrors: firstIssuePerField(parsed.refusal, (value): value is ChangeStatusField =>
         (CHANGE_STATUS_FIELDS as readonly string[]).includes(value),
       ),
     };
@@ -158,8 +160,9 @@ export function parseChangeStatusForm(
   return { ok: true, body: parsed.data };
 }
 
-export const DECOMMISSION_UNCONFIRMED_MESSAGE =
-  'برای اسقاط باید تأیید کنید که پیامد آن را می‌دانید';
+export const DECOMMISSION_UNCONFIRMED_MESSAGE = formMessage(
+  'برای اسقاط باید تأیید کنید که پیامد آن را می‌دانید',
+);
 
 export const decommissionFormSchema = z
   .object({
@@ -168,7 +171,7 @@ export const decommissionFormSchema = z
       DECOMMISSION_REASON_BOUNDS.min,
       DECOMMISSION_REASON_BOUNDS.max,
     ),
-    confirm: z.literal('yes', { errorMap: () => ({ message: DECOMMISSION_UNCONFIRMED_MESSAGE }) }),
+    confirm: z.literal('yes', { error: DECOMMISSION_UNCONFIRMED_MESSAGE }),
   })
   .strict()
   // The tick is the person's confirmation and is not sent: the service's body
@@ -181,11 +184,11 @@ export type DecommissionBody = z.output<typeof decommissionFormSchema>;
 export function parseDecommissionForm(
   values: DecommissionFormValues,
 ): ParsedLifecycleForm<DecommissionBody, DecommissionField> {
-  const parsed = decommissionFormSchema.safeParse(values);
+  const parsed = legacyParse(decommissionFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, (value): value is DecommissionField =>
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is DecommissionField =>
       (DECOMMISSION_FIELDS as readonly string[]).includes(value),
     ),
   };

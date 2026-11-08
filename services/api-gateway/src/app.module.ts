@@ -22,6 +22,7 @@ import {
   TokenVerifier,
   toLogContext,
   type AuthGuardOptions,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { metricsContentType, metricsText } from '@rasta/observability';
@@ -128,6 +129,9 @@ export class GatewayMetricsController {
 @Module({
   controllers: [GatewayHealthController, GatewayMetricsController, GatewayController],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: GATEWAY_ENV, useFactory: () => loadGatewayEnv() },
 
     {

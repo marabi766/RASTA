@@ -12,9 +12,10 @@ import {
 } from '@/ui';
 import { formatJalaliDateLong } from '@/lib/format';
 import {
+  disputeTextLabel,
   transactionReasonLabel,
   transactionSourceLabel,
-  transactionStatusLabel,
+  presentTransactionStatus,
   transactionTypeLabel,
 } from '@/lib/labels';
 import {
@@ -136,7 +137,7 @@ export function TransactionDetailScreen({
       <Section headingId="transaction" title="تراکنش">
         <dl className="text-sm">
           <Row term="وضعیت">
-            <StatusBadge status={t.status} label={transactionStatusLabel(t.status)} />
+            <StatusBadge status={t.status} label={presentTransactionStatus(t)} />
           </Row>
           <Row term="نوع">{transactionTypeLabel(t.transactionType)}</Row>
           <Row term="مبلغ کل">{money(t.grossAmountMinor)}</Row>
@@ -249,7 +250,11 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
             <Row term="زمان ثبت اعتراض">{formatJalaliDateLong(t.disputedAt)}</Row>
           ) : null}
           <Row term="دلیل اعتراض">
-            {t.disputeReason === null ? 'ثبت نشده' : <IsolatedText>{t.disputeReason}</IsolatedText>}
+            {t.disputeReason === null ? (
+              'ثبت نشده'
+            ) : (
+              <IsolatedText>{disputeTextLabel(t.disputeReason)}</IsolatedText>
+            )}
           </Row>
         </dl>
       </div>
@@ -265,12 +270,12 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
       <div className="flex flex-col gap-3">
         <p className="text-sm">
           برای این تراکنش در {formatJalaliDateLong(t.disputedAt)} اعتراض ثبت شده بود و اکنون در
-          وضعیت «{transactionStatusLabel(t.status)}» است.
+          وضعیت «{presentTransactionStatus(t)}» است.
         </p>
         <dl className="text-sm">
           {t.disputeReason !== null ? (
             <Row term={legacy ? 'آخرین متن ثبت‌شده برای اعتراض' : 'دلیل اعتراض'}>
-              <IsolatedText>{t.disputeReason}</IsolatedText>
+              <IsolatedText>{disputeTextLabel(t.disputeReason)}</IsolatedText>
             </Row>
           ) : null}
           {resolution.kind !== 'NONE' ? (
@@ -280,7 +285,7 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
           ) : null}
           {resolution.kind !== 'NONE' && t.disputeResolution !== null ? (
             <Row term={own ? 'شرح تصمیم' : 'شرح آخرین تصمیم'}>
-              <IsolatedText>{t.disputeResolution}</IsolatedText>
+              <IsolatedText>{disputeTextLabel(t.disputeResolution)}</IsolatedText>
             </Row>
           ) : null}
         </dl>

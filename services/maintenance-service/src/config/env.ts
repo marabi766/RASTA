@@ -1,15 +1,27 @@
 import { z } from 'zod';
+import { MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
 import {
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
-  httpUrlSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
-import { maintenanceOperationBudgets } from './operation-budgets';
+import { maintenanceOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const REPLAY_WINDOW_DOES_NOT_FIT = fixed(
+  'MAINTENANCE_IDEMPOTENCY_TTL_HOURS · 3600 − B − MAINTENANCE_CLOCK_SKEW_SECONDS must be at least ' +
+    `${MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS} s (MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS), with ` +
+    'B = 2 · MAINTENANCE_CLOCK_SKEW_SECONDS + 7 s: otherwise a window the shared bound allows could ' +
+    'be refused by the replay fence',
+);
 
 /**
  * maintenance-service configuration.
@@ -20,14 +32,14 @@ export const maintenanceEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * asset-service, asked whether a transfer was recorded when a work-start
      * meets an expired transfer fence (ADR-062 § 3b). Required, with no
      * default: a missing one is found at boot, not at the first expired fence.
      */
-    ASSET_SERVICE_URL: httpUrlSchema,
+    ASSET_SERVICE_URL: serviceUrlSchema,
 
     /** One such question, body included. A timeout refuses the work. */
     ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: z.coerce
@@ -35,7 +47,7 @@ export const maintenanceEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(30_000)
-      .default(3000),
+      .prefault(3000),
 
     /**
      * How far ahead of its due point a schedule announces itself, when the
@@ -49,7 +61,7 @@ export const maintenanceEnvSchema = baseEnvSchema
      * constant buried in the evaluator (AGENTS.md § 9), and any schedule may
      * override it.
      */
-    MAINTENANCE_DEFAULT_LEAD_DAYS: z.coerce.number().int().min(0).max(365).default(7),
+    MAINTENANCE_DEFAULT_LEAD_DAYS: z.coerce.number().int().min(0).max(365).prefault(7),
 
     /**
      * Whether this instance evaluates time-based schedules on a timer.
@@ -68,17 +80,22 @@ export const maintenanceEnvSchema = baseEnvSchema
     MAINTENANCE_DUE_SCAN_ENABLED: booleanEnv(true),
 
     /** How often the time-based scan runs, in seconds. */
-    MAINTENANCE_DUE_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(30).max(86_400).default(900),
+    MAINTENANCE_DUE_SCAN_INTERVAL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(30)
+      .max(86_400)
+      .prefault(900),
 
     /** How many schedules one scan pass evaluates. Bounds the query. */
-    MAINTENANCE_DUE_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
+    MAINTENANCE_DUE_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(200),
 
     /**
      * How long an `Idempotency-Key` on `POST /v1/maintenance-requests` is
      * honoured, in hours (#157, docs/06 § 6.8: 24 by default, configurable).
      * Within it a retry replays the original 201; after it the key is free.
      */
-    MAINTENANCE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    MAINTENANCE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /**
      * How long a claim on an `Idempotency-Key` stays **in flight**, in seconds:
@@ -102,10 +119,57 @@ export const maintenanceEnvSchema = baseEnvSchema
       .int()
       .min(30)
       .max(3_600)
-      .default(120),
+      .prefault(120),
+
+    /**
+     * The largest offset of any replica's clock (and the database's) from true
+     * time, in seconds (FU-171, PM decision D-133). The replay fence
+     * (`maintenance/idempotency.ts`) compares a clock with a deadline the caller
+     * fixed and keeps the response for another replica to find, so its budget is
+     * `B = 2 · skew + margin`: a deadline must end `B` before the retention, and a
+     * completed response is kept at least `B` past it. Beyond this offset the
+     * guarantee is void — alarm on a clock offset above half of it. At its largest
+     * (300) B is 607 s. Digits only: coercion would read an empty value as a skew of 0 and
+     * quietly shrink the budget the guarantee rests on.
+     */
+    MAINTENANCE_CLOCK_SKEW_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('30')
+      .transform(Number)
+      .pipe(z.number().int().min(0).max(300)),
+  })
+  .superRefine((env, ctx) => {
+    // A window of the shared bound's size must be accepted on the slowest legal clock:
+    //   TTL − B − skew ≥ K        (B = 2 · skew + margin)
+    // Otherwise an honest client could meet the 400: fail the boot instead.
+    if (replayWindowRoomSeconds(env) < MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['MAINTENANCE_IDEMPOTENCY_TTL_HOURS'],
+        message: REPLAY_WINDOW_DOES_NOT_FIT,
+      });
+    }
   });
 
+export const MAINTENANCE_ENV_MESSAGES = seal();
+
 export type MaintenanceEnv = z.infer<typeof maintenanceEnvSchema>;
+
+/**
+ * The longest replay window (seconds) this service can accept on its slowest legal
+ * clock: `TTL − B − skew`. The boot check holds it at or above
+ * `MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS`.
+ */
+export function replayWindowRoomSeconds(
+  env: Pick<MaintenanceEnv, 'MAINTENANCE_IDEMPOTENCY_TTL_HOURS' | 'MAINTENANCE_CLOCK_SKEW_SECONDS'>,
+): number {
+  return (
+    env.MAINTENANCE_IDEMPOTENCY_TTL_HOURS * 3600 -
+    replayFenceBudgetMs(env.MAINTENANCE_CLOCK_SKEW_SECONDS) / 1000 -
+    env.MAINTENANCE_CLOCK_SKEW_SECONDS
+  );
+}
 
 export function loadMaintenanceEnv(source: NodeJS.ProcessEnv = process.env): MaintenanceEnv {
   return loadEnv(
@@ -119,7 +183,7 @@ export function loadMaintenanceEnv(source: NodeJS.ProcessEnv = process.env): Mai
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'maintenance-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: maintenanceOperationBudgets },
+    { operationBudgets: maintenanceOperationBudgets, fixedMessages: MAINTENANCE_ENV_MESSAGES },
   );
 }
 

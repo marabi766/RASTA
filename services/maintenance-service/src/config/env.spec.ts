@@ -1,13 +1,14 @@
-import { EnvValidationError } from '@rasta/config';
-import { loadMaintenanceEnv } from './env';
-import { maintenanceOperationBudgets } from './operation-budgets';
+import { EnvValidationError, envEnumProbes } from '@rasta/config';
+import { MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import { loadMaintenanceEnv, maintenanceEnvSchema, replayWindowRoomSeconds } from './env';
+import { maintenanceOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 
 /**
  * `MAINTENANCE_DUE_SCAN_ENABLED` — whether this replica runs the in-process
  * due-date scan.
  *
  * This flag was never a `z.coerce.boolean()`; it was a hand-rolled
- * `z.string().default('true').transform((v) => v !== 'false')`, which is the
+ * `z.string().prefault('true').transform((v) => v !== 'false')`, which is the
  * same defect wearing a different coat. `false` worked, but `FALSE`, `0`,
  * `no` and `off` all came back `true`, and `MAINTENANCE_DUE_SCAN_ENABLD=x`
  * — a typo — silently enabled the scan instead of failing the boot.
@@ -32,6 +33,44 @@ const load = (value?: string) =>
     ...BASE,
     ...(value === undefined ? {} : { MAINTENANCE_DUE_SCAN_ENABLED: value }),
   });
+
+describe('the replay fence budget (FU-171, PM decision D-133)', () => {
+  const env = (overrides: NodeJS.ProcessEnv = {}) => loadMaintenanceEnv({ ...BASE, ...overrides });
+
+  it('defaults to a 30 s skew: B = 2 · 30 s + 7 s', () => {
+    expect(env().MAINTENANCE_CLOCK_SKEW_SECONDS).toBe(30);
+    expect(replayFenceBudgetMs(30)).toBe(67_000);
+  });
+
+  it.each([['-1'], ['301'], ['1.5'], [''], [' '], ['1e2']])(
+    'refuses a skew of %j at startup',
+    (skew) => {
+      expect(() => env({ MAINTENANCE_CLOCK_SKEW_SECONDS: skew })).toThrow(EnvValidationError);
+    },
+  );
+
+  it('holds TTL − B − skew at or above MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS, at the edge', () => {
+    // 1 h: 3 600 − (2s + 7) − s ≥ 3 300  ⇔  s ≤ 97.
+    expect(
+      replayWindowRoomSeconds({
+        MAINTENANCE_IDEMPOTENCY_TTL_HOURS: 1,
+        MAINTENANCE_CLOCK_SKEW_SECONDS: 97,
+      }),
+    ).toBe(MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS + 2);
+    expect(
+      env({ MAINTENANCE_IDEMPOTENCY_TTL_HOURS: '1', MAINTENANCE_CLOCK_SKEW_SECONDS: '97' })
+        .MAINTENANCE_CLOCK_SKEW_SECONDS,
+    ).toBe(97);
+    expect(() =>
+      env({ MAINTENANCE_IDEMPOTENCY_TTL_HOURS: '1', MAINTENANCE_CLOCK_SKEW_SECONDS: '98' }),
+    ).toThrow(/MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS/);
+    // A longer retention leaves room for the largest skew.
+    expect(
+      env({ MAINTENANCE_IDEMPOTENCY_TTL_HOURS: '2', MAINTENANCE_CLOCK_SKEW_SECONDS: '300' })
+        .MAINTENANCE_CLOCK_SKEW_SECONDS,
+    ).toBe(300);
+  });
+});
 
 describe('MAINTENANCE_DUE_SCAN_ENABLED', () => {
   it('defaults to true — the documented default is unchanged', () => {
@@ -137,5 +176,36 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
       /not above ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS, 65000 ms/,
     );
     expect(load({ ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '65001' })).not.toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    maintenanceEnvSchema,
+    (source) => loadMaintenanceEnv(source),
+    BASE,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining(['NODE_ENV', 'LOG_LEVEL', 'KAFKA_SASL_MECHANISM']),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

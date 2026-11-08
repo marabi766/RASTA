@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
+import { test, type Page } from './expect';
+import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
 
@@ -35,6 +36,31 @@ async function violationsOf(page: Page) {
     impact: violation.impact,
     help: violation.help,
     targets: violation.nodes.map((node) => node.target.join(' ')),
+    // What axe measured, so a failure explains itself: for `color-contrast`
+    // the foreground and background it resolved, the ratio and the one it
+    // needed. The dark pass flaked once on a danger Alert's title spans with
+    // no way to tell a real shortfall from a background sampled mid-transition.
+    measured: violation.nodes.map((node) => ({
+      target: node.target.join(' '),
+      colours: [...node.any, ...node.all, ...node.none].flatMap((check) => {
+        const data = check.data as {
+          fgColor?: string;
+          bgColor?: string;
+          contrastRatio?: number;
+          expectedContrastRatio?: string;
+        } | null;
+        return data?.fgColor
+          ? [
+              {
+                fg: data.fgColor,
+                bg: data.bgColor,
+                ratio: data.contrastRatio,
+                needed: data.expectedContrastRatio,
+              },
+            ]
+          : [];
+      }),
+    })),
   }));
 }
 
@@ -53,6 +79,22 @@ test.describe('a visitor page', () => {
   test('the login page has no WCAG 2.1 AA violations and fits the screen', async ({ page }) => {
     await page.goto('/login');
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('ورود به رستا');
+
+    expect(await violationsOf(page)).toEqual([]);
+    expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+  });
+
+  // Dark is a choice made with the switch (owner decision 2026-10-24), and a
+  // page nobody can read in it is a page the choice breaks. Same rules, same
+  // two viewports; reduced motion so the colour transition cannot be sampled
+  // half-way.
+  test('the login page in dark has no WCAG 2.1 AA violations and fits the screen', async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto('/login');
+    await page.getByRole('button', { name: 'حالت تیره' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 
     expect(await violationsOf(page)).toEqual([]);
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
@@ -99,6 +141,8 @@ const SIGNED_IN_PAGES: readonly { readonly path: string; readonly title: string 
   { path: '/maintenance', title: 'نگهداری و تعمیرات' },
   { path: '/maintenance/MNT-SEED-0001', title: /.+/ },
   { path: '/usage', title: 'ثبت کارکرد' },
+  { path: '/inventory', title: 'انبار' },
+  { path: '/suppliers', title: 'تأمین‌کنندگان' },
   { path: '/projects', title: 'پروژه‌های عمرانی' },
   { path: '/organizations', title: /.+/ },
 ];
@@ -116,6 +160,14 @@ test.describe('the signed-in pages (live stack)', () => {
       await expect(page).toHaveURL(new RegExp(`${path.replace(/[/-]/g, '\\$&')}$`));
       await expect(page.getByRole('heading', { level: 1 })).toHaveText(title);
 
+      expect(await violationsOf(page)).toEqual([]);
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+
+      // The same page after the switch, in dark: still readable, still fits
+      // (the switch itself sits in the top bar, so it is measured here too).
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await page.getByRole('banner').getByRole('button', { name: 'حالت تیره' }).click();
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
       expect(await violationsOf(page)).toEqual([]);
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
     });

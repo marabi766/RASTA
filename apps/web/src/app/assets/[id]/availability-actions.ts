@@ -1,5 +1,6 @@
 'use server';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { DeclareFormState, RevokeFormState } from './availability-form-state';
 import { runDeclare, runRevoke } from './availability-runner';
 
@@ -14,17 +15,17 @@ import { runDeclare, runRevoke } from './availability-runner';
 
 export async function submitDeclareAvailability(
   assetId: string,
-  _previous: DeclareFormState,
+  previous: DeclareFormState,
   form: FormData,
 ): Promise<DeclareFormState> {
-  return runDeclare(assetId, form);
+  return keepUnconfirmed(previous, form, () => runDeclare(assetId, form));
 }
 
 export async function submitRevokeAvailability(
   assetId: string,
   windowId: string,
-  _previous: RevokeFormState,
+  previous: RevokeFormState,
   form: FormData,
 ): Promise<RevokeFormState> {
-  return runRevoke(assetId, windowId, form);
+  return keepUnconfirmed(previous, form, () => runRevoke(assetId, windowId, form));
 }

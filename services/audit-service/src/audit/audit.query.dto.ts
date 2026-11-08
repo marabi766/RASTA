@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { numberInput } from '@rasta/contracts';
+import { isoDateTime, numberInput } from '@rasta/contracts';
 import { decodeAuditCursor, InvalidCursorError, type AuditCursor } from './audit.cursor';
 
 /**
@@ -47,6 +47,12 @@ import { decodeAuditCursor, InvalidCursorError, type AuditCursor } from './audit
  * that do not exist, and a cursor is only stable under one ordering.
  */
 
+// Input fields have already passed their schemas. Keep the runtime proof next to conversion.
+function validatedDate(value: unknown): Date {
+  if (typeof value === 'string') return new Date(value);
+  throw new TypeError('Expected a validated timestamp');
+}
+
 /** Page size defaults, from ADR-053 § 3 — shared by every audit listing. */
 export const DEFAULT_PAGE_LIMIT = 25;
 export const MAX_PAGE_LIMIT = 200;
@@ -91,7 +97,7 @@ const outcomeValues = ['SUCCESS', 'FAILURE', 'REFUSED'] as const;
  * platform stores UTC and converts only in the presentation layer, so the
  * boundary a client sends must say which instant it means.
  */
-const instant = z.string().datetime({ offset: true });
+const instant = z.string().check(isoDateTime({ offset: true }));
 
 /**
  * `from` and `to`, the two parameters no audit query may omit.
@@ -170,8 +176,8 @@ function refineWindow(
   ctx: z.RefinementCtx,
   maxWindowDays: number,
 ): void {
-  const from = new Date(value.from);
-  const to = new Date(value.to);
+  const from = validatedDate(value.from);
+  const to = validatedDate(value.to);
 
   if (to.getTime() < from.getTime()) {
     ctx.addIssue({
@@ -211,7 +217,7 @@ function refineWindow(
  */
 export function buildAuditEventQuerySchema(
   maxWindowDays: number = DEFAULT_MAX_QUERY_WINDOW_DAYS,
-): z.ZodType<AuditEventQuery, z.ZodTypeDef, unknown> {
+): z.ZodType<AuditEventQuery, unknown> {
   return z
     .object({
       ...windowShape,
@@ -224,7 +230,7 @@ export function buildAuditEventQuerySchema(
       correlationId: filterString(FILTER_LIMITS.correlationId).optional(),
       outcome: z.enum(outcomeValues).optional(),
       limit: numberInput(z.number().int().min(1).max(MAX_PAGE_LIMIT))
-        .default(DEFAULT_PAGE_LIMIT)
+        .prefault(DEFAULT_PAGE_LIMIT)
         .describe(`Page size. Defaults to ${DEFAULT_PAGE_LIMIT}, capped at ${MAX_PAGE_LIMIT}.`),
       cursor: z.string().min(1).max(512).optional(),
     })
@@ -254,8 +260,8 @@ export function buildAuditEventQuerySchema(
       }
     })
     .transform((value): AuditEventQuery => ({
-      from: new Date(value.from),
-      to: new Date(value.to),
+      from: validatedDate(value.from),
+      to: validatedDate(value.to),
       organizationId: value.organizationId,
       actorId: value.actorId,
       actorType: value.actorType,
@@ -272,14 +278,14 @@ export function buildAuditEventQuerySchema(
 /** Builds the detail query schema for a configured window ceiling. */
 export function buildAuditEventDetailQuerySchema(
   maxWindowDays: number = DEFAULT_MAX_QUERY_WINDOW_DAYS,
-): z.ZodType<AuditEventDetailQuery, z.ZodTypeDef, unknown> {
+): z.ZodType<AuditEventDetailQuery, unknown> {
   return z
     .object({ ...windowShape, ...commonFilterShape })
     .strict()
     .superRefine((value, ctx) => refineWindow(value, ctx, maxWindowDays))
     .transform((value): AuditEventDetailQuery => ({
-      from: new Date(value.from),
-      to: new Date(value.to),
+      from: validatedDate(value.from),
+      to: validatedDate(value.to),
       organizationId: value.organizationId,
     }));
 }
@@ -297,14 +303,14 @@ export function buildAuditEventDetailQuerySchema(
  */
 export function buildAuditVerifyQuerySchema(
   maxWindowDays: number = DEFAULT_MAX_QUERY_WINDOW_DAYS,
-): z.ZodType<AuditVerifyQuery, z.ZodTypeDef, unknown> {
+): z.ZodType<AuditVerifyQuery, unknown> {
   return z
     .object({
       ...windowShape,
       ...commonFilterShape,
       scope: z
         .enum(VERIFY_SCOPES)
-        .default('ORGANIZATION')
+        .prefault('ORGANIZATION')
         .describe(
           'Which chain to verify. `ORGANIZATION` verifies exactly one tenant’s ' +
             'chain; `PLATFORM` verifies the chain of records that have no tenant ' +
@@ -327,8 +333,8 @@ export function buildAuditVerifyQuerySchema(
       }
     })
     .transform((value): AuditVerifyQuery => ({
-      from: new Date(value.from),
-      to: new Date(value.to),
+      from: validatedDate(value.from),
+      to: validatedDate(value.to),
       scope: value.scope,
       organizationId: value.organizationId,
     }));

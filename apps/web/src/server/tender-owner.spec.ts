@@ -40,6 +40,11 @@ import {
   type OwnerState,
 } from './tender-owner';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * The owner module: what it reads, who it offers each form to — the copy of
@@ -55,7 +60,7 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const SETTINGS = {
   WEB_PROJECT_ROLES: ['ORGANIZATION_ADMIN'],
@@ -72,14 +77,16 @@ function person(
   realm: string[] = [],
 ) {
   return ownerCallerOf(
-    jwt({
-      sub: 'kc-subject',
-      org_id: org,
-      org_ids: [org],
-      org_roles: roles.map((role) => `${org}:${role}`),
-      realm_access: { roles: realm },
-      ...(uid ? { rasta_uid: uid } : {}),
-    }),
+    pinnedTokens(
+      jwt({
+        sub: 'kc-subject',
+        org_id: org,
+        org_ids: [org],
+        org_roles: roles.map((role) => `${org}:${role}`),
+        realm_access: { roles: realm },
+        ...(uid ? { rasta_uid: uid } : {}),
+      }),
+    ),
   );
 }
 
@@ -163,7 +170,7 @@ describe('who may publish — assertCanWrite and @RequirePlatformUserId', () => 
     expect(canPublish(person(['ORGANIZATION_ADMIN', 'AUDITOR']), SETTINGS)).toBe(false);
     expect(canPublish(person(['FLEET_MANAGER']), SETTINGS)).toBe(false);
     expect(canPublish(person(['ORGANIZATION_ADMIN'], null), SETTINGS)).toBe(false);
-    expect(canPublish(ownerCallerOf('not-a-token'), SETTINGS)).toBe(false);
+    expect(canPublish(ownerCallerOf(pinnedTokens('not-a-token')), SETTINGS)).toBe(false);
   });
 });
 
@@ -689,16 +696,23 @@ describe('what every answer becomes', () => {
     });
   });
 
-  it('an unknown refusal is one fixed sentence; a 5xx and a 504 are unconfirmed', async () => {
+  it('an unnamed documented refusal is one fixed sentence; an undocumented code, a 5xx and a 504 are unconfirmed', async () => {
     expect(
       await send(
         open,
-        jest.fn(async () => problem(422, 'SOMETHING_NEW')),
+        jest.fn(async () => problem(409, 'ALREADY_EXISTS')),
       ),
     ).toMatchObject({
       kind: 'INVALID',
       message: OWNER_REFUSAL_FALLBACK,
     });
+    // PR-830 r1 F1: a code the platform does not document proves nothing.
+    expect(
+      await send(
+        open,
+        jest.fn(async () => problem(422, 'SOMETHING_NEW')),
+      ),
+    ).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
     expect(
       await send(
         open,

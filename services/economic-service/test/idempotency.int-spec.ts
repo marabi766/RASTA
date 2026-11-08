@@ -411,7 +411,7 @@ describe('idempotency (real database)', () => {
       it('releases the key for any other error, even on an opted-in endpoint', async () => {
         await expect(
           run('key-term-04', {}, async () => {
-            throw RastaError.insufficientBalance('WAL-1', '10', '1');
+            throw RastaError.insufficientBalance('WAL-1');
           }),
         ).rejects.toThrow(expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }));
         expect(await stored('key-term-04')).toBeNull();

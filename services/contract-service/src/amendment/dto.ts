@@ -65,7 +65,7 @@ export const listAmendmentsQuerySchema = z
       .refine((value) => Number(value) <= 2_147_483_647, 'cursor is out of range')
       .optional()
       .describe('Opaque, server-issued.'),
-    limit: numberInput(z.number().int().min(1).max(100)).default(50),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(50),
   })
   .strict();
 export type ListAmendmentsQuery = z.infer<typeof listAmendmentsQuerySchema>;

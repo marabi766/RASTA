@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { legacyDatetimeRegex } from '@rasta/contracts';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { InventoryAccess, type Acting } from '../access/access';
 import type { InventoryEnv } from '../config/env';
@@ -22,6 +23,9 @@ import { ExpiryBacklog, ReservationExpiry, type ExpiryBatch } from './expiry';
 import { ReservationRepository, type ReservationRow } from './reservation.repository';
 import { canMove, isDue } from './reservation.state-machine';
 import { toReservationView } from './views';
+
+/** The instant syntax the reserve DTO accepts; the guard re-checks it (FU-035). */
+const EXPIRY_SYNTAX = legacyDatetimeRegex({ offset: true });
 
 /**
  * Reservations (ADR-056 § 3): `ReserveStock`, `ReleaseReservation` and `IssueStock`.
@@ -58,77 +62,94 @@ export class ReservationService {
     const acting = this.access.assertOperator();
     const correlationId = getContext().correlationId;
 
-    return this.runner.run('reserve', command.fence, reservationOverdrawn, async (tx, at) => {
-      const holder = dto.holderOrganizationId ?? acting.organizationId;
-      if (holder !== acting.organizationId) {
-        throw refusal(
-          'reservation',
-          'HOLDER_NOT_OWNER',
-          'A reservation is held for the warehouse owner in this version',
+    const holder = dto.holderOrganizationId ?? acting.organizationId;
+    return this.runner.runLocked(
+      'reserve',
+      command.fence,
+      reservationOverdrawn,
+      async (tx) => {
+        if (holder !== acting.organizationId) {
+          throw refusal(
+            'reservation',
+            'HOLDER_NOT_OWNER',
+            'A reservation is held for the warehouse owner in this version',
+          );
+        }
+        const wanted = ascending(dto.lines.map((line) => line.stockItemId));
+        const locked = await this.stock.lockInOrder(tx, acting.organizationId, wanted);
+        if (locked.length !== wanted.length) {
+          const missing = wanted.find((id) => !locked.some((item) => item.id === id));
+          throw RastaError.notFound('StockItem', missing);
+        }
+        if (new Set(locked.map((item) => item.warehouseId)).size > 1) {
+          throw refusal(
+            'reservation',
+            'LINES_SPAN_WAREHOUSES',
+            'A reservation holds stock of one warehouse',
+          );
+        }
+
+        const candidates = new Map<
+          string,
+          Awaited<ReturnType<ReservationExpiry['lockCandidates']>>
+        >();
+        for (const item of locked) {
+          candidates.set(item.id, await this.expiry.lockCandidates(tx, item));
+        }
+        return { locked, candidates };
+      },
+      async (tx, at, { locked, candidates }) => {
+        // Revalidate against the decision instant AFTER the final stock and reservation lock.
+        const expiresAt = this.expiryOf(dto.expiresAt, at);
+        const quantityOf = new Map(dto.lines.map((line) => [line.stockItemId, line.quantity]));
+        const asked = (item: StockItemRow): number => quantityOf.get(item.id) as number;
+        // A line beyond on hand never fits, whatever expires: expiry gives back reserved, never
+        // on hand. Final, before any expiry runs.
+        const beyond = locked.find((item) => asked(item) > item.onHandQuantity);
+        if (beyond) throw insufficientStock(beyond.id);
+
+        const batches: ExpiryBatch[] = [];
+        for (const item of locked) {
+          const due = candidates.get(item.id);
+          if (due === undefined) throw new Error('Missing locked expiry candidates');
+          batches.push(await this.expiry.expireDue(tx, item, at, correlationId, 'command', due));
+        }
+        const items: StockItemRow[] = batches.map((batch) => batch.item);
+        const short = batches.filter(({ item }) => asked(item) > item.availableQuantity);
+        // Short even with every due reservation past the batch expired: live reservations hold
+        // what is missing, and the refusal is final (`ReservationExpiry`).
+        const sure = short.find(
+          ({ item, backlogQuantity }) => asked(item) > item.availableQuantity + backlogQuantity,
         );
-      }
-      const expiresAt = this.expiryOf(dto.expiresAt, at);
+        if (sure) throw insufficientStock(sure.item.id);
+        // Short only while the backlog still holds stock: expired, it makes room — not sure yet.
+        if (short.length > 0) {
+          throw new ExpiryBacklog(
+            acting.organizationId,
+            short.map(({ item }) => item.id),
+          );
+        }
 
-      const wanted = ascending(dto.lines.map((line) => line.stockItemId));
-      const locked = await this.stock.lockInOrder(tx, acting.organizationId, wanted);
-      if (locked.length !== wanted.length) {
-        const missing = wanted.find((id) => !locked.some((item) => item.id === id));
-        throw RastaError.notFound('StockItem', missing);
-      }
-      if (new Set(locked.map((item) => item.warehouseId)).size > 1) {
-        throw refusal(
-          'reservation',
-          'LINES_SPAN_WAREHOUSES',
-          'A reservation holds stock of one warehouse',
-        );
-      }
-
-      const quantityOf = new Map(dto.lines.map((line) => [line.stockItemId, line.quantity]));
-      const asked = (item: StockItemRow): number => quantityOf.get(item.id) as number;
-      // A line beyond on hand never fits, whatever expires: expiry gives back reserved, never
-      // on hand. Final, before any expiry runs.
-      const beyond = locked.find((item) => asked(item) > item.onHandQuantity);
-      if (beyond) throw insufficientStock(beyond.id);
-
-      const batches: ExpiryBatch[] = [];
-      for (const item of locked) {
-        batches.push(await this.expiry.expireDue(tx, item, at, correlationId, 'command'));
-      }
-      const items: StockItemRow[] = batches.map((batch) => batch.item);
-      const short = batches.filter(({ item }) => asked(item) > item.availableQuantity);
-      // Short even with every due reservation past the batch expired: live reservations hold
-      // what is missing, and the refusal is final (`ReservationExpiry`).
-      const sure = short.find(
-        ({ item, backlogQuantity }) => asked(item) > item.availableQuantity + backlogQuantity,
-      );
-      if (sure) throw insufficientStock(sure.item.id);
-      // Short only while the backlog still holds stock: expired, it makes room — not sure yet.
-      if (short.length > 0) {
-        throw new ExpiryBacklog(
-          acting.organizationId,
-          short.map(({ item }) => item.id),
-        );
-      }
-
-      const made = new Map<string, ReservationView>();
-      for (const item of items) {
-        const reservation = await this.reserveLine(tx, {
-          acting,
-          item,
-          quantity: asked(item),
-          holder,
-          orderReference: dto.orderReference ?? null,
-          expiresAt,
-          keyHash: command.keyHash,
-          correlationId,
-          at,
-        });
-        made.set(item.id, toReservationView(reservation));
-      }
-      return {
-        reservations: dto.lines.map((line) => made.get(line.stockItemId) as ReservationView),
-      };
-    });
+        const made = new Map<string, ReservationView>();
+        for (const item of items) {
+          const reservation = await this.reserveLine(tx, {
+            acting,
+            item,
+            quantity: asked(item),
+            holder,
+            orderReference: dto.orderReference ?? null,
+            expiresAt,
+            keyHash: command.keyHash,
+            correlationId,
+            at,
+          });
+          made.set(item.id, toReservationView(reservation));
+        }
+        return {
+          reservations: dto.lines.map((line) => made.get(line.stockItemId) as ReservationView),
+        };
+      },
+    );
   }
 
   private async reserveLine(
@@ -197,15 +218,22 @@ export class ReservationService {
   }
 
   /**
-   * `expiresAt`, if given, lies after the transaction's instant and at most
+   * `expiresAt`, if given, lies strictly after the post-lock decision instant and at most
    * INVENTORY_RESERVATION_MAX_TTL_SECONDS after it — the database's clock, the one expiry is
-   * judged by.
+   * judged by. The syntax is the DTO's own (`isoDateTime({ offset: true })`): `Date` alone parses
+   * offsets beyond ±14:00 (`-15:00`), so a caller past the DTO would get an instant the published
+   * contract refuses (FU-035).
    */
   private expiryOf(expiresAt: string | undefined, at: Date): Date | null {
     if (expiresAt === undefined) return null;
     const instant = new Date(expiresAt);
     const latest = at.getTime() + this.env.INVENTORY_RESERVATION_MAX_TTL_SECONDS * 1000;
-    if (instant.getTime() <= at.getTime() || instant.getTime() > latest) {
+    if (
+      !EXPIRY_SYNTAX.test(expiresAt) ||
+      !Number.isFinite(instant.getTime()) ||
+      instant.getTime() <= at.getTime() ||
+      instant.getTime() > latest
+    ) {
       throw refusal(
         'reservation',
         'EXPIRY_OUT_OF_RANGE',
@@ -247,74 +275,88 @@ export class ReservationService {
     const correlationId = getContext().correlationId;
     const status = kind === 'release' ? 'RELEASED' : 'CONSUMED';
 
-    return this.runner.run(kind, command.fence, stockOverdrawn, async (tx, at) => {
-      const locked = await this.stock.lock(tx, acting.organizationId, found.stockItemId);
-      if (!locked) throw RastaError.notFound('StockReservation', id);
-      // An expiry that is due is honoured first: a reservation past its time is EXPIRED, and
-      // releasing or issuing it is then refused like any other ended one. A backlog left past
-      // the batch only lowers reserved, which neither a release nor an issue depends on.
-      const { item } = await this.expiry.expireDue(tx, locked, at, correlationId, 'command');
-      const reservation = await this.reservations.lock(tx, acting.organizationId, id);
-      if (!reservation) throw RastaError.notFound('StockReservation', id);
-      // This one may be due and still past the batch: it is expired all the same.
-      const current = isDue(reservation, at) ? 'EXPIRED' : reservation.status;
-      if (!canMove(current, status)) {
-        throw refusal(
-          'reservation',
-          'RESERVATION_NOT_ACTIVE',
-          'The reservation has already been issued, released or expired',
-          { reservationId: id, status: current },
+    return this.runner.runLocked(
+      kind,
+      command.fence,
+      stockOverdrawn,
+      async (tx) => {
+        const locked = await this.stock.lock(tx, acting.organizationId, found.stockItemId);
+        if (!locked) throw RastaError.notFound('StockReservation', id);
+        const reservation = await this.reservations.lock(tx, acting.organizationId, id);
+        if (!reservation) throw RastaError.notFound('StockReservation', id);
+        const candidates = await this.expiry.lockCandidates(tx, locked);
+        return { locked, reservation, candidates };
+      },
+      async (tx, at, { locked, reservation, candidates }) => {
+        // Due targets are refused even beyond the bounded batch. The refusal rolls expiry back.
+        const { item } = await this.expiry.expireDue(
+          tx,
+          locked,
+          at,
+          correlationId,
+          'command',
+          candidates,
         );
-      }
-      if (dto.expectedVersion !== undefined && dto.expectedVersion !== reservation.version) {
-        throw RastaError.optimisticLockFailed('StockReservation', id);
-      }
-      const ended = await this.reservations.end(tx, reservation, status, acting.userId, at);
-      if (!ended) throw RastaError.optimisticLockFailed('StockReservation', id);
+        // This one may be due and still past the batch: it is expired all the same.
+        const current = isDue(reservation, at) ? 'EXPIRED' : reservation.status;
+        if (!canMove(current, status)) {
+          throw refusal(
+            'reservation',
+            'RESERVATION_NOT_ACTIVE',
+            'The reservation has already been issued, released or expired',
+            { reservationId: id, status: current },
+          );
+        }
+        if (dto.expectedVersion !== undefined && dto.expectedVersion !== reservation.version) {
+          throw RastaError.optimisticLockFailed('StockReservation', id);
+        }
+        const ended = await this.reservations.end(tx, reservation, status, acting.userId, at);
+        if (!ended) throw RastaError.optimisticLockFailed('StockReservation', id);
 
-      const deltas =
-        kind === 'release'
-          ? { onHand: 0, reserved: -ended.quantity }
-          : { onHand: -ended.quantity, reserved: -ended.quantity };
-      const moved = await this.stock.move(tx, item, deltas, acting.userId, at);
-      const movement = await this.stock.insertMovement(tx, {
-        id: newId(ID_PREFIX.movement),
-        item: moved,
-        type: kind === 'release' ? 'RELEASE' : 'ISSUE',
-        onHandDelta: deltas.onHand,
-        reservedDelta: deltas.reserved,
-        reservationId: ended.id,
-        sourceReference: ended.orderReference,
-        commandKeyHash: command.keyHash,
-        correlationId,
-        actor: acting.userId,
-        at,
-      });
-      const facts = { ...stockFacts(moved, movement.id), ...reservationFacts(ended) };
-      if (kind === 'release') {
-        await this.publisher.enqueue(tx, {
-          eventName: 'STOCK_RELEASED',
-          aggregateId: moved.id,
-          organizationId: moved.organizationId,
-          occurredAt: at,
-          payload: {
-            ...facts,
-            reason: 'RELEASED',
-            releasedBy: acting.userId,
-            releasedAt: at.toISOString(),
-          },
+        const deltas =
+          kind === 'release'
+            ? { onHand: 0, reserved: -ended.quantity }
+            : { onHand: -ended.quantity, reserved: -ended.quantity };
+        const moved = await this.stock.move(tx, item, deltas, acting.userId, at);
+        const movement = await this.stock.insertMovement(tx, {
+          id: newId(ID_PREFIX.movement),
+          item: moved,
+          type: kind === 'release' ? 'RELEASE' : 'ISSUE',
+          onHandDelta: deltas.onHand,
+          reservedDelta: deltas.reserved,
+          reservationId: ended.id,
+          sourceReference: ended.orderReference,
+          commandKeyHash: command.keyHash,
+          correlationId,
+          actor: acting.userId,
+          at,
         });
-      } else {
-        await this.publisher.enqueue(tx, {
-          eventName: 'STOCK_ISSUED',
-          aggregateId: moved.id,
-          organizationId: moved.organizationId,
-          occurredAt: at,
-          payload: { ...facts, issuedBy: acting.userId, issuedAt: at.toISOString() },
-        });
-      }
-      return toReservationView(ended);
-    });
+        const facts = { ...stockFacts(moved, movement.id), ...reservationFacts(ended) };
+        if (kind === 'release') {
+          await this.publisher.enqueue(tx, {
+            eventName: 'STOCK_RELEASED',
+            aggregateId: moved.id,
+            organizationId: moved.organizationId,
+            occurredAt: at,
+            payload: {
+              ...facts,
+              reason: 'RELEASED',
+              releasedBy: acting.userId,
+              releasedAt: at.toISOString(),
+            },
+          });
+        } else {
+          await this.publisher.enqueue(tx, {
+            eventName: 'STOCK_ISSUED',
+            aggregateId: moved.id,
+            organizationId: moved.organizationId,
+            occurredAt: at,
+            payload: { ...facts, issuedBy: acting.userId, issuedAt: at.toISOString() },
+          });
+        }
+        return toReservationView(ended);
+      },
+    );
   }
 
   // -- reads --------------------------------------------------------------------------------

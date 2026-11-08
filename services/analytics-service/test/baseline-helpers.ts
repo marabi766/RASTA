@@ -2,7 +2,11 @@ import { ulid } from 'ulid';
 import type { Prisma } from '../src/generated/prisma';
 import { ownerClient } from './helpers';
 
-export const KPI_WINDOW = { from: '2026-10-01T00:00:00.000Z', to: '2026-11-01T00:00:00.000Z' };
+// A window that has ENDED for good: a KPI window reaching into the future is NO_DATA (Q-154), so a
+// fixture window that is open today would make every AVAILABLE assertion depend on the date.
+export const KPI_WINDOW = { from: '2026-07-01T00:00:00.000Z', to: '2026-08-01T00:00:00.000Z' };
+/** A coverage start safely before `KPI_WINDOW.from`. */
+export const COVERED_SINCE = new Date('2026-01-01T00:00:00.000Z');
 
 /** Synthetic measurements for isolated tests only; never a demo/production seed. */
 export function baselineFixture(

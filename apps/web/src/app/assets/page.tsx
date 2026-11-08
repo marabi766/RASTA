@@ -1,14 +1,23 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
+import { readReleaseFeedback } from '@/server/release-feedback';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 import { fetchAssets, type AssetListQuery } from '@/server/assets';
 import { canManageAssets } from '@/server/asset-commands';
-import { tokenWriteRoles } from '@/server/realm-roles';
-import { mintSubmissionId } from '@/server/submission';
+import { assetRegistrationRequest } from '@/server/create-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
 import { AssetsScreen } from './AssetsScreen';
+import { releaseUnresolvedAssetRegistration } from './actions';
+import { UnresolvedRegistrationNotice } from '@/app/UnresolvedRegistrationNotice';
 import { RegisterAssetForm } from './RegisterAssetForm';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/assets` route.
@@ -33,12 +42,12 @@ export default async function AssetsPage({
 }) {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/assets');
-  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // What the forms are offered on: the token's roles in the pinned organization (`sessionWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenWriteRoles(session.accessToken);
+  const roles = sessionWriteRoles(session);
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   // `status` and `type` are strict enums on asset-service's side: a value
   // outside them (a stale bookmark, a hand-edited URL) is dropped here rather
   // than sent, where it would turn the whole list into an error page.
@@ -56,10 +65,13 @@ export default async function AssetsPage({
   // decides again on every submit.
   const manage = roles !== null && canManageAssets(roles);
 
+  const createState = await assetRegistrationRequest.restore(session);
+
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -70,14 +82,35 @@ export default async function AssetsPage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
+      <ReleaseFeedback
+        surface="asset-registration"
+        outcome={readReleaseFeedback(
+          session,
+          { surface: 'asset-registration' },
+          params,
+          createState.kind === 'IDLE',
+        )}
+      />
+      {!manage && 'releaseToken' in createState && createState.releaseToken ? (
+        <UnresolvedRegistrationNotice
+          csrfToken={session.csrfToken}
+          releaseToken={createState.releaseToken}
+          href="/assets"
+          action={releaseUnresolvedAssetRegistration}
+        />
+      ) : null}
       <AssetsScreen
         result={result}
-        query={query}
+        query={{ ...query, context: pageContext(session) }}
         registerForm={
           manage ? (
             <RegisterAssetForm
+              key={
+                'releaseToken' in createState ? createState.releaseToken : createState.submissionId
+              }
               csrfToken={session.csrfToken}
-              submissionId={mintSubmissionId(session)}
+              submissionId={createState?.submissionId ?? ''}
+              initialState={createState ?? undefined}
             />
           ) : undefined
         }

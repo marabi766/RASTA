@@ -1,5 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
+import { LAYOUT_ORIGIN } from './e2e/layout/constants';
+import { webServers } from './e2e/web-servers';
+
 /**
  * Browser tests for the portal.
  *
@@ -15,7 +18,25 @@ import { defineConfig, devices } from '@playwright/test';
  */
 /** The specs that also run at a phone's viewport: read-only, see the project. */
 const MOBILE_SPECS =
-  /(accessibility|tenant-isolation|asset-lifecycle|asset-records|asset-documents-availability)\.spec\.ts$/;
+  /(accessibility|tenant-isolation|asset-lifecycle|asset-records|asset-documents-availability|inventory-commands)\.spec\.ts$/;
+
+/**
+ * The phone-layout suite (`e2e/mobile-layout.spec.ts`) runs against its own copy
+ * of the portal and a fixture gateway, not the live stack: its project below,
+ * its two `webServer` entries at the end. Every other project ignores it.
+ */
+const LAYOUT_SPEC = /mobile-layout\.spec\.ts$/;
+
+/**
+ * No server is ever reused, and nothing is inspected while this file loads
+ * (`e2e/server-reuse.ts`, TASK 323 and 325): workers and UI mode's loader load it
+ * again, and a port that is free now can be taken before the server binds. Locally
+ * each entry starts through `e2e/own-server.mjs`, which reports it ready only
+ * while the server it launched is the sole holder of the port; CI, on a fresh
+ * machine, polls the URL as before. The entries are in `e2e/web-servers.ts`, so
+ * the rule can be tested without loading Playwright.
+ */
+const ci = Boolean(process.env.CI);
 
 export default defineConfig({
   testDir: './e2e',
@@ -35,7 +56,14 @@ export default defineConfig({
     timezoneId: 'Asia/Tehran',
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] }, testIgnore: LAYOUT_SPEC },
+    {
+      // Populated pages at explicit 360, 390 and 1280 px widths, with no live
+      // stack (see LAYOUT_SPEC). The viewport is set by the spec itself.
+      name: 'layout',
+      use: { ...devices['Desktop Chrome'], baseURL: LAYOUT_ORIGIN },
+      testMatch: LAYOUT_SPEC,
+    },
     {
       // The same Chromium at a phone's size and with touch: Pixel 5, 393×851.
       // docs/16 § 16.3 makes this portal mobile-first (a dehyari operator at a
@@ -51,6 +79,8 @@ export default defineConfig({
       // and `asset-documents-availability.spec.ts` share nothing: every test
       // registers its own machine, so a phone is a second viewport and not a
       // second writer.
+      // `inventory-commands.spec.ts` is of the same kind: every run creates its own
+      // warehouse, so a phone is a second viewport and not a second writer.
       // Accessibility and tenant isolation are exactly what a second viewport
       // can change — layout, reflow, what is reachable — so those run on both.
       name: 'mobile',
@@ -58,15 +88,5 @@ export default defineConfig({
       testMatch: MOBILE_SPECS,
     },
   ],
-  webServer: {
-    // A production build in CI, the dev server locally. They are different
-    // programs: the dev server compiles on demand and tolerates things the
-    // build refuses, so a browser job running against it would pass on code
-    // that could not ship. Locally the compile-on-demand is what makes the
-    // suite usable while writing a screen.
-    command: process.env.CI ? 'pnpm run start' : 'pnpm run dev',
-    url: 'http://localhost:3200',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-  },
+  webServer: webServers(ci),
 });

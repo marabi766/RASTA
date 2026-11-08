@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { z } from 'zod';
+import { guardedFetch } from '@rasta/testing';
 
 import { liveAccessToken, type ProvisionedPerson } from './live-session';
 import { provisionPerson, provisionedAccessToken } from './provisioned-people';
@@ -82,7 +83,7 @@ export async function gateway(
   status: number,
   body?: unknown,
 ): Promise<unknown> {
-  const response = await fetch(gatewayUrl(path), {
+  const response = await guardedFetch(gatewayUrl(path), {
     method,
     headers: {
       authorization: `Bearer ${token}`,
@@ -256,14 +257,16 @@ export async function castForRun(
       estimatedCostMinor: '5000000000',
     }),
   );
-  const need = withId.parse(
+  const need = versioned.parse(
     await gateway(author, 'POST', `/v1/projects/${project.id}/needs`, 201, {
+      expectedProjectVersion: project.version,
       title: 'Contractor',
       description: 'Resurfacing works, two kilometres',
     }),
   );
   await gateway(author, 'POST', `/v1/projects/${project.id}/needs/${need.id}/submit`, 200, {
-    expectedVersion: 1,
+    expectedProjectVersion: project.version,
+    expectedVersion: need.version,
   });
   await gateway(author, 'POST', `/v1/projects/${project.id}/approvals`, 200, {
     expectedVersion: project.version,
@@ -384,7 +387,7 @@ async function attempt(
   token: string,
   path: string,
 ): Promise<{ readonly status: number; readonly body: unknown }> {
-  const response = await fetch(gatewayUrl(path), {
+  const response = await guardedFetch(gatewayUrl(path), {
     method: 'POST',
     headers: {
       authorization: `Bearer ${token}`,
@@ -541,7 +544,7 @@ export async function awardedTender(
   const { id, bidId } = await awardApprovedTender(cast, prices);
   const giveUp = Date.now() + 90_000;
   for (;;) {
-    const response = await fetch(gatewayUrl(`/v1/tenders/${id}/award`), {
+    const response = await guardedFetch(gatewayUrl(`/v1/tenders/${id}/award`), {
       method: 'POST',
       headers: {
         authorization: `Bearer ${cast.author}`,

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toPersianDigits } from '@/lib/format';
@@ -8,7 +9,7 @@ import {
   DISPUTE_COMMANDS,
   DISPUTE_FIELD_LIMITS as LIMITS,
   DISPUTE_FROM_STATES,
-  DISPUTE_TARGET_STATE,
+  DISPUTE_TARGET_STATES,
   NEVER_ROLE,
   PLATFORM_ROLES,
   disputedThroughOrder,
@@ -19,11 +20,13 @@ import {
 } from '@/lib/transaction-dispute-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { utcInstant } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 export type { ReadResult };
 
@@ -74,6 +77,8 @@ const transactionSchema = z.object({
   counterpartyOrganizationId: z.string().nullable(),
   transactionType: z.string(),
   status: z.string(),
+  /** Whether HELD is proven (`presentTransactionStatus`). Absent from an older service: not proven. */
+  heldProven: z.boolean().optional(),
   grossAmountMinor: minorUnits,
   commissionAmountMinor: minorUnits,
   netAmountMinor: minorUnits,
@@ -129,7 +134,7 @@ export async function fetchTransaction(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: `/v1/transactions/${encodeURIComponent(transactionId)}`,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = transactionSchema.safeParse(response.data);
@@ -155,7 +160,7 @@ export async function fetchTransaction(
 export interface DisputeViewer {
   /**
    * The roles the service will act on for this request — read from the access
-   * token (`tokenAuthority`), never from `/v1/users/me` — or `null` when they
+   * token (`sessionAuthority`), never from `/v1/users/me` — or `null` when they
    * could not be read.
    */
   readonly roles: readonly string[] | null;
@@ -233,8 +238,14 @@ const textSchema = (field: DisputeField, what: string, why: string) =>
   z
     .string()
     .trim()
-    .min(LIMITS[field].min, `${what} را دست‌کم در ${digits(LIMITS[field].min)} نویسه بنویسید${why}`)
-    .max(LIMITS[field].max, `${what} نباید بیش از ${digits(LIMITS[field].max)} نویسه باشد`);
+    .min(
+      LIMITS[field].min,
+      formMessage(`${what} را دست‌کم در ${digits(LIMITS[field].min)} نویسه بنویسید${why}`),
+    )
+    .max(
+      LIMITS[field].max,
+      formMessage(`${what} نباید بیش از ${digits(LIMITS[field].max)} نویسه باشد`),
+    );
 
 const COMMAND_SCHEMAS = {
   DISPUTE: z.object({
@@ -276,13 +287,17 @@ export function parseDisputeCommand(input: DisputeFormInput): ParsedDisputeComma
 
   const command = input.command;
   const field = DISPUTE_COMMAND_FIELDS[command];
-  const parsed = COMMAND_SCHEMAS[command].safeParse(input.values);
+  const parsed = legacyParse(COMMAND_SCHEMAS[command], input.values);
   if (parsed.success) {
     const text = (parsed.data as Record<DisputeField, string>)[field];
     return { ok: true, request: { command, body: { [field]: text } } };
   }
 
-  return { ok: false, command, fieldErrors: firstIssuePerField(parsed.error, [field]) };
+  return {
+    ok: false,
+    command,
+    fieldErrors: firstIssuePerField(parsed.refusal, [field]),
+  };
 }
 
 /**
@@ -322,13 +337,13 @@ export const DISPUTE_FIELD_MAPPING: FieldMapping<DisputeField> = {
 };
 
 /**
- * What a confirmed answer must look like: this transaction, in the state the
+ * What a confirmed answer must look like: this transaction, in a state the
  * command leads to. A replay answers with the stored result, which is that same
  * state, so a 2xx that shows anything else cannot be told from "maybe" and is
  * unconfirmed (`writeThroughGateway`).
  */
 const answerSchema = (transactionId: string, command: DisputeCommand) =>
-  z.object({ id: z.literal(transactionId), status: z.literal(DISPUTE_TARGET_STATE[command]) });
+  z.object({ id: z.literal(transactionId), status: z.enum(DISPUTE_TARGET_STATES[command]) });
 
 export type DisputeCommandResult = Exclude<
   WriteResult<{ id: string; status: string }, DisputeField>,

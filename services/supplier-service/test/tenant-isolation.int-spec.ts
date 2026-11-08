@@ -96,7 +96,12 @@ describe('tenant isolation', () => {
 
     it('refuses B suspending A', async () => {
       await expect(
-        asSupplier(orgB, () => w.suspensions.suspend(supplierA.id, { reason: 'A stated reason' })),
+        asSupplier(orgB, () =>
+          w.suspensions.suspend(supplierA.id, {
+            reason: 'A stated reason',
+            latestSuspensionId: null,
+          }),
+        ),
       ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     });
 
@@ -115,7 +120,11 @@ describe('tenant isolation', () => {
       await expect(
         runWithContext(
           context({ organizationId: orgA, userId: newUserId(), roles: ['SYSTEM_ADMIN'] }),
-          () => w.suspensions.suspend(supplierA.id, { reason: 'Lifting my own problem' }),
+          () =>
+            w.suspensions.suspend(supplierA.id, {
+              reason: 'Lifting my own problem',
+              latestSuspensionId: null,
+            }),
         ),
       ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     });
@@ -155,6 +164,18 @@ describe('tenant isolation', () => {
 
       expect(a?.capabilities).toEqual(['WORKSHOP_SERVICE']);
       expect(a?.qualifiedFor).toEqual([]);
+    });
+
+    it("narrowed to A's organization (FU-019), still gives B the directory entry only", async () => {
+      const page = await asSupplier(orgB, () =>
+        w.suppliers.search({ organizationId: [orgA], limit: 200 }),
+      );
+      const serialised = JSON.stringify(page.items);
+
+      expect(page.items.map((item) => item.id)).toEqual([supplierA.id]);
+      expect(serialised).not.toContain('DOC_PRIVATE_A');
+      expect(serialised).not.toContain('Private statement A');
+      expect(serialised).not.toContain(qualificationA.id);
     });
   });
 

@@ -14,9 +14,9 @@ import type { ReturnableLine, ReturnRequestBody } from '@/lib/return-request';
 import type { ReadResult } from './assets';
 import { webServerEnv } from './env';
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential, sessionAuthority, type SessionTokens } from './session-organization';
 import { renderableDate } from './instant';
 import type { Order } from './orders';
-import { tokenAuthority } from './realm-roles';
 import { rolesGuardAdmits } from './roles-guard';
 import type { WebSession } from './session';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
@@ -32,7 +32,7 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
  * Neither the order nor the return view says what this caller may do with a
  * return (there is no `availableActions` for returns), so the forms a page
  * draws are copies of the service's own checks, from the roles **the access
- * token** carries for the organization it resolves to (`tokenAuthority`), in
+ * token** carries for the organization it resolves to (`sessionAuthority`), in
  * the service's order:
  *
  * 1. `@Roles` of the route (`rolesGuardAdmits`: AUDITOR never, SYSTEM_ADMIN
@@ -71,7 +71,7 @@ const returnLineSchema = z.object({
   quantity: z.number().int().positive(),
 });
 
-const nullableDate = renderableDate.nullable().default(null);
+const nullableDate = renderableDate.nullable().prefault(null);
 
 const returnRequestSchema = z.object({
   id: z.string().min(1),
@@ -81,18 +81,18 @@ const returnRequestSchema = z.object({
   buyerOrganizationId: z.string().min(1),
   supplierOrganizationId: z.string().min(1),
   reason: z.string(),
-  lines: z.array(returnLineSchema).default([]),
+  lines: z.array(returnLineSchema).prefault([]),
   requestedAt: renderableDate,
   authorizedAt: nullableDate,
   rejectedAt: nullableDate,
   cancelledAt: nullableDate,
-  cancelledFrom: z.string().nullable().default(null),
+  cancelledFrom: z.string().nullable().prefault(null),
   /**
    * The physical half as marketplace-service mirrored it (#323): the shipment
    * it checked against this request, and when each step happened. Null while
    * the mirror is off — which it is by default — whatever the goods did.
    */
-  returnShipmentId: z.string().min(1).nullable().default(null),
+  returnShipmentId: z.string().min(1).nullable().prefault(null),
   inTransitAt: nullableDate,
   receivedAt: nullableDate,
   inspectedAt: nullableDate,
@@ -108,7 +108,7 @@ export type ReturnRequest = z.infer<typeof returnRequestSchema>;
 
 const returnPageSchema = z.object({
   items: z.array(returnRequestSchema),
-  nextCursor: z.string().nullable().default(null),
+  nextCursor: z.string().nullable().prefault(null),
 });
 
 export type ReturnPage = z.infer<typeof returnPageSchema>;
@@ -142,7 +142,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
     const parsed = schema.safeParse(response.data);
     if (!parsed.success) return { kind: 'MALFORMED', correlationId: response.correlationId };
@@ -252,16 +252,16 @@ const returnShipmentSchema = z.object({
         orderLineId: z.string().min(1),
         productId: z.string().min(1),
         expectedQuantity: z.number().int(),
-        receivedQuantity: z.number().int().nullable().default(null),
+        receivedQuantity: z.number().int().nullable().prefault(null),
       }),
     )
-    .default([]),
-  carrierName: z.string().nullable().default(null),
-  carrierReference: z.string().nullable().default(null),
+    .prefault([]),
+  carrierName: z.string().nullable().prefault(null),
+  carrierReference: z.string().nullable().prefault(null),
   createdAt: renderableDate,
   receivedAt: nullableDate,
   inspectedAt: nullableDate,
-  inspectionNote: z.string().nullable().default(null),
+  inspectionNote: z.string().nullable().prefault(null),
   resolvedAt: nullableDate,
   dispositions: z
     .array(
@@ -271,7 +271,7 @@ const returnShipmentSchema = z.object({
         quantity: z.number().int(),
       }),
     )
-    .default([]),
+    .prefault([]),
 });
 
 /**
@@ -282,7 +282,7 @@ export type ReturnShipment = z.infer<typeof returnShipmentSchema>;
 
 const returnShipmentPageSchema = z.object({
   items: z.array(returnShipmentSchema),
-  nextCursor: z.string().nullable().default(null),
+  nextCursor: z.string().nullable().prefault(null),
 });
 
 /** A page of return shipments; inventory-service caps a page at 100. */
@@ -499,8 +499,8 @@ export interface ReturnCaller {
   readonly roles: readonly string[];
 }
 
-export function returnCallerOf(accessToken: string): ReturnCaller {
-  const authority = tokenAuthority(accessToken);
+export function returnCallerOf(session: SessionTokens): ReturnCaller {
+  const authority = sessionAuthority(session);
   return authority ?? { organizationId: null, roles: [] };
 }
 

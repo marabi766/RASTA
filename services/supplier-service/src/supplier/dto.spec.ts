@@ -5,6 +5,7 @@ import {
   reinstateSupplierSchema,
   rejectQualificationSchema,
   reviewQueueQuerySchema,
+  MAX_DIRECTORY_ORGANIZATION_IDS,
   searchSuppliersQuerySchema,
   submitQualificationSchema,
   suspendSupplierSchema,
@@ -226,15 +227,48 @@ describe('the decision DTOs', () => {
 describe('the suspension DTOs', () => {
   it('requires a stated reason to suspend', () => {
     expect(suspendSupplierSchema.safeParse({}).success).toBe(false);
-    expect(suspendSupplierSchema.parse({ reason: 'Two undelivered orders' }).reason).toBe(
-      'Two undelivered orders',
+    expect(suspendSupplierSchema.safeParse({ latestSuspensionId: null }).success).toBe(false);
+    expect(
+      suspendSupplierSchema.parse({ reason: 'Two undelivered orders', latestSuspensionId: null })
+        .reason,
+    ).toBe('Two undelivered orders');
+  });
+
+  it('requires the newest episode the operator read to suspend — null included, never omitted', () => {
+    // Codex review of PR 366, finding 2: an omitted expectation would be an
+    // unchecked one.
+    expect(suspendSupplierSchema.safeParse({ reason: 'Two undelivered orders' }).success).toBe(
+      false,
     );
+    expect(
+      suspendSupplierSchema.safeParse({ reason: 'Two undelivered orders', latestSuspensionId: '' })
+        .success,
+    ).toBe(false);
+    expect(
+      suspendSupplierSchema.parse({ reason: 'Two undelivered orders', latestSuspensionId: 'SSP_1' })
+        .latestSuspensionId,
+    ).toBe('SSP_1');
   });
 
   it('requires a stated reason to reinstate', () => {
     // A lifting nobody explained is a gap in the record exactly where somebody
     // will later ask what happened.
     expect(reinstateSupplierSchema.safeParse({}).success).toBe(false);
+    expect(reinstateSupplierSchema.safeParse({ suspensionId: 'SSP_1' }).success).toBe(false);
+  });
+
+  it('requires the episode being lifted to reinstate', () => {
+    expect(reinstateSupplierSchema.safeParse({ reason: 'The orders were delivered' }).success).toBe(
+      false,
+    );
+    expect(
+      reinstateSupplierSchema.safeParse({ reason: 'The orders were delivered', suspensionId: null })
+        .success,
+    ).toBe(false);
+    expect(
+      reinstateSupplierSchema.parse({ reason: 'The orders were delivered', suspensionId: 'SSP_1' })
+        .suspensionId,
+    ).toBe('SSP_1');
   });
 
   it('refuses an `until` date — no rule defines a timed suspension', () => {
@@ -259,7 +293,56 @@ describe('the directory query', () => {
   it('refuses an unknown filter rather than ignoring it', () => {
     // A silently ignored filter returns a wider set than the caller asked for,
     // which for a directory is a disclosure the caller did not intend to make.
-    expect(searchSuppliersQuerySchema.safeParse({ organizationId: 'ORG_1' }).success).toBe(false);
+    expect(searchSuppliersQuerySchema.safeParse({ ownerId: 'ORG_1' }).success).toBe(false);
+  });
+
+  describe('organizationId — the bounded batch read (FU-019)', () => {
+    const ORG_A = 'ORG_01JBQ0000000000000000000AA';
+    const ORG_B = 'ORG-UNION-YAZD';
+
+    it('takes one value as a one-element list and a repeated one as a list', () => {
+      expect(searchSuppliersQuerySchema.parse({ organizationId: ORG_A }).organizationId).toEqual([
+        ORG_A,
+      ]);
+      expect(
+        searchSuppliersQuerySchema.parse({ organizationId: [ORG_A, ORG_B] }).organizationId,
+      ).toEqual([ORG_A, ORG_B]);
+    });
+
+    it('deduplicates', () => {
+      expect(
+        searchSuppliersQuerySchema.parse({ organizationId: [ORG_A, ORG_B, ORG_A] }).organizationId,
+      ).toEqual([ORG_A, ORG_B]);
+    });
+
+    it('is absent unless asked for — omitting it narrows nothing', () => {
+      expect(searchSuppliersQuerySchema.parse({}).organizationId).toBeUndefined();
+    });
+
+    it.each([
+      ['a non-canonical id', 'ORG_1'],
+      ['another kind of id', 'SUP_01JBQ0000000000000000000AA'],
+      ['an empty value', ''],
+      ['a wildcard', '%'],
+      ['an object (organizationId[x]=…)', { x: ORG_A }],
+    ])('refuses %s with 400', (_label, value) => {
+      expect(searchSuppliersQuerySchema.safeParse({ organizationId: value }).success).toBe(false);
+    });
+
+    it('refuses an empty list', () => {
+      expect(searchSuppliersQuerySchema.safeParse({ organizationId: [] }).success).toBe(false);
+    });
+
+    it(`accepts ${MAX_DIRECTORY_ORGANIZATION_IDS} ids and refuses one more, duplicates counted`, () => {
+      const ids = Array.from(
+        { length: MAX_DIRECTORY_ORGANIZATION_IDS },
+        (_, i) => `ORG-BATCH-${String(i).padStart(4, '0')}`,
+      );
+      expect(searchSuppliersQuerySchema.safeParse({ organizationId: ids }).success).toBe(true);
+      expect(
+        searchSuppliersQuerySchema.safeParse({ organizationId: [...ids, ids[0]] }).success,
+      ).toBe(false);
+    });
   });
 
   it('refuses a free-text or rating sort', () => {

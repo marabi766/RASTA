@@ -80,6 +80,8 @@ datasource db {
 /// organization-agnostic (AGENTS.md A-05), and which organization plays the
 /// operator role is a deployment fact.
 model LedgerAccount {
+  // id, organization, type, purpose and currency never change
+  // (`trg_ledger_account_identity_fixed`).
   /// `ACC_<ULID>`.
   id String @id
 
@@ -215,6 +217,10 @@ enum JournalType {
   SETTLEMENT
   /// Wallet credit granted as a reward, expensed by the platform.
   REWARD_GRANT
+  /// A settlement reversed, whole or in part (docs/24 Q-76): the payer's wallet
+  /// credited, the payee's wallet and commission revenue debited. Only an applied
+  /// `SettlementReversal` names one (`trg_journal_settlement_reversal_owned`).
+  SETTLEMENT_REVERSAL
   /// The exact opposite of an earlier journal. The only correction mechanism
   /// this system has (AGENTS.md A-06).
   REVERSAL
@@ -354,8 +360,10 @@ model WalletHold {
   referenceType String @map("reference_type")
 
   /// The journal that moved the funds into escrow, and the one that resolved
-  /// them. Both are the audit trail for "where did this money go".
-  placedJournalId   String? @map("placed_journal_id")
+  /// them. Both are the audit trail for "where did this money go". A journal
+  /// funds one hold, for good; amount, currency and this pointer never change
+  /// (`trg_wallet_hold_terms_fixed`).
+  placedJournalId   String? @unique @map("placed_journal_id")
   resolvedJournalId String? @map("resolved_journal_id")
 
   placedAt DateTime @map("placed_at")
@@ -485,6 +493,11 @@ model Transaction {
   /// before migration `20260926120000_transaction_state_actors`.
   settlementAuthorisedAt DateTime? @map("settlement_authorised_at")
   settlementAuthorisedBy String?   @map("settlement_authorised_by")
+  /// The first time this row said HELD, whoever wrote it, and never cleared: it claimed
+  /// escrow, so it pays only from a funded hold of its own. Stamped by
+  /// `trg_transaction_held_at`, read by `transaction_settlement_barred` (migration
+  /// `20261106130000_transaction_funded_hold`). The service never writes it.
+  heldAt                 DateTime? @map("held_at")
   cancelledAt            DateTime? @map("cancelled_at")
   cancelledBy            String?   @map("cancelled_by")
   refundedAt             DateTime? @map("refunded_at")
@@ -544,6 +557,15 @@ model Transaction {
   @@index([organizationId, sourceType, sourceReference])
   @@index([counterpartyOrganizationId, status])
   @@index([pricingRuleId])
+  /// Not modelled: `settlement_authority_reconciliation` (migration
+  /// `20261103121000_transaction_settlement_authority`), what that migration
+  /// found and did about an escrowed, settlement-ready row with no recorded
+  /// authorisation — AUTHORISED_UNRECORDED (counts as authorised) or
+  /// RETURNED_TO_HELD. Filled there and frozen; read only by
+  /// `transaction_settlement_authorised` (migration
+  /// `20261106120000_transaction_hold_decision`), which the service's lock read
+  /// and the settlement triggers ask. Not modelled either, and read the same way:
+  /// `transaction_hold_reconciliation` and `transaction_hold_decision`.
   @@map("transaction")
 }
 
@@ -561,7 +583,7 @@ model TransactionSourceQuarantine {
   sourceReference String?  @map("source_reference")
   decision        String
   quarantinedBy   String   @map("quarantined_by")
-  quarantinedAt   DateTime @default(now()) @map("quarantined_at")
+  quarantinedAt   DateTime @default(dbgenerated("timezone('UTC'::text, now())")) @map("quarantined_at")
 
   transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
@@ -606,8 +628,14 @@ enum TransactionStatus {
   PENDING_SETTLEMENT
   /// An objection is registered. **No automatic movement** (docs/10 § 10.5).
   DISPUTED
-  /// Discharged. Terminal.
+  /// Discharged. Only a settlement reversal leaves it (docs/24 Q-76).
   SETTLED
+  /// Part of the settlement reversed: 0 < Σ applied reversals < settlement gross
+  /// (D-115 A). More may follow; nothing else moves it.
+  PARTIALLY_REVERSED
+  /// The whole settlement reversed: Σ applied reversals = settlement gross.
+  /// Terminal. Never back to `PENDING_SETTLEMENT`, and no hold is re-established.
+  REVERSED
   /// Funds returned to the payer. Terminal.
   REFUNDED
   /// Abandoned before anything moved. Terminal.
@@ -1051,7 +1079,9 @@ model Commission {
   amountMinor      BigInt @map("amount_minor")
   currency         String
 
-  /// The journal leg that recognised the revenue.
+  /// The journal leg that recognised the revenue: its settlement's journal, by a
+  /// foreign key and at commit (`trg_commission_creation_proven`). Proven with the
+  /// settlement, migration `20261105120000_settlement_creation_proof`.
   journalId String? @map("journal_id")
 
   appliedAt DateTime @map("applied_at")
@@ -1117,11 +1147,24 @@ model RewardRule {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String   @map("updated_by")
 
-  rewards Reward[]
+  rewards       Reward[]
+  statusHistory RewardRuleStatusHistory[]
 
   @@index([triggerEvent, status, validFrom])
   @@index([organizationId, triggerEvent, status])
   @@map("reward_rule")
+}
+
+/// D-080: immutable status transitions, independent of purgeable outbox history.
+model RewardRuleStatusHistory {
+  id          BigInt     @id @default(autoincrement())
+  ruleId      String     @map("rule_id")
+  status      RuleStatus
+  effectiveAt DateTime   @map("effective_at")
+  rule        RewardRule @relation(fields: [ruleId], references: [id])
+
+  @@index([ruleId, effectiveAt, id])
+  @@map("reward_rule_status_history")
 }
 
 enum RewardType {
@@ -1170,18 +1213,21 @@ model Reward {
   /// The journal that expensed the credit. Null for a points-only reward.
   journalId String? @map("journal_id")
 
-  /// The cap window this grant counted against, e.g. `2026-08`. Stored so cap
-  /// enforcement is an indexed count rather than a date-range scan.
+  /// The historical cap key, e.g. `2026-08`, retained unchanged for audit.
+  /// Weekly enforcement uses occurrence time and confirmed legacy evidence.
   periodKey String @map("period_key")
+
+  /// Owner-confirmed fact time; null only for legacy rows without evidence.
+  occurredAt DateTime? @map("occurred_at")
 
   grantedAt DateTime @map("granted_at")
 
   rule RewardRule @relation(fields: [ruleId], references: [id])
 
   @@unique([ruleId, sourceReference])
-  /// The cap query: "how many points has this subject taken from this rule in
-  /// this window".
+  /// Day/month caps use their stored key; weekly caps use occurrence time.
   @@index([organizationId, userId, ruleId, periodKey])
+  @@index([organizationId, userId, ruleId, occurredAt])
   @@index([organizationId, grantedAt(sort: Desc)])
   @@map("reward")
 }
@@ -1347,11 +1393,101 @@ model RewardBalance {
 // Settlement
 // -----------------------------------------------------------------------------
 
+/// What a correction case was opened from.
+enum SettlementReversalSource {
+  /// A resolved return (`source_reference` is its `returnRequestId`).
+  RETURN_REQUEST
+  /// A correction not born from a return, opened by a platform administrator.
+  MANUAL
+}
+
+/// Where a correction case stands. Only `APPLIED` means money moved.
+enum SettlementReversalStatus {
+  OPEN
+  /// Amounts and reasons named by one administrator; nothing has moved.
+  PROPOSED
+  /// Approved by a second administrator, with its journal. Final.
+  APPLIED
+  /// Refused, with or without a proposal. Final. (A rejection of a proposal may
+  /// instead return the case to `OPEN`, keeping who and why.)
+  REJECTED
+}
+
+/// A correction case on one settlement (docs/24 Q-76; RLG-002): manual, four-eyes,
+/// never automatic. A settlement may have several, up to its gross (D-115 A).
+///
+/// Every rule is in migration `20261104120000_settlement_reversal`, whose header
+/// is the reference: the transitions, the row's shape at each status, four-eyes,
+/// the cumulative cap and the journal's link. Its foreign keys to `transaction`,
+/// `settlement` and `journal` are SQL-only.
+model SettlementReversal {
+  /// `SRV_<ULID>`.
+  id String @id
+
+  /// The payer's books: the settlement's own `organizationId`.
+  organizationId String @map("organization_id")
+  transactionId  String @map("transaction_id")
+  settlementId   String @map("settlement_id")
+
+  sourceType      SettlementReversalSource @map("source_type")
+  sourceReference String                   @map("source_reference")
+
+  status SettlementReversalStatus @default(OPEN)
+
+  /// NULL until proposed. `grossMinor = commissionMinor + netMinor`.
+  grossMinor      BigInt? @map("gross_minor")
+  commissionMinor BigInt? @map("commission_minor")
+  netMinor        BigInt? @map("net_minor")
+
+  reason            String?
+  /// A reference to the evidence (a ticket, a document id), pattern-checked.
+  evidenceReference String? @map("evidence_reference")
+
+  /// The proposer: `compareActors` needs the user id with the token's identity.
+  proposedBy        String?   @map("proposed_by")
+  proposedByIssuer  String?   @map("proposed_by_issuer")
+  proposedBySubject String?   @map("proposed_by_subject")
+  proposedAt        DateTime? @map("proposed_at") @db.Timestamptz(3)
+
+  approvedBy        String?   @map("approved_by")
+  approvedByIssuer  String?   @map("approved_by_issuer")
+  approvedBySubject String?   @map("approved_by_subject")
+  approvedAt        DateTime? @map("approved_at") @db.Timestamptz(3)
+
+  /// The latest rejection, final or back to `OPEN`.
+  rejectedBy        String?   @map("rejected_by")
+  rejectedByIssuer  String?   @map("rejected_by_issuer")
+  rejectedBySubject String?   @map("rejected_by_subject")
+  rejectedAt        DateTime? @map("rejected_at") @db.Timestamptz(3)
+  rejectionReason   String?   @map("rejection_reason")
+
+  /// The `SETTLEMENT_REVERSAL` journal: set exactly when `APPLIED`.
+  journalId String? @unique(map: "ux_settlement_reversal_journal") @map("journal_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  /// One further on every update, or the database refuses it. Comparing it with
+  /// the version an approver read is the service's compare-and-set (RLG-002-3).
+  version   Int      @default(1)
+
+  @@unique([sourceType, sourceReference], map: "ux_settlement_reversal_source")
+  @@index([organizationId, status, createdAt(sort: Desc)], map: "ix_settlement_reversal_org_status")
+  @@index([transactionId], map: "ix_settlement_reversal_transaction")
+  @@map("settlement_reversal")
+}
+
 /// The record that one transaction was discharged (docs/10 § 10.10).
 ///
 /// One per transaction and one per journal, both UNIQUE. A settlement without
 /// its journal is not expressible, and a journal cannot back two settlements.
 model Settlement {
+  // Append-only: no row is ever updated or deleted (`trg_settlement_append_only`).
+  // Proven when written, at commit, with its commission, journal and transaction
+  // (`trg_settlement_creation_proven`, migration 20261105120000_settlement_creation_proof).
+  // `journalId` has a foreign key there; what it found on older rows is
+  // `settlement_creation_quarantine`, not modelled: filled there, frozen, read by triggers.
+  // So is `transaction_hold_reconciliation`, there too: read by `down.sql` and
+  // `transaction_hold_decision_unresolved`; and `transaction_hold_decision`, the decisions on it.
   /// `STL_<ULID>`.
   id String @id
 
@@ -1407,6 +1543,13 @@ model IdempotencyKey {
   /// body is `409 IDEMPOTENCY_KEY_REUSED`, never a silent replay of the wrong
   /// response.
   requestHash String @map("request_hash")
+
+  /// SHA-256 of the body in canonical form (`canonicalBodyPipe`), when the
+  /// release that wrote the record knew it. `requestHash` stays the hash the
+  /// previous release computes — the body as sent — so a retry reaching it
+  /// during a rolling update or a rollback still replays (Codex PR-747 r2,
+  /// F3). Null on records written before it existed.
+  canonicalHash String? @map("canonical_hash")
 
   /// SHA-256 of the actor who reserved the key. The same key from another
   /// actor is `409 IDEMPOTENCY_KEY_REUSED`, never a replay. Null on records

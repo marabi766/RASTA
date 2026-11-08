@@ -1,4 +1,5 @@
-import { clamdAddress, loadDocumentEnv } from './env';
+import { envEnumProbes } from '@rasta/config';
+import { clamdAddress, documentEnvSchema, loadDocumentEnv } from './env';
 import { documentOperationBudgets } from './operation-budgets';
 
 /**
@@ -204,5 +205,63 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
     expect(() =>
       load({ ...SOCKET, ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '20001' }),
     ).not.toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    documentEnvSchema,
+    (source) => loadDocumentEnv(source),
+    { ...BASE, ...SOCKET },
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining([
+        'NODE_ENV',
+        'LOG_LEVEL',
+        'KAFKA_SASL_MECHANISM',
+        'DOCUMENT_SCANNER_DRIVER',
+      ]),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
+  });
+});
+
+describe('S3 endpoint refusal before SDK diagnostics', () => {
+  it.each([
+    'data:private-sentinel-79:JZ97-another-secret',
+    `http://${['private-sentinel-79', 'JZ97-another-secret'].join(':')}@localhost:9000`,
+    'http://localhost:bad/private-sentinel-79/JZ97-another-secret',
+  ])('refuses by registered name only: %s', (endpoint) => {
+    let failure: unknown;
+    try {
+      load({ ...SOCKET, S3_ENDPOINT: endpoint });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain('S3_ENDPOINT');
+    expect(JSON.stringify(failure)).not.toMatch(/sentinel|JZ97|another.secret/i);
+    expect((failure as Error).stack).not.toMatch(/sentinel|JZ97|another.secret/i);
+  });
+  it.each(['http://localhost:9000', 'https://s3.example.com'])('accepts %s', (endpoint) => {
+    expect(load({ ...SOCKET, S3_ENDPOINT: endpoint }).S3_ENDPOINT).toBe(endpoint);
   });
 });

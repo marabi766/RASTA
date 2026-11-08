@@ -1,9 +1,19 @@
-import { Button, EmptyState, ErrorState, NoAccessState, PageHeader, Section } from '@/ui';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  NoAccessState,
+  PageHeader,
+  Section,
+  TableScroll,
+} from '@/ui';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
 import type { DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
 import { formatMoney } from '@/lib/format';
 import type { ProductPage, ProductSearchQuery, ReadResult } from '@/server/marketplace';
+import type { InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * `/marketplace` — جست‌وجوی کالا و خدمت (docs/16 § ۱۶٫۶, role
@@ -23,7 +33,7 @@ import type { ProductPage, ProductSearchQuery, ReadResult } from '@/server/marke
 
 export interface MarketplaceScreenProps {
   readonly result: ReadResult<ProductPage>;
-  readonly query: ProductSearchQuery;
+  readonly query: InContext<ProductSearchQuery>;
   /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
   readonly demoMode: DemoMode;
 }
@@ -33,7 +43,7 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function Filters({ query }: { query: ProductSearchQuery }) {
+function Filters({ query }: { query: InContext<ProductSearchQuery> }) {
   return (
     <form
       method="get"
@@ -41,6 +51,7 @@ function Filters({ query }: { query: ProductSearchQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="جست‌وجوی کالا و خدمت"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-q" className="flex flex-col gap-1 text-sm text-content-muted">
         <span id="filter-q-label">جست‌وجو</span>
         <input
@@ -85,48 +96,50 @@ function Filters({ query }: { query: ProductSearchQuery }) {
 
 function ProductRows({ page }: { page: ProductPage }) {
   return (
-    <table className="w-full border-collapse text-sm">
-      <caption className="sr-only">فهرست کالا و خدمت</caption>
-      <thead>
-        <tr className="border-b border-border text-start text-content-muted">
-          <th scope="col" className="p-3 text-start font-medium">
-            نام
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            دسته
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            نوع
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            شروع قیمت
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            تعداد پیشنهاد
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {page.items.map((product) => (
-          <tr key={product.id} className="border-b border-border">
-            <td className="p-3">
-              <a
-                href={`/marketplace/${encodeURIComponent(product.id)}`}
-                className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                {product.name}
-              </a>
-            </td>
-            <td className="p-3 text-content-muted">{product.category}</td>
-            <td className="p-3 text-content-muted">{productKindLabel(product.kind)}</td>
-            <td className="p-3">
-              {product.offers.length > 0 ? formatMoney(product.offers[0]!.unitPriceMinor) : '—'}
-            </td>
-            <td className="p-3 text-content-muted">{product.offers.length}</td>
+    <TableScroll label="فهرست کالا و خدمت">
+      <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">فهرست کالا و خدمت</caption>
+        <thead>
+          <tr className="border-b border-border text-start text-content-muted">
+            <th scope="col" className="p-3 text-start font-medium">
+              نام
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              دسته
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              نوع
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              شروع قیمت
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              تعداد پیشنهاد
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {page.items.map((product) => (
+            <tr key={product.id} className="border-b border-border">
+              <td className="p-3">
+                <a
+                  href={`/marketplace/${encodeURIComponent(product.id)}`}
+                  className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  {product.name}
+                </a>
+              </td>
+              <td className="p-3 text-content-muted">{product.category}</td>
+              <td className="p-3 text-content-muted">{productKindLabel(product.kind)}</td>
+              <td className="p-3">
+                {product.offers.length > 0 ? formatMoney(product.offers[0]!.unitPriceMinor) : '—'}
+              </td>
+              <td className="p-3 text-content-muted">{product.offers.length}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 

@@ -1,0 +1,1371 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/v1/users/me": {
+      "get": {
+        "operationId": "UserController_getCurrentUser_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The authenticated user, their memberships and effective roles",
+        "tags": ["identity"]
+      }
+    },
+    "/v1/users/me/active-organization": {
+      "post": {
+        "operationId": "UserController_switchOrganization_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Switch which organization subsequent requests act for",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "organizationId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "ORG identifier"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                      }
+                    ]
+                  }
+                },
+                "required": ["organizationId"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/users": {
+      "get": {
+        "operationId": "UserController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["PENDING", "ACTIVE", "SUSPENDED", "DEACTIVATED"]
+            }
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "SYSTEM_ADMIN",
+                "UNION_ADMIN",
+                "ORGANIZATION_ADMIN",
+                "FLEET_MANAGER",
+                "DRIVER",
+                "OPERATOR",
+                "PROCUREMENT_USER",
+                "SUPPLIER",
+                "WORKSHOP",
+                "CONTRACTOR",
+                "AUDITOR"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List users in the requesting organization",
+        "tags": ["identity"]
+      },
+      "post": {
+        "description": "Requires an `Idempotency-Key` (400 VALIDATION_FAILED without one). The request is recorded with the user id before the identity-provider account is created, so the same request again — same caller, key, acting organization and body — finishes it: it creates under that id, adopts the account an earlier attempt created, or replays the answer once the user committed. The same key with another body or acting organization: 409 IDEMPOTENCY_KEY_REUSED. A username or email already held, or an account under the username that this request did not create: 409 ALREADY_EXISTS.",
+        "operationId": "UserController_create_v1",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Create an already-approved user",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "email": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "firstName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "lastName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "phone": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "organizationId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "ORG identifier"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                      }
+                    ]
+                  },
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  }
+                },
+                "required": [
+                  "username",
+                  "email",
+                  "firstName",
+                  "lastName",
+                  "organizationId",
+                  "roles"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/users/{id}/organizations": {
+      "get": {
+        "description": "Service-to-service only: `construction-service` or `procurement-service` with a token signed for no tenant, in `X-Internal-Token`; a person, any other service, or a token signed for a tenant is refused 403. Live memberships only, judged on the database clock. With `from`, the organizations the user held a membership in at any time between `from` and the database clock as the query ran (ids only). Used to check a conflict of interest around a bid opening, and around an RFQ opening, evaluation, selection and approval (ADR-070 § 7).",
+        "operationId": "UserController_liveOrganizations_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$",
+              "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "internalToken": []
+          }
+        ],
+        "summary": "The organizations a user belongs to now, with the roles held in each",
+        "tags": ["identity"]
+      }
+    },
+    "/v1/users/{id}/live-membership": {
+      "get": {
+        "description": "Service-to-service only: `fleet-service` with a token signed for a tenant, in `X-Internal-Token`; a person, any other service, or a token signed for no tenant is refused 403. The organization is the signed one, never a parameter. Answers `{ userId, organizationId, live, asOf }`: live = an ACTIVE, not deleted membership whose validity window holds the database clock, of an ACTIVE, not deleted user. A user who does not exist gets the same `live: false` as one who belongs elsewhere. Used before a driver is registered.",
+        "operationId": "UserController_liveMembership_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "internalToken": []
+          }
+        ],
+        "summary": "Whether a user is a live member of the organization the caller acts for",
+        "tags": ["identity"]
+      }
+    },
+    "/v1/users/{id}": {
+      "get": {
+        "operationId": "UserController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get one user",
+        "tags": ["identity"]
+      },
+      "patch": {
+        "operationId": "UserController_update_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Update a user profile",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "firstName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "lastName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "phone": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
+                    "nullable": true
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/users/{id}/memberships": {
+      "post": {
+        "operationId": "UserController_addMembership_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Add the user to an organization",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "organizationId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "ORG identifier"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                      }
+                    ]
+                  },
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  },
+                  "validUntil": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "Z$",
+                    "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
+                  }
+                },
+                "required": ["organizationId", "roles"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memberships/{id}/roles": {
+      "post": {
+        "description": "A change that removes a role is written to the identity provider before it commits (ADR-060, D-064). Refused with 503 KEYCLOAK_UNAVAILABLE, nothing changed and no event, when the provider cannot be written; with 503 KEYCLOAK_WRITE_SETTLING and `Retry-After` while an earlier write of the same user may still land (D-069) — only after the caller was authorized for this membership. Sending the same roles again answers the same and emits nothing.",
+        "operationId": "MembershipController_updateRoles_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Replace the roles held in this organization",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  },
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  }
+                },
+                "required": ["roles", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memberships/{id}/revoke": {
+      "post": {
+        "description": "Written to the identity provider before it commits (ADR-060, D-064). Refused with 503 KEYCLOAK_UNAVAILABLE, the membership still live and no event, when the provider cannot be written; with 503 KEYCLOAK_WRITE_SETTLING and `Retry-After` while an earlier write of the same user may still land (D-069) — only after the caller was authorized for this membership. Revoking an ended membership again answers 204 and emits nothing.",
+        "operationId": "MembershipController_revoke_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Revoke a membership",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  }
+                },
+                "required": ["reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/registration-requests": {
+      "post": {
+        "description": "Always answers 202 `{\"status\":\"RECEIVED\"}` to a valid request, whether a reviewable request was recorded or the username or email is already held: the answer never says which, so the endpoint cannot be used to learn who has an account. A reviewer finds recorded requests through the review process, not through this answer.",
+        "operationId": "RegistrationController_submit_v1",
+        "parameters": [],
+        "responses": {
+          "202": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Submit a request to join the platform",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "email": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "firstName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "lastName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "phone": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "requestedOrganizationId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "ORG identifier"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                      }
+                    ]
+                  },
+                  "requestedRoles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  },
+                  "justification": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "documentRefs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                    },
+                    "maxItems": 10,
+                    "default": []
+                  }
+                },
+                "required": [
+                  "username",
+                  "email",
+                  "firstName",
+                  "lastName",
+                  "requestedOrganizationId",
+                  "requestedRoles"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "description": "Requests for the organizations the reviewer may provision into (their own, or every organization for a role in USER_PROVISIONING_CROSS_ORG_ROLES), oldest first, filtered by `status` and the exact `username`. The submission answer carries no id, so this is where a reviewer finds a request.",
+        "operationId": "RegistrationController_listRequests_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["PENDING", "APPROVED", "REJECTED"]
+            }
+          },
+          {
+            "name": "username",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The registration review queue",
+        "tags": ["identity"]
+      }
+    },
+    "/v1/registration-requests/{id}/approve": {
+      "post": {
+        "description": "Refused with 409 ALREADY_EXISTS, the registration staying PENDING and nothing approved, when its `details[0].code` is MEMBERSHIP_ALREADY_LIVE (the applicant was given a live membership in the requested organization meanwhile) or ACCOUNT_NOT_FROM_THIS_REGISTRATION (the identity provider holds an account under the username that this registration did not create), and with 409 INVALID_STATE_TRANSITION when another decision on it committed first. Refused with 503 UPSTREAM_UNAVAILABLE and `details[0].code` ACCOUNT_NOT_CONFIRMED, the registration staying PENDING, when the identity provider answered the account creation without its id and no such account can be found; a retry resolves it. The account is enabled only after the approval commits, once; a retry after any failure adopts the account an earlier attempt created, disabling it and clearing its grants first if it is enabled or holds any.",
+        "operationId": "RegistrationController_approve_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Approve a registration and provision the account",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/registration-requests/{id}/reject": {
+      "post": {
+        "description": "Decided under the registration request lock, as approval is: when another decision on the same registration committed first, refused with 409 INVALID_STATE_TRANSITION and nothing written or emitted.",
+        "operationId": "RegistrationController_reject_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Reject a registration, with a required reason",
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  }
+                },
+                "required": ["reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audit-corrections": {
+      "post": {
+        "description": "Never edits the original. Enqueues one `AUDIT_EVENT_RECORDED` v1 message on `rasta.audit.trail.v1`, which audit-service records as a new record whose `correctionOf` names the target; the original then lists it in `correctedBy`. `occurredAt` must equal the target’s own instant. The target’s organization is taken from audit-service, never from the request. A missing target, or one at a different instant, answers `404` and writes nothing. `202` means accepted for recording, not yet readable: the record appears once audit-service has ingested it.",
+        "operationId": "AuditCorrectionController_submit_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Mandatory. The same key with the same request replays the original `202`; with a different request it is refused with `409 IDEMPOTENCY_KEY_REUSED`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Correct an audit record by appending a linked correction (SYSTEM_ADMIN)",
+        "tags": ["audit-corrections"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "auditEventId": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "(?:Z|[+-](?:(?:0\\d|1[0-3]):?[0-5]\\d|14:?00))$",
+                    "description": "ISO 8601 instant that ends in `Z` or a numeric offset within ±14:00 (`+03:30`, `+0330`); an offset beyond ±14:00, which RFC 3339 allows, is invalid here."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "changes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "field": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                        },
+                        "from": {
+                          "anyOf": [
+                            {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "maxLength": 2000
+                                },
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "boolean"
+                                },
+                                {}
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "redacted": {
+                                  "const": true
+                                }
+                              },
+                              "required": ["redacted"],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "hash": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                }
+                              },
+                              "required": ["hash"],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "to": {
+                          "anyOf": [
+                            {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "maxLength": 2000
+                                },
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "boolean"
+                                },
+                                {}
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "redacted": {
+                                  "const": true
+                                }
+                              },
+                              "required": ["redacted"],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "hash": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                }
+                              },
+                              "required": ["hash"],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": ["field", "from", "to"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 50
+                  }
+                },
+                "required": ["auditEventId", "occurredAt", "reason", "changes"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "operationId": "HealthController_live",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Process liveness",
+        "tags": ["health"]
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "HealthController_ready",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "503": {
+            "description": "Orchestrator probe unavailable (D-121)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ApiError"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "const": "unavailable"
+                        },
+                        "service": {
+                          "const": "identity-service"
+                        },
+                        "checks": {
+                          "type": "object",
+                          "properties": {
+                            "database": {
+                              "type": "boolean"
+                            },
+                            "kafka": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": ["database", "kafka"],
+                          "additionalProperties": false
+                        },
+                        "degraded": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": ["status", "service", "checks", "degraded"],
+                      "additionalProperties": false,
+                      "description": "D-121 exception: orchestrator probe health-status body retained for probe tooling compatibility."
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Dependency readiness",
+        "tags": ["health"]
+      }
+    },
+    "/health/startup": {
+      "get": {
+        "operationId": "HealthController_startup",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "503": {
+            "description": "Orchestrator probe unavailable (D-121)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ApiError"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "const": "starting"
+                        },
+                        "checks": {
+                          "type": "object",
+                          "properties": {
+                            "database": {
+                              "type": "boolean"
+                            },
+                            "keycloak": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": ["database", "keycloak"],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": ["status", "checks"],
+                      "additionalProperties": false,
+                      "description": "D-121 exception: orchestrator probe health-status body retained for probe tooling compatibility."
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Initialisation complete",
+        "tags": ["health"]
+      }
+    },
+    "/health/version": {
+      "get": {
+        "operationId": "HealthController_version",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Build version",
+        "tags": ["health"]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "MetricsController_metrics",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "default": {
+            "description": "Platform error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "tags": ["Metrics"]
+      }
+    }
+  },
+  "info": {
+    "title": "Rasta — Identity Service",
+    "description": "Source of truth for who you are and what role you hold in which organization. Keycloak owns authentication; this service owns membership.",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-internal-token",
+        "description": "A signed internal service token minted for identity-service (ADR-020). `GET /v1/users/{id}/organizations` takes it, signed for no tenant, and `GET /v1/users/{id}/live-membership` signed for a tenant, instead of the bearer."
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                }
+              },
+              "required": ["path", "message"],
+              "additionalProperties": false
+            }
+          },
+          "correlationId": {
+            "type": "string"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$",
+            "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": ["code", "message", "correlationId", "timestamp"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

@@ -19,11 +19,15 @@ import {
   updateMemberRolesFormValues,
 } from '@/server/members';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type {
   RevokeMembershipFormState,
   UpdateMemberRolesFormState,
   UpdateOrganizationFormState,
 } from './form-state';
+import { actingOrganizationId } from '@/server/session-organization';
+import { flashHref } from '@/server/flash';
+import { ORGANIZATION_FLASH_SUBJECT } from './notices';
 
 /**
  * The `/organizations` server actions.
@@ -59,14 +63,24 @@ async function gate(form: FormData) {
 }
 
 export async function submitUpdateOrganization(
-  _previous: UpdateOrganizationFormState,
+  previous: UpdateOrganizationFormState,
   form: FormData,
 ): Promise<UpdateOrganizationFormState> {
+  return keepUnconfirmed(previous, form, () => attemptUpdateOrganization(form));
+}
+
+async function attemptUpdateOrganization(form: FormData): Promise<UpdateOrganizationFormState> {
   const gated = await gate(form);
   if (!gated.ok) return gated.state;
 
+  // Only the organization this request acts for (`session-organization.ts`):
+  // a form naming any other is refused before anything is sent.
   const organizationId = form.get('organizationId');
-  if (typeof organizationId !== 'string' || organizationId.length === 0) {
+  if (
+    typeof organizationId !== 'string' ||
+    organizationId.length === 0 ||
+    organizationId !== actingOrganizationId(gated.session)
+  ) {
     return { kind: 'REFUSED', reason: 'SUBMISSION' };
   }
 
@@ -91,7 +105,7 @@ export async function submitUpdateOrganization(
 
   switch (result.kind) {
     case 'CREATED':
-      redirect('/organizations?saved=profile');
+      redirect(flashHref(gated.session, '/organizations', ORGANIZATION_FLASH_SUBJECT, 'profile'));
       break;
     case 'INVALID':
       return {
@@ -117,9 +131,13 @@ export async function submitUpdateOrganization(
 }
 
 export async function submitUpdateMemberRoles(
-  _previous: UpdateMemberRolesFormState,
+  previous: UpdateMemberRolesFormState,
   form: FormData,
 ): Promise<UpdateMemberRolesFormState> {
+  return keepUnconfirmed(previous, form, () => attemptUpdateMemberRoles(form));
+}
+
+async function attemptUpdateMemberRoles(form: FormData): Promise<UpdateMemberRolesFormState> {
   const gated = await gate(form);
   if (!gated.ok) return gated.state;
 
@@ -139,7 +157,7 @@ export async function submitUpdateMemberRoles(
 
   switch (result.kind) {
     case 'CREATED':
-      redirect('/organizations?saved=roles');
+      redirect(flashHref(gated.session, '/organizations', ORGANIZATION_FLASH_SUBJECT, 'roles'));
       break;
     case 'INVALID':
       return {
@@ -167,9 +185,13 @@ export async function submitUpdateMemberRoles(
 }
 
 export async function submitRevokeMembership(
-  _previous: RevokeMembershipFormState,
+  previous: RevokeMembershipFormState,
   form: FormData,
 ): Promise<RevokeMembershipFormState> {
+  return keepUnconfirmed(previous, form, () => attemptRevokeMembership(form));
+}
+
+async function attemptRevokeMembership(form: FormData): Promise<RevokeMembershipFormState> {
   const gated = await gate(form);
   if (!gated.ok) return gated.state;
 
@@ -189,7 +211,7 @@ export async function submitRevokeMembership(
 
   switch (result.kind) {
     case 'CREATED':
-      redirect('/organizations?revoked=1');
+      redirect(flashHref(gated.session, '/organizations', ORGANIZATION_FLASH_SUBJECT, 'revoked'));
       break;
     case 'INVALID':
       return {

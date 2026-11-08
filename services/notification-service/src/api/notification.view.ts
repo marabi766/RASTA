@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import type { InAppNotification } from '../generated/prisma';
 import { IN_APP_STATES, type InAppState } from './notification.dto';
 
@@ -35,11 +36,11 @@ export const notificationViewSchema = z
     /** Origin-relative path the web app resolves, or null. Never an absolute URL. */
     actionPath: z.string().nullable(),
     /** Domain time of the event that caused this notification. */
-    occurredAt: z.string().datetime(),
-    createdAt: z.string().datetime(),
-    readAt: z.string().datetime().nullable(),
-    dismissedAt: z.string().datetime().nullable(),
-    expiresAt: z.string().datetime(),
+    occurredAt: z.string().check(isoDateTime()),
+    createdAt: z.string().check(isoDateTime()),
+    readAt: z.string().check(isoDateTime()).nullable(),
+    dismissedAt: z.string().check(isoDateTime()).nullable(),
+    expiresAt: z.string().check(isoDateTime()),
   })
   .strict();
 

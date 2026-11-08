@@ -20,12 +20,16 @@ import {
   type RenewalDependencies,
   type SessionRenewal,
 } from './session-refresh';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * One refresh per refresh token across replicas (Codex #113 R1-1), and a
  * per-process cache that cannot grow or linger (R1-2).
  */
 
+/** The n-th access token the provider issues: one that still grants the session's organization (task 118). */
+const issuedAccess = (n: number | string) =>
+  actingAccessToken('ORG_01J8', ['OPERATOR'], { jti: `access-${n}` });
 const SECRET = 'a-secret-that-is-long-enough-to-be-a-key';
 const T0 = 1_900_000_000;
 const NOW = (T0 + 880) * 1000; // inside the refresh skew of a 900 s token
@@ -41,7 +45,7 @@ const session = (): WebSession => ({
   subject: 'USR_01J8',
   username: 'dehyar',
   organizationId: 'ORG_01J8',
-  accessToken: 'access-0',
+  accessToken: actingAccessToken('ORG_01J8'),
   accessTokenExpiresAt: T0 + 900,
   refreshToken: 'refresh-0',
   csrfToken: 'csrf-token-value',
@@ -69,7 +73,7 @@ function sharedKeycloak() {
     spent.add(refreshToken);
     issued += 1;
     return {
-      access_token: `access-${issued}`,
+      access_token: issuedAccess(issued),
       refresh_token: `refresh-${issued}`,
       id_token: `id-${issued}`,
       expires_in: 900,
@@ -380,7 +384,7 @@ describe('what Redis holds', () => {
     );
 
     const everything = JSON.stringify([...redis.store.entries()]);
-    for (const token of ['refresh-0', 'refresh-1', 'access-1', 'id-1']) {
+    for (const token of ['refresh-0', 'refresh-1', issuedAccess(1), 'id-1']) {
       expect(everything).not.toContain(token);
     }
   });
@@ -412,7 +416,7 @@ describe('what Redis holds', () => {
       keycloak.refresh,
     );
 
-    expect(outcome).toMatchObject({ kind: 'ROTATED', tokens: { access_token: 'access-1' } });
+    expect(outcome).toMatchObject({ kind: 'ROTATED', tokens: { access_token: issuedAccess(1) } });
   });
 });
 

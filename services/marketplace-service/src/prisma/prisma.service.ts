@@ -1,10 +1,11 @@
+import { createSafePrismaClient } from '@rasta/nest-common';
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
-import { PrismaClient } from '../generated/prisma';
+import { Prisma, PrismaClient } from '../generated/prisma';
 
 /**
  * Models carrying an `organizationId` and therefore scoped automatically.
@@ -34,6 +35,9 @@ export const TENANT_SCOPED_MODELS = [
   'Review',
   'IdempotencyKey',
   'SagaStep',
+  'SagaUnconfirmedCall',
+  'OrderHoldDeadlineBackfill',
+  'OrderHoldDeadlineRevocation',
   // RUN-005: a return request is the buyer's, like the order it returns.
   'ReturnRequest',
   'ReturnLine',
@@ -63,20 +67,26 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   readonly client: ExtendedPrismaClient;
 
   constructor(databaseUrl: string) {
-    this.base = new PrismaClient({
-      datasources: { db: { url: databaseUrl } },
-      log: [
-        { emit: 'event', level: 'warn' },
-        { emit: 'event', level: 'error' },
-      ],
-    });
+    this.base = createSafePrismaClient(
+      () =>
+        new PrismaClient({
+          datasources: { db: { url: databaseUrl } },
+          log: [
+            { emit: 'event', level: 'warn' },
+            { emit: 'event', level: 'error' },
+          ],
+        }),
+      'DATABASE_URL_MARKETPLACE',
+    );
     this.client = this.buildClient();
   }
 
   private buildClient() {
     return this.base.$extends(
       createTenantGuardExtension({
+        scalarFkFamily: 'marketplace',
         scopedModels: TENANT_SCOPED_MODELS,
+        datamodel: Prisma.dmmf.datamodel,
         onUnscopedQuery: ({ model, operation, reason }) => {
           // Every deliberate boundary crossing is recorded, so an auditor can
           // enumerate them without reading the whole codebase.

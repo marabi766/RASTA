@@ -1,6 +1,9 @@
 import request from 'supertest';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { enrichOpenApiDocument } from '../src/openapi/document';
 import type { Server } from 'node:http';
-import { runUnscoped } from '@rasta/nest-common';
+import { inspect } from 'node:util';
+import { EXCEPTION_FILTER_LOGGER, runUnscoped } from '@rasta/nest-common';
 import {
   apiKey,
   apiTenant,
@@ -12,8 +15,10 @@ import {
   supplier,
   type ApiHarness,
 } from './api-helpers';
-import { cleanup } from './helpers';
+import { cleanup, testEnv } from './helpers';
+import { expectNotDisclosed, recordCalls } from '@rasta/testing';
 import { ORDER_NOTE_NOT_STORED, RECEIPT_NOTE_NOT_STORED } from '../src/order/dto';
+import { OrderSagaClient } from '../src/temporal/saga.client';
 
 /**
  * The order HTTP surface, every path including the refusals.
@@ -232,6 +237,180 @@ describe('order API', () => {
         .expect(422);
 
       expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
+    });
+
+    describe('a derived total past the largest storable amount (marketplace audit F4)', () => {
+      const MAX = '9223372036854775807';
+
+      /**
+       * Every line the application could write: the filter's logger and the streams. `text()`
+       * answers from a snapshot once `restore()` has run — a restored spy has no history.
+       */
+      function captureLogs(): { text: () => string; restore: () => void } {
+        const logger = harness.app.get<Record<string, unknown>>(EXCEPTION_FILTER_LOGGER);
+        const record = recordCalls([
+          ...['fatal', 'error', 'warn', 'info', 'debug', 'trace']
+            .filter((level) => typeof logger[level] === 'function')
+            .map((level) => jest.spyOn(logger as Record<string, () => void>, level)),
+          jest.spyOn(process.stdout, 'write'),
+          jest.spyOn(process.stderr, 'write'),
+        ]);
+        return {
+          text: () => inspect(record.calls(), { depth: null, maxStringLength: null }),
+          restore: () => record.restore(),
+        };
+      }
+
+      /** What a refused placement must have left exactly as it was. */
+      async function effects(key: string, offerIds: string[]) {
+        return runUnscoped(
+          'the suite reads what a refused placement could have written',
+          async () => ({
+            orders: await harness.prisma.client.order.count({
+              where: { organizationId: buyerOrg, idempotencyKey: key },
+            }),
+            available: (
+              await harness.prisma.client.offer.findMany({
+                where: { id: { in: offerIds } },
+                select: { id: true, availableQuantity: true },
+                orderBy: { id: 'asc' },
+              })
+            ).map((offer) => [offer.id, offer.availableQuantity]),
+            outbox: await harness.prisma.client.outboxMessage.count({
+              where: { organizationId: buyerOrg, eventName: 'ORDER_CREATED' },
+            }),
+          }),
+        );
+      }
+
+      /**
+       * Runs `act` with the application's writers and the saga start observed. What was observed
+       * is read from snapshots taken before the spies are restored: a restored spy has an empty
+       * history, and every "nothing was written / started" assertion would pass on it.
+       */
+      async function observing<T>(act: () => Promise<T>) {
+        const saga = harness.app.get(OrderSagaClient);
+        const starts = recordCalls([jest.spyOn(saga, 'start')]);
+        const logs = captureLogs();
+        let result: T;
+        try {
+          result = await act();
+        } finally {
+          logs.restore();
+          starts.restore();
+        }
+        return { result, logs, sagaStarts: starts.calls() };
+      }
+
+      async function refusedPlacement(lines: { offerId: string; quantity: number }[]) {
+        const key = apiKey('api-amount-bound');
+        const offerIds = lines.map((line) => line.offerId);
+        const before = await effects(key, offerIds);
+        const {
+          result: response,
+          logs,
+          sagaStarts,
+        } = await observing(() =>
+          request(http)
+            .post('/v1/orders')
+            .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+            .set('idempotency-key', key)
+            .send({ lines }),
+        );
+        return { response, before, after: await effects(key, offerIds), logs, sagaStarts, key };
+      }
+
+      /**
+       * Positive control for `observing`: what it reads back after the restore is what happened
+       * while it was active. A helper that lost its history (restore before read) or never
+       * installed its spies fails here, so the "nothing logged / started" assertions below
+       * cannot pass on an empty record.
+       */
+      it('the observation records a logged figure and a saga start, and still has them after the restore', async () => {
+        const figure = '9223372036854775807';
+        const logger =
+          harness.app.get<Record<string, (message: string) => void>>(EXCEPTION_FILTER_LOGGER);
+        const level = (['error', 'warn', 'info'] as const).find(
+          (name) => typeof logger[name] === 'function',
+        )!;
+        const { logs, sagaStarts } = await observing(async () => {
+          logger[level](`forbidden figure ${figure}`);
+          // Whatever `start` then does is beside the point: the spy sees the call.
+          await harness.app
+            .get(OrderSagaClient)
+            .start('ORD_POSITIVE_CONTROL')
+            .catch(() => undefined);
+        });
+        expect(logs.text()).toContain(figure);
+        expect(() => expectNotDisclosed(logs.text(), [figure])).toThrow();
+        expect(sagaStarts).toEqual([['ORD_POSITIVE_CONTROL']]);
+      });
+
+      it('the observation of an act that does nothing is empty', async () => {
+        const { logs, sagaStarts } = await observing(async () => undefined);
+        expect(sagaStarts).toEqual([]);
+        expect(() => expectNotDisclosed(logs.text(), ['9223372036854775807'])).not.toThrow();
+      });
+
+      it('places an order whose total is exactly the bound', async () => {
+        const offerId = await publishOffer({ price: MAX, quantity: 2 });
+        const response = await placeOrder(offerId, 1);
+        expect(response.body.totalAmountMinor).toBe(MAX);
+      });
+
+      it('refuses the largest price times two with 422 and its closed reason, and changes nothing', async () => {
+        const offerId = await publishOffer({ price: MAX, quantity: 2 });
+        const { response, before, after, logs, sagaStarts } = await refusedPlacement([
+          { offerId, quantity: 2 },
+        ]);
+
+        expect(response.status).toBe(422);
+        expect(response.body).toEqual({
+          code: 'BUSINESS_RULE_VIOLATION',
+          message: 'The order total exceeds the largest amount the platform can record',
+          details: [
+            {
+              path: 'lines[0].quantity',
+              code: 'ORDER_AMOUNT_EXCEEDS_LIMIT',
+              message: 'The order total exceeds the largest amount the platform can record',
+            },
+          ],
+          correlationId: expect.any(String),
+          timestamp: expect.any(String),
+          path: '/v1/orders',
+        });
+        // No figure — the price, the product of it or the overflow — in the
+        // answer or in anything the application wrote while refusing.
+        const figures = [MAX, (BigInt(MAX) * 2n).toString()];
+        expectNotDisclosed(response.body, figures);
+        expectNotDisclosed(logs.text(), figures);
+        expect(after).toEqual(before);
+        expect(after.orders).toBe(0);
+        expect(sagaStarts).toEqual([]);
+      });
+
+      it('refuses two lines that are each storable but sum one past the bound, and changes nothing', async () => {
+        const first = await publishOffer({ price: MAX, quantity: 1 });
+        const second = await publishOffer({ price: '1', quantity: 1 });
+        const { response, before, after, sagaStarts } = await refusedPlacement([
+          { offerId: first, quantity: 1 },
+          { offerId: second, quantity: 1 },
+        ]);
+
+        expect(response.status).toBe(422);
+        expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
+        expect(response.body.details).toEqual([
+          expect.objectContaining({ path: 'lines', code: 'ORDER_AMOUNT_EXCEEDS_LIMIT' }),
+        ]);
+        expect(after).toEqual(before);
+        expect(after.available).toEqual(
+          [
+            [first, 1],
+            [second, 1],
+          ].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        );
+        expect(sagaStarts).toEqual([]);
+      });
     });
 
     it('replays the original response for the same key and body', async () => {
@@ -678,15 +857,23 @@ describe('order API', () => {
           `TXN_APITEST_${order.body.id}`,
         ),
       );
-      await request(http)
+      const raised = await request(http)
         .post(`/v1/orders/${order.body.id}/disputes`)
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-raise'))
         .send({ reason: 'the supplier has not delivered anything at all' })
         .expect(200);
+      // The view names the dispute the order now holds: what a decision names.
+      expect(raised.body.openDisputeId).toMatch(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/);
+      disputeOf.set(order.body.id as string, raised.body.openDisputeId as string);
 
       return order.body.id as string;
     }
+    const disputeOf = new Map<string, string>();
+    const naming = (orderId: string, body: Record<string, unknown>) => ({
+      disputeId: disputeOf.get(orderId),
+      ...body,
+    });
 
     it('refuses either party with 403', async () => {
       const orderId = await disputedOrder();
@@ -695,14 +882,16 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-self-resolve'))
-        .send({ outcome: 'SETTLE', resolution: 'I decided in my own favour here' })
+        .send(naming(orderId, { outcome: 'SETTLE', resolution: 'I decided in my own favour here' }))
         .expect(403);
 
       await request(http)
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${supplier(supplierOrg)}`)
         .set('idempotency-key', apiKey('api-sup-resolve'))
-        .send({ outcome: 'SETTLE', resolution: 'the supplier decides for themselves' })
+        .send(
+          naming(orderId, { outcome: 'SETTLE', resolution: 'the supplier decides for themselves' }),
+        )
         .expect(403);
     });
 
@@ -713,14 +902,70 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-resolve-settle'))
-        .send({
-          outcome: 'SETTLE',
-          resolution: 'the supplier evidenced correct delivery',
-          responsibility: 'BUYER',
-        })
+        .send(
+          naming(orderId, {
+            outcome: 'SETTLE',
+            resolution: 'the supplier evidenced correct delivery',
+            responsibility: 'BUYER',
+          }),
+        )
         .expect(200);
 
-      expect(resolved.body.status).toBe('RECEIPT_CONFIRMED');
+      // Disputed from FUNDS_HELD, before any receipt: resumed there, and no
+      // receipt is written on the buyer's behalf (D-083).
+      expect(resolved.body).toMatchObject({
+        status: 'FUNDS_HELD',
+        receiptConfirmedAt: null,
+        openDisputeId: null,
+      });
+    });
+
+    it('refuses a decision about a dispute the order no longer holds with 409, deciding nothing', async () => {
+      const orderId = await disputedOrder();
+      const first = disputeOf.get(orderId)!;
+      await request(http)
+        .post(`/v1/orders/${orderId}/disputes/resolve`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .set('idempotency-key', apiKey('api-resolve-a'))
+        .send(
+          naming(orderId, {
+            outcome: 'SETTLE',
+            resolution: 'decided A in the supplier’s favour',
+            responsibility: 'BUYER',
+          }),
+        )
+        .expect(200);
+      const again = await request(http)
+        .post(`/v1/orders/${orderId}/disputes`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', apiKey('api-raise-b'))
+        .send({ reason: 'still nothing has been delivered to us' })
+        .expect(200);
+      const second = again.body.openDisputeId as string;
+      expect(second).not.toBe(first);
+
+      // A form still open on A: refused, and B stands as it was.
+      const stale = await request(http)
+        .post(`/v1/orders/${orderId}/disputes/resolve`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .set('idempotency-key', apiKey('api-resolve-stale'))
+        .send({
+          disputeId: first,
+          outcome: 'REFUND',
+          resolution: 'a refund decided on the stale form',
+          responsibility: 'SUPPLIER',
+        })
+        .expect(409);
+      expect(stale.body).toMatchObject({
+        code: 'CONFLICT',
+        details: [{ path: 'disputeId', code: 'DISPUTE_DECISION_STALE' }],
+      });
+      expectNotDisclosed(stale.body, [first, second]);
+      const now = await request(http)
+        .get(`/v1/orders/${orderId}`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .expect(200);
+      expect(now.body).toMatchObject({ status: 'DISPUTED', openDisputeId: second });
     });
 
     it('resolves in the buyer’s favour, moving the order to compensation', async () => {
@@ -730,11 +975,13 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-resolve-refund'))
-        .send({
-          outcome: 'REFUND',
-          resolution: 'the goods were never delivered to the buyer',
-          responsibility: 'SUPPLIER',
-        })
+        .send(
+          naming(orderId, {
+            outcome: 'REFUND',
+            resolution: 'the goods were never delivered to the buyer',
+            responsibility: 'SUPPLIER',
+          }),
+        )
         .expect(200);
 
       expect(resolved.body.status).toBe('CANCELLING');
@@ -748,11 +995,13 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-bad-outcome'))
-        .send({
-          outcome: 'SPLIT_THE_DIFFERENCE',
-          resolution: 'a compromise nobody defined',
-          responsibility: 'PLATFORM',
-        })
+        .send(
+          naming(orderId, {
+            outcome: 'SPLIT_THE_DIFFERENCE',
+            resolution: 'a compromise nobody defined',
+            responsibility: 'PLATFORM',
+          }),
+        )
         .expect(400);
     });
 
@@ -764,11 +1013,13 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-bad-responsibility'))
-        .send({
-          outcome: 'SETTLE',
-          resolution: 'a resolution with an invalid attribution',
-          responsibility: 'WEATHER',
-        })
+        .send(
+          naming(orderId, {
+            outcome: 'SETTLE',
+            resolution: 'a resolution with an invalid attribution',
+            responsibility: 'WEATHER',
+          }),
+        )
         .expect(400);
     });
 
@@ -779,11 +1030,32 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-missing-responsibility'))
-        .send({ outcome: 'SETTLE', resolution: 'a resolution missing its attribution' })
+        .send(
+          naming(orderId, {
+            outcome: 'SETTLE',
+            resolution: 'a resolution missing its attribution',
+          }),
+        )
         .expect(400);
     });
 
-    it('refuses to resolve an order that has no dispute with 422', async () => {
+    it('refuses a decision that names no dispute with 400', async () => {
+      const orderId = await disputedOrder();
+
+      const refused = await request(http)
+        .post(`/v1/orders/${orderId}/disputes/resolve`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .set('idempotency-key', apiKey('api-unnamed'))
+        .send({
+          outcome: 'SETTLE',
+          resolution: 'a decision about whichever dispute is open',
+          responsibility: 'BUYER',
+        })
+        .expect(400);
+      expect(refused.body.code).toBe('VALIDATION_FAILED');
+    });
+
+    it('refuses to resolve an order that has no dispute with 409 DISPUTE_DECISION_STALE', async () => {
       const offerId = await publishOffer();
       const order = await placeOrder(offerId);
 
@@ -792,11 +1064,17 @@ describe('order API', () => {
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-nothing-to-resolve'))
         .send({
+          disputeId: 'DSP_00000000000000000000000000',
           outcome: 'SETTLE',
           resolution: 'resolving something never disputed',
           responsibility: 'UNDETERMINED',
         })
-        .expect(422);
+        .expect(409)
+        .expect((response) => {
+          expect(response.body.details).toEqual([
+            expect.objectContaining({ path: 'disputeId', code: 'DISPUTE_DECISION_STALE' }),
+          ]);
+        });
     });
   });
 
@@ -805,6 +1083,26 @@ describe('order API', () => {
   // -------------------------------------------------------------------------
 
   describe('POST /v1/orders/:id/reviews', () => {
+    it('publishes the registered review OpenAPI contract', () => {
+      const document = enrichOpenApiDocument(
+        SwaggerModule.createDocument(harness.app, new DocumentBuilder().build()),
+        { idempotencyTtlHours: testEnv().MARKETPLACE_IDEMPOTENCY_TTL_HOURS },
+      );
+      expect(document.paths['/v1/orders/{id}/reviews']).toMatchSnapshot();
+    });
+
+    it.each([0, 6, 2.5, '3', null])(
+      'refuses invalid qualityRating %s at HTTP ingress',
+      async (qualityRating) => {
+        await request(http)
+          .post('/v1/orders/ORD_BAD_QUALITY/reviews')
+          .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+          .set('idempotency-key', apiKey('bad-quality'))
+          .send({ rating: 4, qualityRating })
+          .expect(400);
+      },
+    );
+
     it('refuses a review before the order completed with 422', async () => {
       const offerId = await publishOffer();
       const order = await placeOrder(offerId);
@@ -853,14 +1151,29 @@ describe('order API', () => {
         ),
       );
 
+      const reviewKey = apiKey('api-review');
       const review = await request(http)
         .post(`/v1/orders/${order.body.id}/reviews`)
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
-        .set('idempotency-key', apiKey('api-review'))
-        .send({ rating: 4, comment: 'تحویل به‌موقع' })
+        .set('idempotency-key', reviewKey)
+        .send({ rating: 4, qualityRating: 2, comment: 'تحویل به‌موقع' })
         .expect(201);
 
       expect(review.body.rating).toBe(4);
+
+      const replay = await request(http)
+        .post(`/v1/orders/${order.body.id}/reviews`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', reviewKey)
+        .send({ rating: 4, qualityRating: 2, comment: 'تحویل به‌موقع' })
+        .expect(201);
+      expect(replay.body).toEqual(review.body);
+      await request(http)
+        .post(`/v1/orders/${order.body.id}/reviews`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', reviewKey)
+        .send({ rating: 4, qualityRating: 5, comment: 'تحویل به‌موقع' })
+        .expect(409);
 
       const second = await request(http)
         .post(`/v1/orders/${order.body.id}/reviews`)

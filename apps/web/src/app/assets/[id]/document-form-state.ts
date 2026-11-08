@@ -46,7 +46,14 @@ export type DocumentFormState =
       readonly status: number;
       readonly correlationId: string;
       readonly resume: string | null;
+      /** The key `resume` is bound to (PR-880 r1 F1). */
+      readonly submissionId?: string;
+      readonly values?: AttachDocumentFormValues;
     }
-  | (UnconfirmedWriteState & { readonly resume: string | null });
+  | (UnconfirmedWriteState & {
+      readonly resume: string | null;
+      /** What was sent under `submissionId`, so a resend is that request (PR-880 r1 F1). */
+      readonly values?: AttachDocumentFormValues;
+    });
 
 export const IDLE_DOCUMENT_FORM = { kind: 'IDLE' } as const;

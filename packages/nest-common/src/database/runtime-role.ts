@@ -16,7 +16,7 @@
  * which counts a grant WITH INHERIT FALSE too: such a member still can
  * `SET ROLE` to the owner; Codex round 3 on #176):
  *
- *   * is a superuser, or holds CREATEDB, CREATEROLE or BYPASSRLS;
+ *   * is a superuser, or holds CREATEDB, CREATEROLE, BYPASSRLS or REPLICATION;
  *   * is a migrator role by name (`current_user` or `session_user` ending in
  *     `_migrator`);
  *   * owns the database, any non-system schema, or any relation in one — the
@@ -24,7 +24,8 @@
  *   * holds CREATE on the database or on any non-system schema — it could make
  *     objects it would own;
  *   * is a member of any role that owns something here, is named `*_migrator`,
- *     or is superuser-capable (SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS).
+ *     or is superuser-capable (SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS,
+ *     REPLICATION — #540 r1 F1).
  *
  * Infrastructure, not business logic: it decides whether a process may start,
  * never what it does. Each service runs it twice:
@@ -42,7 +43,8 @@
  *      integration suites open owner connections through that class on purpose.
  */
 
-import { DemoSeedRefusedError } from '@rasta/config';
+import { clientFailureCode } from './client-failure';
+import { DemoSeedRefusedError, markRefusal } from '@rasta/config';
 
 /** The one raw-SQL method every generated Prisma client has. */
 export interface RuntimeRoleQueryClient {
@@ -58,6 +60,8 @@ export interface ConnectedRoleFacts {
   createDb: boolean;
   createRole: boolean;
   bypassRls: boolean;
+  /** REPLICATION: it could stream every database's changes (#540 r1 F1). */
+  replication: boolean;
   ownsDatabase: boolean;
   ownedSchemas: string[];
   ownsRelationIn: string[];
@@ -65,6 +69,8 @@ export interface ConnectedRoleFacts {
   createOnSchemas: string[];
   /** Roles it is a member of — SET or INHERIT, either — that are owners or superuser-capable. */
   memberOf: string[];
+  /** This session's `TimeZone`: anything but `UTC` refuses the start (FU-188). */
+  timeZone: string;
 }
 
 /** Read by {@link assertRuntimeRole}; exported so a live test runs exactly this. */
@@ -77,10 +83,12 @@ export const CONNECTED_ROLE_SQL = `
   SELECT current_user::text AS role,
          session_user::text AS "sessionRole",
          current_database()::text AS database,
+         current_setting('TimeZone') AS "timeZone",
          r.rolsuper AS superuser,
          r.rolcreatedb AS "createDb",
          r.rolcreaterole AS "createRole",
          r.rolbypassrls AS "bypassRls",
+         r.rolreplication AS replication,
          EXISTS (SELECT 1 FROM pg_database d
                   WHERE d.datname = current_database()
                     AND pg_has_role(current_user, d.datdba, 'MEMBER')) AS "ownsDatabase",
@@ -98,6 +106,7 @@ export const CONNECTED_ROLE_SQL = `
                 WHERE m.rolname <> current_user
                   AND pg_has_role(current_user, m.oid, 'MEMBER')
                   AND (m.rolsuper OR m.rolcreatedb OR m.rolcreaterole OR m.rolbypassrls
+                       OR m.rolreplication
                        OR m.rolname LIKE '%\\_migrator'
                        OR EXISTS (SELECT 1 FROM pg_database d
                                    WHERE d.datname = current_database() AND d.datdba = m.oid)
@@ -111,6 +120,9 @@ export const CONNECTED_ROLE_SQL = `
 /** Every reason the connected role may not run a service; empty when it may. */
 export function connectedRoleProblems(facts: ConnectedRoleFacts): string[] {
   const problems: string[] = [];
+  if (facts.timeZone !== 'UTC') {
+    problems.push(`has a session in time zone ${facts.timeZone}, not UTC (docs/11 § 11.2)`);
+  }
   if (facts.superuser) problems.push('is a superuser');
   for (const name of new Set([facts.role, facts.sessionRole])) {
     if (/_migrator$/.test(name)) problems.push(`is a migrator role (${name})`);
@@ -118,6 +130,7 @@ export function connectedRoleProblems(facts: ConnectedRoleFacts): string[] {
   if (facts.createDb) problems.push('holds CREATEDB');
   if (facts.createRole) problems.push('holds CREATEROLE');
   if (facts.bypassRls) problems.push('holds BYPASSRLS');
+  if (facts.replication) problems.push('holds REPLICATION');
   if (facts.ownsDatabase) problems.push(`can act as the owner of database ${facts.database}`);
   for (const schema of facts.ownedSchemas) {
     problems.push(`can act as the owner of schema ${schema}`);
@@ -150,6 +163,7 @@ export class RuntimeRoleRefusedError extends Error {
         '(docs/runbooks/db-role-split.md, D-045).',
     );
     this.name = 'RuntimeRoleRefusedError';
+    markRefusal(this, 'runtime-role');
   }
 }
 
@@ -179,6 +193,28 @@ export async function assertRuntimeRole(
   return facts;
 }
 
+/**
+ * Why the startup gate could not ask the database at all: a fixed text naming
+ * the runtime URL's variable and the client's code (`P1000`, `P1001`,
+ * `ECONNREFUSED`), never the client's message — Prisma's names the user it
+ * connected as and the host (#385 r6, the configuration-disclosure class). It
+ * fails closed as before: nothing starts.
+ */
+export class RuntimeRoleUnverifiedError extends Error {
+  override readonly name = 'RuntimeRoleUnverifiedError';
+
+  constructor(
+    readonly runtimeVariable: string,
+    readonly code: string,
+  ) {
+    super(
+      `${runtimeVariable}: the connected role could not be checked (code ${code}); ` +
+        "the database client's own error is withheld",
+    );
+    markRefusal(this, 'runtime-role-unverified');
+  }
+}
+
 /** A client {@link preflightRuntimeRole} can open, ask, and close. */
 export interface RuntimeRolePreflightClient extends RuntimeRoleQueryClient {
   $disconnect(): PromiseLike<void>;
@@ -189,19 +225,29 @@ export interface RuntimeRolePreflightClient extends RuntimeRoleQueryClient {
  * service's runtime URL (`open`, typically `new PrismaClient({ datasources })`),
  * runs {@link assertRuntimeRole} on it and closes it whatever the outcome.
  * Rejects with {@link RuntimeRoleRefusedError} when the connected role could act
- * as an owner — and with the connection error when it cannot connect at all,
- * so nothing starts on a database it cannot vouch for.
+ * as an owner — and with {@link RuntimeRoleUnverifiedError} when it cannot ask
+ * at all (no connection, a refused login), so nothing starts on a database it
+ * cannot vouch for. The client's own error is not passed on: the bootstrap
+ * logs what it is given.
  */
 export async function preflightRuntimeRole(
   open: () => RuntimeRolePreflightClient,
   options: AssertRuntimeRoleOptions,
 ): Promise<ConnectedRoleFacts> {
-  const client = open();
+  let client: RuntimeRolePreflightClient | undefined;
+  let code: string;
   try {
+    client = open();
     return await assertRuntimeRole(client, options);
+  } catch (error) {
+    if (error instanceof RuntimeRoleRefusedError) throw error;
+    code = clientFailureCode(error);
   } finally {
-    await client.$disconnect();
+    // A failed close says no more than a failed connection would.
+    await client?.$disconnect().then(undefined, () => undefined);
   }
+  // Thrown outside the catch: nothing of the client's error travels with it.
+  throw new RuntimeRoleUnverifiedError(options.runtimeVariable, code);
 }
 
 /**

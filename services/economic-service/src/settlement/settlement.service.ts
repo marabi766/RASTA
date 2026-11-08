@@ -14,7 +14,7 @@ import {
 import { CommissionService } from '../commission/commission.service';
 import type { CommissionDecision, CommissionOutcome } from '../commission/rule-engine';
 import { assertSufficient, balancesFrom } from '../wallet/balances';
-import { nextStatus } from '../transaction/state-machine';
+import { assertSettlementReady, nextStatus } from '../transaction/state-machine';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor } from '../shared/money';
 import { after, resolveCursor } from '../shared/cursor';
@@ -229,12 +229,45 @@ export class SettlementService {
     const payee = locked.find((wallet) => wallet.id === payeeWallet.id);
     if (!payer || !payee) throw RastaError.internal('A wallet vanished while locking it');
 
-    const hold = await this.walletRepository.findActiveHold(tx, payer.id, transaction.id);
+    const hold = await this.walletRepository.findActiveHold(tx, {
+      walletId: payer.id,
+      organizationId: transaction.organizationId,
+      reference: transaction.id,
+      referenceType: 'TRANSACTION',
+    });
+
+    // Escrowed money moves only on a recorded authorisation, whatever the
+    // status says: an older release's resolution left escrowed, never
+    // authorised rows in PENDING_SETTLEMENT (D-083; #623 round 1, F1). Read
+    // under the row lock, before any journal or hold release; the database
+    // refuses the same (`trg_wallet_hold_release_settlement_authority`).
+    assertSettlementReady(
+      transactionId,
+      {
+        settlementAuthorised: transaction.settlementAuthorised,
+        fundsHeld: transaction.fundsHeld || hold !== null,
+        settlementBarred: transaction.settlementBarred,
+      },
+      transaction.sourceType,
+    );
 
     // With no escrow behind it — the maintenance obligation of ADR-032 — the
     // payer's spendable balance has to cover it now. Checked under the lock,
     // so the answer is still true when the journal posts.
     if (!hold) {
+      // A new debit, so only from an ACTIVE wallet: FROZEN means "no new
+      // debits or holds", and CLOSED takes none either (schema.prisma,
+      // `WalletStatus`; economic audit F2). Read from the row locked above, so
+      // a freeze that committed first is the status seen here. Settling an
+      // existing hold, below, is the allowance the schema names — money
+      // already committed to escrow still resolves. The payee's credit is not
+      // gated: a freeze stops money leaving a wallet, not arriving in it.
+      if (payer.status !== 'ACTIVE') {
+        throw RastaError.businessRule(
+          'The paying wallet is not active; a settlement with no funds held cannot debit it',
+          { transactionId, walletId: payer.id, walletStatus: payer.status },
+        );
+      }
       assertSufficient(
         payer.id,
         balancesFrom(payer.availableBalanceMinor, payer.pendingBalanceMinor),

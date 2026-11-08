@@ -3,9 +3,10 @@ import { canReadSettlements } from '@/app/portal-nav';
 import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
-import { tokenRoles } from './realm-roles';
+import { canUseDemands } from './demand-commands';
 import { canReadReturns } from './returns';
 import type { WebSession } from './session';
+import { sessionRoles } from './session-organization';
 
 /**
  * Which navigation a signed-in person is shown.
@@ -193,7 +194,7 @@ export function canReadSuppliers(roles: readonly string[]): boolean {
 
 /**
  * The navigation for a person, from the roles their access token carries for
- * the organization it resolves to (`tokenRoles`): the set the backend services
+ * the organization the session is pinned to (`sessionRoles`): the set the backend services
  * act on (`rolesForRequest`). Not `/v1/users/me`, whose membership rows run
  * ahead of the token until it is refreshed — a role removed there still works
  * and a role added is still refused, and a link drawn from the rows would
@@ -203,9 +204,9 @@ export function canReadSuppliers(roles: readonly string[]): boolean {
  * convenience, and showing one on a guess is the mistake being fixed.
  */
 export function portalNavForSession(
-  session: Pick<WebSession, 'accessToken'>,
+  session: Pick<WebSession, 'accessToken' | 'organizationId'>,
 ): readonly SidebarItem[] {
-  const read = tokenRoles(session.accessToken);
+  const read = sessionRoles(session);
   const roles = read ?? [];
   const env = webServerEnv();
   return portalNavFor({
@@ -216,5 +217,6 @@ export function portalNavForSession(
     canReadInventory: canReadInventory(roles, env),
     canReadSuppliers: canReadSuppliers(roles),
     canReadReturns: canReadReturns(read),
+    canReadDemands: canUseDemands(read, env),
   });
 }

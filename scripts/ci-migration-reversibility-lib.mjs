@@ -45,7 +45,7 @@
  */
 import { parse as parseYaml } from 'yaml';
 
-import { verdictFailures } from './ci-integration-split-lib.mjs';
+import { textOf, verdictFailures } from './ci-integration-split-lib.mjs';
 
 export const AGGREGATE_JOB = 'migration-reversibility';
 export const AGGREGATE_NAME = 'Migration reversibility and database guards';
@@ -120,11 +120,11 @@ export const ERREXIT_SHELLS = ['bash -e {0}', 'bash', 'bash --noprofile --norc -
 const NEEDS_EXPRESSION = '${{ toJSON(needs) }}';
 
 const isMapping = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-const squash = (text) => String(text).replace(/\s+/g, ' ').trim();
+const squash = (text) => textOf(text).replace(/\s+/g, ' ').trim();
 
 /** A run script's commands: comment and blank lines aside, each line trimmed. */
 function commands(run) {
-  return String(run ?? '')
+  return textOf(run)
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'));
@@ -135,12 +135,8 @@ export function chainShards(workflow) {
   const include = workflow?.jobs?.[CHAIN_JOB]?.strategy?.matrix?.include;
   if (!Array.isArray(include)) return [];
   return include.map((entry) => ({
-    shard: isMapping(entry) ? entry.shard : undefined,
-    services: isMapping(entry)
-      ? String(entry.services ?? '')
-          .split(/\s+/)
-          .filter(Boolean)
-      : [],
+    shard: isMapping(entry) && entry.shard !== undefined ? textOf(entry.shard) : undefined,
+    services: isMapping(entry) ? textOf(entry.services).split(/\s+/).filter(Boolean) : [],
   }));
 }
 
@@ -192,14 +188,14 @@ function matrixProblems(job, services) {
   for (const { shard, services: listed } of chainShards({ jobs: { [CHAIN_JOB]: job } })) {
     if (shard === undefined || squash(shard) === '')
       problems.push(`${label} has a shard with no name`);
-    else if (names.has(String(shard))) problems.push(`${label} has two shards named ${shard}`);
-    names.add(String(shard));
+    else if (names.has(shard)) problems.push(`${label} has two shards named ${shard}`);
+    names.add(shard);
     if (listed.length === 0) problems.push(`${label} shard ${shard} lists no services`);
     for (const service of listed) {
       if (seen.has(service)) {
         problems.push(`${service} is in shards ${seen.get(service)} and ${shard}`);
       } else {
-        seen.set(service, String(shard));
+        seen.set(service, shard);
       }
       if (!services.includes(service)) {
         problems.push(`shard ${shard} lists ${service}, which is not a service with migrations`);

@@ -35,6 +35,11 @@ import {
   type Statement,
 } from './contract-statements';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * The statement module: what it reads, who it offers each form to — the copy
@@ -50,7 +55,7 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -70,7 +75,7 @@ function problem(status: number, code: string, details?: { path: string; code: s
 }
 
 const caller = (org: string, roles: readonly string[], options = {}) =>
-  statementCallerOf(tokenFor(org, roles, options));
+  statementCallerOf(pinnedTokens(tokenFor(org, roles, options)));
 
 describe('reading', () => {
   it('keeps money as decimal strings and refuses a float', async () => {
@@ -138,7 +143,7 @@ describe('who is offered the draft and submit forms', () => {
   });
 
   it('nothing from a token that cannot be read', () => {
-    const unreadable = statementCallerOf('not-a-token');
+    const unreadable = statementCallerOf(pinnedTokens('not-a-token'));
     expect(canDraftStatement(unreadable, SIGNED_CONTRACT)).toBe(false);
   });
 });
@@ -410,9 +415,12 @@ describe('what every answer becomes', () => {
     expect(raced).toMatchObject({ kind: 'INVALID', message: STATEMENT_REFUSAL_TEXT.STEP_DECIDED });
   });
 
-  it('an unknown refusal is one fixed sentence', async () => {
+  it('an unnamed documented refusal is one fixed sentence; an undocumented code is unconfirmed', async () => {
+    const unnamed = await approve(jest.fn(async () => problem(409, 'ALREADY_EXISTS')));
+    expect(unnamed).toMatchObject({ kind: 'INVALID', message: STATEMENT_REFUSAL_FALLBACK });
+    // PR-830 r1 F1.
     const odd = await approve(jest.fn(async () => problem(422, 'SOMETHING_NEW')));
-    expect(odd).toMatchObject({ kind: 'INVALID', message: STATEMENT_REFUSAL_FALLBACK });
+    expect(odd.kind).toBe('UNKNOWN_OUTCOME');
   });
 
   it('places a line’s field error on the form row it came from', async () => {

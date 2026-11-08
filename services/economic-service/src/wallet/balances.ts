@@ -75,19 +75,16 @@ export function isConsistent(balances: Balances): boolean {
  * what makes the answer still true when it is acted on
  * (`wallet.repository.ts`, ADR-031).
  *
- * The figures go into `internalContext`, which is server-side only. They never
- * reach the response body: a caller probing another organization's wallet must
- * not learn its balance from an error message (AGENTS.md S-09).
+ * The figures go nowhere: not into the response body — a caller probing
+ * another organization's wallet must not learn its balance from an error
+ * message — and not into `internalContext` either, which the exception filter
+ * logs (AGENTS.md S-09; economic audit F9). The wallet id is the handle.
  */
 export function assertSufficient(walletId: string, balances: Balances, amountMinor: bigint): void {
   if (amountMinor <= 0n) {
     throw RastaError.businessRule('Amount must be positive', { walletId });
   }
   if (balances.availableBalanceMinor < amountMinor) {
-    throw RastaError.insufficientBalance(
-      walletId,
-      amountMinor.toString(),
-      balances.availableBalanceMinor.toString(),
-    );
+    throw RastaError.insufficientBalance(walletId);
   }
 }

@@ -4,6 +4,7 @@ import type { PrismaClient } from '../src/generated/prisma';
 import { ID_PREFIX, newId } from '../src/events/publisher';
 import { ReservationExpiry } from '../src/reservation/expiry';
 import { ReservationRepository } from '../src/reservation/reservation.repository';
+import { ReservationService } from '../src/reservation/reservation.service';
 import { ReservationSweeper } from '../src/reservation/reservation.sweeper';
 import { transactionNow } from '../src/shared/clock';
 import { commandKeyHash } from '../src/shared/command';
@@ -127,6 +128,57 @@ describe('reservation expiry', () => {
     await raw.$disconnect();
     await api.close();
   });
+
+  it('the central expiry guard refuses an invalid instant even if its caller bypasses the DTO', () => {
+    const service = api.app.get(ReservationService);
+    const at = new Date();
+    // An hour ahead, so with `-15:00`/`-14:01` (which `Date` parses) the instant is still in range:
+    // only the guard's own syntax check refuses them.
+    const base = new Date(at.getTime() + 3600_000).toISOString().slice(0, -1);
+    for (const expiresAt of ['not a date', `${base}-15:00`, `${base}-14:01`, `${base}+24:00`]) {
+      let refused: unknown;
+      try {
+        service['expiryOf'](expiresAt, at);
+      } catch (error) {
+        refused = error;
+      }
+      expect(refused).toMatchObject({
+        details: [expect.objectContaining({ code: 'EXPIRY_OUT_OF_RANGE' })],
+      });
+    }
+  });
+
+  // Pinned to the DTO, not the guard: the base instant is an hour ahead (in range), so the
+  // offset is the only reason to refuse, and the refusing layer is the request pipe (FU-035).
+  it.each(['+14:01', '+15:00', '-15:00', '+24:00', '+99:99', '-00:60'])(
+    'refuses malformed expiry offset %s without effects',
+    async (offset) => {
+      const a = org();
+      const { stockItemId } = await seedStock(api, a, 5);
+      const owner = client(api, orgAdmin(a));
+      const beforeStock = await owner.stockItem(stockItemId);
+      const beforeReservations = await raw.stockReservation.count({ where: { organizationId: a } });
+      const beforeMovements = await raw.stockMovement.count({ where: { organizationId: a } });
+      const beforeOutbox = await raw.outboxMessage.count({ where: { organizationId: a } });
+      const beforeKeys = await raw.idempotencyKey.count({ where: { organizationId: a } });
+      const base = new Date(Date.now() + 3600_000).toISOString().slice(0, -1);
+      const response = await owner.reserve([{ stockItemId, quantity: 2 }], {
+        expiresAt: `${base}${offset}`,
+      });
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual(expect.objectContaining({ code: 'VALIDATION_FAILED' }));
+      expect(response.body.details).toEqual([
+        expect.objectContaining({ path: 'expiresAt', code: 'invalid_string' }),
+      ]);
+      expect((await owner.stockItem(stockItemId)).body).toEqual(beforeStock.body);
+      expect(await raw.stockReservation.count({ where: { organizationId: a } })).toBe(
+        beforeReservations,
+      );
+      expect(await raw.stockMovement.count({ where: { organizationId: a } })).toBe(beforeMovements);
+      expect(await raw.outboxMessage.count({ where: { organizationId: a } })).toBe(beforeOutbox);
+      expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(beforeKeys);
+    },
+  );
 
   it('the sweeper releases a due reservation nobody touches: EXPIRED, a RELEASE movement, STOCK_RELEASED', async () => {
     const a = org();

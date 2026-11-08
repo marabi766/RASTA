@@ -6,6 +6,7 @@ import {
   NoAccessState,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import { formatJalaliDateLong, toPersianDigits } from '@/lib/format';
 import {
@@ -22,6 +23,7 @@ import type { Order, ReadResult } from '@/server/orders';
 import { formatOrderAmount } from '../OrdersScreen';
 import { OrderCommandForm } from './OrderCommandForm';
 import { OrderReturns, type OrderReturnsProps } from './OrderReturns';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * One order: where it is, what it contains, and what **this viewer** may do
@@ -48,7 +50,7 @@ export interface OrderDetailScreenProps {
   readonly mintSubmissionId: () => string;
   /** The command that just succeeded, from the redirect's query flag. */
   readonly done?: OrderCommand;
-  /** The order was just placed from the offers page (`?placed=1`). */
+  /** The order was just placed from the offers page (its signed flash, `server/flash.ts`). */
   readonly placed?: boolean;
   /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
   readonly demoMode: DemoMode;
@@ -92,43 +94,45 @@ function Stepper({ order }: { order: Order }) {
 
 function Lines({ order }: { order: Order }) {
   return (
-    <table className="w-full text-sm">
-      <caption className="sr-only">اقلام سفارش</caption>
-      <thead>
-        <tr className="text-content-muted">
-          <th scope="col" className="py-2 text-start font-normal">
-            کالا یا خدمت
-          </th>
-          <th scope="col" className="py-2 text-start font-normal">
-            تعداد
-          </th>
-          <th scope="col" className="py-2 text-start font-normal">
-            بهای واحد
-          </th>
-          <th scope="col" className="py-2 text-start font-normal">
-            جمع
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {order.lines.map((line) => (
-          <tr key={line.offerId} className="border-t border-border">
-            <td className="py-2">{line.productName}</td>
-            <td className="py-2">{toPersianDigits(String(line.quantity))}</td>
-            <td className="py-2">{formatOrderAmount(line.unitPriceMinor, line.currency)}</td>
-            <td className="py-2">{formatOrderAmount(line.lineTotalMinor, line.currency)}</td>
+    <TableScroll label="اقلام سفارش">
+      <table className="w-full text-sm">
+        <caption className="sr-only">اقلام سفارش</caption>
+        <thead>
+          <tr className="text-content-muted">
+            <th scope="col" className="py-2 text-start font-normal">
+              کالا یا خدمت
+            </th>
+            <th scope="col" className="py-2 text-start font-normal">
+              تعداد
+            </th>
+            <th scope="col" className="py-2 text-start font-normal">
+              بهای واحد
+            </th>
+            <th scope="col" className="py-2 text-start font-normal">
+              جمع
+            </th>
           </tr>
-        ))}
-      </tbody>
-      <tfoot>
-        <tr className="border-t-2 border-border-strong font-medium">
-          <th scope="row" colSpan={3} className="py-2 text-start">
-            مبلغ کل
-          </th>
-          <td className="py-2">{formatOrderAmount(order.totalAmountMinor, order.currency)}</td>
-        </tr>
-      </tfoot>
-    </table>
+        </thead>
+        <tbody>
+          {order.lines.map((line) => (
+            <tr key={line.offerId} className="border-t border-border">
+              <td className="py-2">{line.productName}</td>
+              <td className="py-2">{toPersianDigits(String(line.quantity))}</td>
+              <td className="py-2">{formatOrderAmount(line.unitPriceMinor, line.currency)}</td>
+              <td className="py-2">{formatOrderAmount(line.lineTotalMinor, line.currency)}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="border-t-2 border-border-strong font-medium">
+            <th scope="row" colSpan={3} className="py-2 text-start">
+              مبلغ کل
+            </th>
+            <td className="py-2">{formatOrderAmount(order.totalAmountMinor, order.currency)}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </TableScroll>
   );
 }
 
@@ -168,6 +172,7 @@ function WhatNext({
           command={command}
           csrfToken={csrfToken}
           submissionId={mintSubmissionId()}
+          disputeId={order.openDisputeId}
         />
       ))}
     </div>
@@ -219,7 +224,7 @@ export function OrderDetailScreen({
   }
 
   const order = result.data;
-  const branch = BRANCH_EXPLANATIONS[order.status];
+  const branch = ownValue(BRANCH_EXPLANATIONS, order.status);
 
   return (
     <div className="flex flex-col gap-4">

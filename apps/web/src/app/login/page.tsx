@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
-import { readSession } from '@/server/current-session';
+import { readSession, readStoredSessionForLogout } from '@/server/current-session';
 import { safeReturnTo } from '@/server/login-attempt';
+import { PageThemeOwner } from '../PageThemeOwner';
 import { LoginScreen } from './LoginScreen';
 
 /**
@@ -21,6 +22,11 @@ export default async function LoginPage({
   // Somebody already signed in has no business here; sending them to the
   // dashboard is less confusing than showing a way in they have already used.
   if (await readSession()) redirect('/');
+  // Signed in, but refused for tenant data (no organization can be told from
+  // the token): signing in again would only bring the same identity back
+  // through single sign-on. The recovery page offers a logout and another
+  // account instead (PR 405 review 2, F3).
+  if (await readStoredSessionForLogout()) redirect('/account/recovery');
 
   const params = await searchParams;
   const reason = params.error;
@@ -31,6 +37,9 @@ export default async function LoginPage({
   // reaches a link, cookie or redirect unexamined).
   const returnTo = safeReturnTo(params.returnTo);
   return (
-    <LoginScreen reason={typeof reason === 'string' ? reason : undefined} returnTo={returnTo} />
+    <>
+      <PageThemeOwner subject={null} />
+      <LoginScreen reason={typeof reason === 'string' ? reason : undefined} returnTo={returnTo} />
+    </>
   );
 }

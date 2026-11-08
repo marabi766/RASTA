@@ -10,6 +10,10 @@ import {
 } from './place-order';
 import { EMPTY_PLACE_ORDER_FORM } from '@/lib/place-order-fields';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * Placing an order: the form into the body the service accepts, and every way
@@ -27,7 +31,7 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 
 function form(fields: Record<string, string>): FormData {
@@ -217,9 +221,15 @@ describe('what the service can answer', () => {
     expect(JSON.stringify(result)).not.toContain('Idempotency');
   });
 
-  it('uses a fixed Persian fallback for a code it has no sentence for', async () => {
-    const result = await send(jest.fn(async () => problem(422, 'SOMETHING_NEW', 'English text')));
+  it('uses a fixed Persian fallback for a documented code it has no sentence for', async () => {
+    const result = await send(jest.fn(async () => problem(409, 'ALREADY_EXISTS', 'English text')));
     expect(result).toMatchObject({ kind: 'INVALID', message: PLACE_ORDER_FIELD_MAPPING.fallback });
+    expect(JSON.stringify(result)).not.toContain('English');
+  });
+
+  it('an undocumented code proves nothing: unconfirmed (PR-830 r1 F1)', async () => {
+    const result = await send(jest.fn(async () => problem(422, 'SOMETHING_NEW', 'English text')));
+    expect(result.kind).toBe('UNKNOWN_OUTCOME');
     expect(JSON.stringify(result)).not.toContain('English');
   });
 

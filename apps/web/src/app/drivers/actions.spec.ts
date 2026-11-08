@@ -1,11 +1,14 @@
 /**
  * @jest-environment node
  */
+import { useUnresolvedStore } from '@/server/unresolved-request';
+import { memoryUnresolvedStore } from '@/server/unresolved-request-store';
 import { CSRF_FIELD } from '@/server/csrf';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_CREATE_DRIVER_FORM } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The `/drivers` registration form's write path, from a posted form to a
@@ -45,7 +48,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -69,8 +72,9 @@ function formData(
 }
 
 beforeEach(() => {
+  useUnresolvedStore(memoryUnresolvedStore());
   currentSession.mockResolvedValue(SESSION);
-  createDriver.mockResolvedValue({
+  createDriver.mockReset().mockResolvedValue({
     kind: 'CREATED',
     data: { id: 'DRV_1' },
     correlationId: 'corr-sample',
@@ -147,7 +151,8 @@ describe('what reaches the service', () => {
     await expect(submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).rejects.toThrow(
       /NEXT_REDIRECT/,
     );
-    expect(redirect).toHaveBeenCalledWith('/drivers/DRV_1?created=1');
+    // No flag the page never read (PR 405 review 2, F2): the driver's own page.
+    expect(redirect).toHaveBeenCalledWith('/drivers/DRV_1');
   });
 
   it('sends one submission twice under one reference — the double-submit case', async () => {
@@ -187,23 +192,172 @@ describe('what the service refuses', () => {
     // The service may have created the driver; "nothing was saved" would
     // invite a retry that reports a duplicate.
     createDriver.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-sample' });
-    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toEqual({
+    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toMatchObject({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
     });
     expect(redirect).not.toHaveBeenCalled();
   });
 
-  it('reports an outage with its status and correlation id', async () => {
+  it('keeps the first unknown outcome without replaying (FU-173/FU-190)', async () => {
+    // The first answer was lost; the same form again meets the gateway's rate limit,
+    // which says nothing about the first send.
+    createDriver.mockReset();
+    createDriver
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const form = formData(VALID);
+    const first = await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, form);
+    expect(first).toMatchObject({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
+    expect(await submitCreateDriver(first, form)).toMatchObject({
+      ...first,
+      releaseToken: expect.any(String),
+    });
+    expect(createDriver).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an ambiguous 503 as unconfirmed', async () => {
     createDriver.mockResolvedValue({
       kind: 'UNAVAILABLE',
       status: 503,
       correlationId: 'corr-sample',
     });
-    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toEqual({
-      kind: 'FAILED',
-      status: 503,
+    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toMatchObject({
+      kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+    });
+  });
+});
+
+describe('who may be registered: fleet-service decides on every POST (task 095)', () => {
+  const actual = jest.requireActual('@/server/drivers') as typeof import('@/server/drivers');
+
+  /** The gateway, answering the registration as fleet-service would. */
+  function gatewayAnswering(status: number, body: unknown) {
+    const calls: { url: string; body: unknown }[] = [];
+    const impl = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? 'null')) });
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json', 'x-correlation-id': 'corr-095' },
+      });
+    }) as typeof fetch;
+    return { impl, calls };
+  }
+
+  async function send(impl: typeof fetch, form: FormData) {
+    createDriver.mockImplementation((...args: unknown[]) =>
+      (actual.createDriver as (...a: unknown[]) => unknown)(...args),
+    );
+    const original = globalThis.fetch;
+    globalThis.fetch = impl;
+    try {
+      return await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, form);
+    } finally {
+      globalThis.fetch = original;
+    }
+  }
+
+  const NOT_A_MEMBER = {
+    code: 'BUSINESS_RULE_VIOLATION',
+    message: 'The user is not a member of this organization',
+    details: [
+      {
+        path: 'userId',
+        message: 'The user is not a member of this organization',
+        code: 'USER_NOT_A_MEMBER',
+      },
+    ],
+  };
+
+  it('shows the not-a-member refusal in Persian under the user field, the value kept', async () => {
+    const { impl, calls } = gatewayAnswering(422, NOT_A_MEMBER);
+    const state = await send(impl, formData(VALID));
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      values: { userId: VALID.userId },
+      fieldErrors: { userId: actual.NOT_A_MEMBER_TEXT },
+      message: null,
+    });
+    expect(JSON.stringify(state)).not.toContain('not a member');
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0]!.url).pathname).toBe('/v1/drivers');
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('says the same for a user who does not exist and for a member of another organization', async () => {
+    // fleet-service answers both with the one refusal; so does the portal.
+    const nobody = await send(gatewayAnswering(422, NOT_A_MEMBER).impl, formData(VALID));
+    const elsewhere = await send(
+      gatewayAnswering(422, NOT_A_MEMBER).impl,
+      formData({ userId: 'USR_01J00000000000000000000009' }),
+    );
+    expect(nobody).toMatchObject({ fieldErrors: { userId: actual.NOT_A_MEMBER_TEXT } });
+    expect(elsewhere).toMatchObject({ fieldErrors: { userId: actual.NOT_A_MEMBER_TEXT } });
+  });
+
+  it('keeps a 503 unconfirmed, even when fleet-service could not ask identity-service (FU-189)', async () => {
+    // fleet-service's own "could not ask" and a reset after its commit reach this portal as the
+    // same status, and a 5xx body is never read: only a proven refusal says nothing was saved.
+    const state = await send(
+      gatewayAnswering(503, {
+        code: 'UPSTREAM_UNAVAILABLE',
+        message: 'A required service is temporarily unavailable',
+      }).impl,
+      formData(VALID),
+    );
+    expect(state).toMatchObject({ kind: 'UNCONFIRMED' });
+  });
+
+  it('keeps a 504 unconfirmed — the gateway gave up, the write may have happened', async () => {
+    const state = await send(
+      gatewayAnswering(504, { code: 'UPSTREAM_TIMEOUT', message: 'x' }).impl,
+      formData(VALID),
+    );
+    expect(state).toMatchObject({ kind: 'UNCONFIRMED' });
+  });
+
+  describe('a form drawn for one organization, sent after the token moved to another', () => {
+    const inA = {
+      ...SESSION,
+      organizationId: 'ORG-DEH-0001',
+      accessToken: actingAccessToken('ORG-DEH-0001'),
+    };
+    const inB = {
+      ...SESSION,
+      organizationId: 'ORG-DEH-0002',
+      accessToken: actingAccessToken('ORG-DEH-0002'),
+    };
+
+    it('is refused as stale and sent nowhere — a member picked from A’s list is never registered in B', async () => {
+      const { impl, calls } = gatewayAnswering(201, { id: 'DRV_NEVER' });
+      // Drawn while the token acted for A…
+      const form = formData(VALID, { submission: mintSubmissionId(inA) });
+      // …sent after a refresh brought a token for B (and, since task 100, the
+      // session's stored organization with it).
+      currentSession.mockResolvedValue(inB);
+      const state = await send(impl, form);
+      expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
+      expect(calls).toHaveLength(0);
+      expect(createDriver).not.toHaveBeenCalled();
+    });
+
+    it('a form drawn after the switch goes through, and fleet-service decides for B', async () => {
+      const { impl, calls } = gatewayAnswering(422, NOT_A_MEMBER);
+      currentSession.mockResolvedValue(inB);
+      const state = await send(impl, formData(VALID, { submission: mintSubmissionId(inB) }));
+      expect(calls).toHaveLength(1);
+      expect(state).toMatchObject({ fieldErrors: { userId: actual.NOT_A_MEMBER_TEXT } });
     });
   });
 });

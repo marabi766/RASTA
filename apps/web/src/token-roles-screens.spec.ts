@@ -22,6 +22,7 @@
  */
 
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { UnresolvedSessionOrganization } from '@/server/session-organization';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -158,7 +159,10 @@ function sidebarOf(tree: ReactNode): string[] {
   const [sidebar] = ofType(tree, PortalSidebar);
   if (!sidebar) throw new Error('no sidebar');
   const drawn = PortalSidebar(sidebar.props as Parameters<typeof PortalSidebar>[0]);
-  return (drawn.props as { items: { href: string }[] }).items.map((item) => item.href);
+  // The sidebar's element sits beside the page's theme owner (`PageThemeOwner`).
+  const bar = elements(drawn).find((e) => 'items' in (e.props as object));
+  if (!bar) throw new Error('no sidebar items');
+  return (bar.props as { items: { href: string }[] }).items.map((item) => item.href);
 }
 
 async function run(path: string, params: Record<string, string> = {}): Promise<ReactElement> {
@@ -274,10 +278,12 @@ describe.each(SCREENS)('$name', ({ path, params, admitted, refused, offered }) =
     expect(offered(await run(path, params))).toBe(false);
   });
 
-  it('a token whose roles cannot be read: not offered', async () => {
+  it('a token whose roles cannot be read: nothing is drawn at all (task 100)', async () => {
+    // `readSession()` refuses such a session; one that reached a page anyway
+    // draws no organization, no list and no form.
     mockSession.current = { ...signedInWith([admitted]), accessToken: 'opaque' };
     identityReports([admitted]);
-    expect(offered(await run(path, params))).toBe(false);
+    await expect(run(path, params)).rejects.toThrow(UnresolvedSessionOrganization);
   });
 });
 
@@ -292,6 +298,8 @@ describe.each(SCREENS)(
     /** A session whose token carries these claims. */
     const withClaims = (claims: Record<string, unknown>) => ({
       ...signedInWith([]),
+      // The stored copy is the token's (`session-organization.ts`).
+      organizationId: typeof claims.org_id === 'string' ? claims.org_id : null,
       accessToken: jwt(claims),
     });
 
@@ -323,10 +331,21 @@ describe.each(SCREENS)(
       expect(offered(await run(path, params))).toBe(false);
     });
 
-    it('the global SYSTEM_ADMIN alone, acting for no organization: not offered — the write is tenant-scoped', async () => {
+    it('the global SYSTEM_ADMIN alone, acting for no organization: nothing is drawn or sent — the page is tenant-bound (task 118)', async () => {
       mockSession.current = withClaims({ realm_access: { roles: ['SYSTEM_ADMIN'] } });
       identityReports([admitted]);
-      expect(offered(await run(path, params))).toBe(false);
+      // `tenant-gate.ts` keeps such a session from the page. Were it reached
+      // anyway, it offers no form — or, where the page mints a submission id
+      // or reads through the gateway, throws before anything is sent.
+      const outcome = await run(path, params).then(
+        (tree) => ({ offered: offered(tree) }),
+        (error: unknown) => ({ refused: String(error) }),
+      );
+      expect(
+        'offered' in outcome
+          ? outcome.offered === false
+          : /acts for no (known )?organization/.test(outcome.refused),
+      ).toBe(true);
     });
   },
 );
@@ -353,11 +372,10 @@ describe('/tenders — which doors are asked', () => {
     expect(mockFetched).toEqual(['fetchTenders']);
   });
 
-  it('a token whose roles cannot be read: the owner’s door, whose own answer is shown', async () => {
+  it('a token whose roles cannot be read: nothing is drawn at all (task 100)', async () => {
     mockSession.current = { ...signedInWith(['CONTRACTOR']), accessToken: 'opaque' };
     identityReports(['CONTRACTOR']);
-    await run('./app/tenders/page');
-    expect(mockFetched).toEqual(['fetchTenders']);
+    await expect(run('./app/tenders/page')).rejects.toThrow(UnresolvedSessionOrganization);
   });
 });
 

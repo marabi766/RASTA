@@ -309,6 +309,31 @@ export const EXEMPTIONS = {
       reason:
         'one held row per receipt within a tender: the fork check must not be weakened by a differing organization_id',
     },
+    rfq_receipt_link_pkey: {
+      index: 'rfq_receipt_link (rfq_id, seq)',
+      reason:
+        "one link per (RFQ, seq) — an invariant of one RFQ's chain; the chain is read through the buyer's service token by organization and RFQ id (COM-007 PR 7), and leading with organization_id would let two organizations each hold a chain for one RFQ",
+    },
+    ux_rfq_receipt_link_receipt: {
+      index: 'rfq_receipt_link (rfq_id, receipt)',
+      reason:
+        'a receipt is one link of its RFQ, whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    },
+    ux_rfq_receipt_link_previous: {
+      index: 'rfq_receipt_link (rfq_id, previous_receipt)',
+      reason:
+        'a link has one successor per RFQ (no fork), whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    },
+    ux_rfq_receipt_pending_previous: {
+      index: 'rfq_receipt_pending (rfq_id, previous_receipt)',
+      reason:
+        'one held successor per predecessor within an RFQ: the fork check must not be weakened by a differing organization_id',
+    },
+    ux_rfq_receipt_pending_receipt: {
+      index: 'rfq_receipt_pending (rfq_id, receipt)',
+      reason:
+        'one held row per receipt within an RFQ: the fork check must not be weakened by a differing organization_id',
+    },
     ix_bid_access_evidence_tender: {
       index: 'bid_access_evidence (tender_id, accessed_at)',
       reason:
@@ -350,6 +375,11 @@ export const EXEMPTIONS = {
     },
   },
   marketplace: {
+    ix_order_saga_start_due: {
+      index: 'order (saga_start_next_attempt_at, id)',
+      reason:
+        'SagaStartStore.claim scans the platform queue of pending intents across buyers with no request tenant (ADR-039/050); the partial index orders its bounded keyset queue, persisted organization_id and a fresh claim token fence every acknowledgment; buyer reads retain ix_order_org_status',
+    },
     ix_return_request_supplier: {
       index: 'return_request (supplier_organization_id, id)',
       reason:
@@ -461,6 +491,11 @@ export const EXEMPTIONS = {
       reason:
         "the payment reconciler's heal pass reads the intents a refund left unfinished across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial, empty in the normal case",
     },
+    ux_settlement_reversal_source: {
+      index: 'settlement_reversal (source_type, source_reference)',
+      reason:
+        'the invariant that makes a correction case idempotent (RLG-002): one source is one fact across every tenant, and widening the key with organization_id would let a redelivered event open a second case under another organization',
+    },
     ix_payment_reconciliation_open_window: {
       index: 'payment_reconciliation_task (created_at, id)',
       reason:
@@ -495,8 +530,8 @@ export const EXEMPTIONS = {
       reason: `one leg per (transaction, role) — an invariant of one transaction; ${perParentUnique('transaction_id')}; ${PARENT_LOAD}`,
     },
     uq_wallet_hold_active_reference: {
-      index: 'wallet_hold (wallet_id, reference)',
-      reason: `one live hold per (wallet, reference) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
+      index: 'wallet_hold (wallet_id, organization_id, reference, reference_type)',
+      reason: `one live hold per (wallet, owner, reference, purpose) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
     },
   },
 };
@@ -533,6 +568,10 @@ export const TABLE_EXEMPTIONS = {
       'every read and write names the whole primary key (chain_scope, organization_id, chain_month): AuditRepository.ingest opens, locks and advances one chain by it, AuditRepository.chainHead reads one; chain_scope has two values, so the key reaches one tenant in its second column',
     bid_access_evidence:
       'append-only evidence of bid reads, written once per event by TenderEvidenceRepository.recordAccess under its primary key source_event_id; nothing reads it by organization — a reader by tender is what ix_bid_access_evidence_tender is for, and a tender belongs to one organization',
+    rfq_receipt_link:
+      "one RFQ's quotation-receipt chain: every read names the RFQ (RfqEvidenceRepository.appendLink and drain by rfq_id, RfqEvidenceRepository.chainOf by organization_id and rfq_id), served by the primary key (rfq_id, seq); an RFQ's chain belongs to one organization (appendLink refuses a link under another), so a leading organization_id would not narrow it",
+    rfq_receipt_pending:
+      "quotation receipts held until their predecessor arrives: read by RFQ (RfqEvidenceRepository.appendLink's owner probe, drain by (rfq_id, previous_receipt)) and removed by source_event_id, all served by its keys; the gap monitor counts every held row across tenants by held_at (RfqEvidenceRepository.pendingSummary, ix_rfq_receipt_pending_held)",
     tender_receipt_link:
       "one tender's receipt chain: every read names the tender (TenderEvidenceRepository.appendLink and drain by tender_id, TenderEvidenceRepository.chainOf by organization_id and tender_id), served by the primary key (tender_id, seq); a tender's chain belongs to one organization (appendLink refuses a link under another), so a leading organization_id would not narrow it",
     tender_receipt_pending:

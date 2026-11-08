@@ -7,8 +7,8 @@
 --
 -- Applied with:
 --
---   psql "$DATABASE_URL_MARKETPLACE" -v ON_ERROR_STOP=1 \
---     -f prisma/migrations/20260829185748_init_marketplace/down.sql
+--   node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE -v ON_ERROR_STOP=1 \
+--     -f services/marketplace-service/prisma/migrations/20260829185748_init_marketplace/down.sql
 --
 -- and verified by `scripts/verify-migration-reversible.mjs`, which runs
 -- up → down → up against a throwaway schema. A down script that is written and

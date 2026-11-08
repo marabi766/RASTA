@@ -17,6 +17,7 @@ import {
 } from '@/test/statement-fixtures';
 
 import { IDLE_STATEMENT_FORM, type UnconfirmedStatement } from './statement-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The statement commands' write path — the order of checks every portal write
@@ -54,7 +55,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'approver',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

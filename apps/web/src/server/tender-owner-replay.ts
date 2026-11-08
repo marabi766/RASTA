@@ -120,13 +120,13 @@ const replaySchema = z.object({
   /** The tender's version for a publication, the step's for a decision; null for the opening. */
   expectedVersion: z.number().int().min(1).nullable(),
   /** The bid a qualification, a score or an award acts on; null otherwise. */
-  bidId: z.string().min(1).max(64).nullable().default(null),
+  bidId: z.string().min(1).max(64).nullable().prefault(null),
   /** SHA-256 (base64url) of the bound body the form posts beside the stamp; null when it has none. */
-  bindingDigest: z.string().length(43).nullable().default(null),
+  bindingDigest: z.string().length(43).nullable().prefault(null),
   /** Which body is bound: a score's criteria, or an award's terms. */
-  bound: z.enum(['SCORING', 'AWARD']).nullable().default(null),
+  bound: z.enum(['SCORING', 'AWARD']).nullable().prefault(null),
   /** The proposal a withdrawal takes back, as the page read it; null otherwise. */
-  proposedAt: utcInstant.nullable().default(null),
+  proposedAt: utcInstant.nullable().prefault(null),
 });
 
 type ReplayPayload = z.infer<typeof replaySchema>;

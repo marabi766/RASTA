@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import {
   AVAILABILITY_CHOICES,
@@ -24,6 +25,7 @@ import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * A machine's availability, through the gateway (EXP-002, slice 7).
@@ -154,7 +156,7 @@ const availabilitySchema = z.object({
       currentAssignment: z
         .object({ id: z.string(), driverId: z.string(), startedAt: z.string() })
         .nullable()
-        .default(null),
+        .prefault(null),
     }),
   ),
 });
@@ -167,17 +169,17 @@ const windowSchema = z.object({
   assetId: z.string(),
   available: z.boolean(),
   fromAt: renderableDate,
-  toAt: renderableDate.nullable().default(null),
+  toAt: renderableDate.nullable().prefault(null),
   reason: z.string(),
   createdAt: z.string(),
-  revokedAt: renderableDate.nullable().default(null),
+  revokedAt: renderableDate.nullable().prefault(null),
 });
 
 export type AvailabilityWindow = z.infer<typeof windowSchema>;
 
 const windowsSchema = z.object({
   items: z.array(windowSchema),
-  hasMore: z.boolean().default(false),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type AvailabilityWindows = z.infer<typeof windowsSchema>;
@@ -256,7 +258,7 @@ const optionalDate = z.string().transform((raw, ctx): string | undefined => {
   return iso;
 });
 
-export const END_NOT_AFTER_START_MESSAGE = 'پایان باید پس از آغاز باشد';
+export const END_NOT_AFTER_START_MESSAGE = formMessage('پایان باید پس از آغاز باشد');
 
 export function declareAvailabilityFormValues(form: FormData): DeclareAvailabilityFormValues {
   return readFields(form, DECLARE_AVAILABILITY_FIELDS);
@@ -265,7 +267,7 @@ export function declareAvailabilityFormValues(form: FormData): DeclareAvailabili
 export const declareAvailabilityFormSchema = z
   .object({
     available: z.enum(AVAILABILITY_CHOICES, {
-      errorMap: () => ({ message: 'وضعیت را از فهرست انتخاب کنید' }),
+      error: formMessage('وضعیت را از فهرست انتخاب کنید'),
     }),
     reason: displayText(
       'دلیل',
@@ -310,11 +312,11 @@ export type ParsedDeclareForm =
 export function parseDeclareAvailabilityForm(
   values: DeclareAvailabilityFormValues,
 ): ParsedDeclareForm {
-  const parsed = declareAvailabilityFormSchema.safeParse(values);
+  const parsed = legacyParse(declareAvailabilityFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, (value): value is DeclareAvailabilityField =>
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is DeclareAvailabilityField =>
       (DECLARE_AVAILABILITY_FIELDS as readonly string[]).includes(value),
     ),
   };
@@ -344,7 +346,7 @@ export const REVOKE_MESSAGES: Readonly<Record<string, string>> = {
   'This availability window was revoked by another request': ALREADY_REVOKED_MESSAGE,
 };
 
-const REVOKE_MAPPING: FieldMapping<never> = {
+export const REVOKE_MAPPING: FieldMapping<never> = {
   paths: {},
   messages: REVOKE_MESSAGES,
   byCode: { INVALID_STATE_TRANSITION: ALREADY_REVOKED_MESSAGE },

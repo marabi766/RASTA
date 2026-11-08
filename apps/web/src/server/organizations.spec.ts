@@ -9,6 +9,10 @@ import {
 } from './organizations';
 import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * Reading one organization and editing its profile.
@@ -24,7 +28,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'admin',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -162,11 +166,11 @@ describe('updateOrganization', () => {
   it('maps a service field error back onto the field that caused it', async () => {
     const { impl } = answering(
       {
-        code: 'VALIDATION_ERROR',
+        code: 'VALIDATION_FAILED',
         message: 'invalid',
         details: [{ path: 'name', message: 'Name already in use' }],
       },
-      422,
+      400,
     );
 
     const result = await withFetch(impl, () =>

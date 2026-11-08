@@ -6,40 +6,33 @@ import {
   WorkflowIdReusePolicy,
   WorkflowNotFoundError,
 } from '@temporalio/client';
+import { getOrganizationId, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import { EconomicClient } from '../economic/economic.client';
+import { SagaStartStore, type StartClaim } from './saga-start.store';
+import {
+  sagaStartBacklogAge,
+  sagaStartBacklogCount,
+  sagaStartDeliveries,
+  sagaUnresolvedAge,
+  sagaUnresolvedOrders,
+  sagaUnresolvedOverdue,
+} from '../observability/metrics';
+import { STATE_READ_TIMEOUT_MS, STATE_SAMPLE_INTERVAL_MS, StateSample } from './saga-state-sample';
+import { SERVICE_NAME } from '../config/env';
 import { ENV } from '../tokens';
 import type { MarketplaceEnv } from '../config/env';
+import { foreignFailure } from './foreign-failure';
 import { installTemporalRuntimeLogger } from './runtime-logger';
 
-/**
- * Starts and signals `OrderSagaWorkflow`.
- *
- * ## Why the database is written first and the signal sent second
- *
- * Every command applies its state change and commits it, and only then tells
- * the workflow. If the signal fails, the order is still correct and the
- * workflow re-reads on its next wake-up. The other order — signal first —
- * would leave a workflow that believes something the database does not, and
- * the workflow is the thing driving money.
- *
- * A failed signal is therefore logged and swallowed rather than raised: the
- * user's command succeeded, and telling them it failed would invite a retry
- * that changes nothing.
- *
- * ## Why `workflowId` is the order id
- *
- * Temporal refuses to start a second workflow with an id that is already
- * running. That makes "one saga per order" structural rather than a rule the
- * code has to keep — even if two requests race to start one.
- *
- * "Already running" was not enough on its own. `POST /orders` calls
- * {@link start} on every request, replays included, so that a retry can start
- * a saga whose first start failed. A replay arriving after the first saga had
- * **closed** therefore started a second saga for the same order. The start
- * now uses `REJECT_DUPLICATE`, so an id that has ever been used is refused
- * for as long as the namespace keeps its history. That is longer than a key
- * can be replayed. The saga also decides from the order row, not from its
- * own memory, so even a duplicate run would find the order finished and stop.
+/** Durable, at-least-once saga start delivery (ADR-039/050).
+ * Receipt is persisted only after acceptance or AlreadyStarted. Signals remain
+ * best effort: the workflow always re-reads the committed order.
  */
+const START_RPC_TIMEOUT_MS = 5000;
+const START_CONNECT_TIMEOUT_MS = 1000;
+const RETENTION_MARGIN_MS = 60_000;
+const START_POLL_INTERVAL_MS = 10_000;
+
 @Injectable()
 export class OrderSagaClient implements OnModuleDestroy {
   private readonly logger = new Logger(OrderSagaClient.name);
@@ -47,7 +40,153 @@ export class OrderSagaClient implements OnModuleDestroy {
   private connection?: Connection;
   private connecting?: Promise<Client>;
 
-  constructor(@Inject(ENV) private readonly env: MarketplaceEnv) {}
+  private timer?: NodeJS.Timeout;
+  private sampleTimer?: NodeJS.Timeout;
+  private ticking?: Promise<void>;
+  private stopped = false;
+  private readonly abort = new AbortController();
+  private readonly active = new Set<Promise<void>>();
+
+  /**
+   * State gauges (#770 r2 F3, #792 r1 F3), read by every replica whether or not
+   * it runs a worker, on a timer of their own: a claim, a delivery or the other
+   * read that hangs does not stop this one. A read that fails, times out or
+   * stops answering withdraws its series rather than keeping the last value:
+   * the alerts read a missing series as unknown and fire.
+   */
+  private readonly samples = [
+    new StateSample(
+      [sagaStartBacklogCount, sagaStartBacklogAge],
+      () => this.store.backlog(),
+      ({ count, age }) => {
+        sagaStartBacklogCount.set({ service: SERVICE_NAME }, count);
+        sagaStartBacklogAge.set({ service: SERVICE_NAME }, age);
+      },
+      (outcome, error) => this.sampleFailed('backlog', outcome, error),
+    ),
+    new StateSample(
+      [sagaUnresolvedOrders, sagaUnresolvedAge, sagaUnresolvedOverdue],
+      () => this.store.unresolved(),
+      (reasons) => {
+        let overdue = 0;
+        for (const reason of reasons) {
+          sagaUnresolvedOrders.set({ service: SERVICE_NAME, reason: reason.reason }, reason.count);
+          sagaUnresolvedAge.set({ service: SERVICE_NAME, reason: reason.reason }, reason.age);
+          overdue += reason.overdue;
+        }
+        sagaUnresolvedOverdue.set({ service: SERVICE_NAME }, overdue);
+      },
+      (outcome, error) => this.sampleFailed('unresolved', outcome, error),
+    ),
+  ];
+
+  constructor(
+    @Inject(ENV) private readonly env: MarketplaceEnv,
+    private readonly store: SagaStartStore,
+    @Inject(EconomicClient) private readonly economic: Pick<EconomicClient, 'provesHeldFunds'>,
+  ) {}
+
+  startPolling(): void {
+    if (this.timer || this.stopped) return;
+    void this.tick();
+    this.timer = setInterval(() => void this.tick(), START_POLL_INTERVAL_MS);
+    this.timer.unref();
+    void this.sampleState();
+    this.sampleTimer = setInterval(() => void this.sampleState(), STATE_SAMPLE_INTERVAL_MS);
+    this.sampleTimer.unref();
+  }
+
+  /** Fast path after commit; a failure never changes the placement response. */
+  async start(orderId: string): Promise<void> {
+    if (!this.env.MARKETPLACE_TEMPORAL_ENABLED) return;
+    await this.track(async () => {
+      if (!(await this.economicReady())) return;
+      const claims = await this.store.claim({ id: orderId, organizationId: getOrganizationId() });
+      await Promise.all(claims.map((claim) => this.track(() => this.dispatch(claim))));
+    });
+  }
+
+  /** One indexed keyset batch. Deferred failures move behind other due rows. */
+  tick(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.ticking) return this.ticking;
+    this.ticking = this.track(async () => {
+      const claims =
+        this.env.MARKETPLACE_TEMPORAL_ENABLED && (await this.economicReady())
+          ? await this.store.claim()
+          : [];
+      await Promise.all(claims.map((claim) => this.track(() => this.dispatch(claim))));
+    }).finally(() => {
+      this.ticking = undefined;
+    });
+    return this.ticking;
+  }
+
+  /** One read of each, independently; answers once each is decided. */
+  async sampleState(): Promise<void> {
+    await Promise.all(this.samples.map((sample) => sample.take()));
+  }
+
+  private sampleFailed(read: string, outcome: 'failed' | 'timed out', error?: unknown): void {
+    this.logger.error(
+      { read, outcome, failure: error === undefined ? undefined : foreignFailure(error) },
+      'A saga state gauge could not be sampled; its series is withdrawn until the next sample',
+    );
+  }
+
+  private track(fn: () => Promise<void>): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    const task = fn()
+      .catch((error: unknown) => {
+        this.logger.error(
+          { failure: foreignFailure(error) },
+          'Saga start delivery will be retried',
+        );
+      })
+      .finally(() => {
+        this.active.delete(task);
+      });
+    this.active.add(task);
+    return task;
+  }
+
+  /**
+   * The prerequisite of any order's work: against an economic-service that cannot prove a
+   * hold, a saga would place one and then wait on it (FU-138; ADR-040). Asked before the
+   * claim, which starts the clock on a possibly started workflow: an order held back here
+   * was provably not started, however long this lasts. The backlog metrics show the wait.
+   */
+  private async economicReady(): Promise<boolean> {
+    const ready = await this.economic.provesHeldFunds();
+    if (!ready) {
+      sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'economic_not_ready' });
+      this.logger.error('economic-service does not prove held funds; no order saga starts');
+    }
+    return ready && !this.stopped;
+  }
+
+  private async dispatch(claim: StartClaim): Promise<void> {
+    if (this.stopped) return;
+    const accepted = await this.deliver(claim.id, claim.age_ms);
+    if (!this.stopped) await this.store.finish(claim, accepted);
+  }
+
+  async stop(options?: OutboxStopOptions): Promise<void> {
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    if (this.sampleTimer) clearInterval(this.sampleTimer);
+    // Nothing samples them any more: absent, not frozen at the last value, and
+    // a read still out publishes nothing.
+    for (const sample of this.samples) sample.close();
+    this.abort.abort();
+    // A read is waited for up to its own bound, never longer: one that hangs is
+    // abandoned (its answer is dropped) rather than holding the shutdown.
+    const bound = Math.min(STATE_READ_TIMEOUT_MS, (options?.deadlineAt ?? Infinity) - Date.now());
+    await Promise.all([
+      ...this.active,
+      withinDeadline(Promise.all(this.samples.map((sample) => sample.idle())), bound),
+    ]);
+  }
 
   private async getClient(): Promise<Client> {
     if (this.client) return this.client;
@@ -55,11 +194,16 @@ export class OrderSagaClient implements OnModuleDestroy {
 
     this.connecting = (async () => {
       installTemporalRuntimeLogger(this.env);
-      const connection = await Connection.connect({ address: this.env.TEMPORAL_ADDRESS });
+      const connection = await Connection.connect({
+        address: this.env.TEMPORAL_ADDRESS,
+        connectTimeout: START_CONNECT_TIMEOUT_MS,
+      });
       this.connection = connection;
       const client = new Client({ connection, namespace: this.env.TEMPORAL_NAMESPACE });
       this.client = client;
-      this.logger.log(`Temporal client connected to ${this.env.TEMPORAL_ADDRESS}`);
+      // The setting, not its value: TEMPORAL_ADDRESS is a free string, and a
+      // log line is no place to find out whether it carries credentials.
+      this.logger.log('Temporal client connected (TEMPORAL_ADDRESS)');
       return client;
     })();
 
@@ -75,43 +219,68 @@ export class OrderSagaClient implements OnModuleDestroy {
     return `order-${orderId}`;
   }
 
-  /**
-   * Starts the saga for a freshly placed order.
-   *
-   * Failure is logged rather than raised: the order exists and is `PENDING`,
-   * which is a visible state an operator can act on. Failing the HTTP request
-   * would tell the buyer their order did not happen when it did.
+  /** Only explicit Temporal acceptance acknowledges a claim.
+   * Once history could have expired, an absent execution is ambiguous. Ask
+   * the namespace for its actual retention; never restart from absence then.
    */
-  async start(orderId: string): Promise<void> {
-    if (!this.env.MARKETPLACE_TEMPORAL_ENABLED) {
-      this.logger.warn(`Temporal is disabled; order ${orderId} stays PENDING until a worker runs`);
-      return;
-    }
+  async deliver(orderId: string, possibleStartAgeMs = 0): Promise<boolean> {
+    if (!this.env.MARKETPLACE_TEMPORAL_ENABLED || this.stopped) return false;
 
     try {
       const client = await this.getClient();
-      await client.workflow.start('orderSaga', {
-        taskQueue: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE,
-        workflowId: OrderSagaClient.workflowIdFor(orderId),
-        workflowIdReusePolicy: WorkflowIdReusePolicy.REJECT_DUPLICATE,
-        args: [
+      return await client.connection.withAbortSignal(this.abort.signal, () =>
+        client.connection.withDeadline(Date.now() + START_RPC_TIMEOUT_MS, async () => {
           {
-            orderId,
-            fulfillmentWindowDays: this.env.MARKETPLACE_FULFILLMENT_WINDOW_DAYS,
-            receiptWindowDays: this.env.MARKETPLACE_RECEIPT_WINDOW_DAYS,
-            reminderIntervalDays: this.env.MARKETPLACE_REMINDER_INTERVAL_DAYS,
-            recheckIntervalHours: this.env.MARKETPLACE_SAGA_RECHECK_HOURS,
-          },
-        ],
-      });
+            const namespace = await client.workflowService.describeNamespace({
+              namespace: this.env.TEMPORAL_NAMESPACE,
+            });
+            const retention =
+              Number(namespace.config?.workflowExecutionRetentionTtl?.seconds ?? 0) * 1000;
+            // Age comes from the DB clock; the margin covers expiry during this bounded call.
+            if (!Number.isFinite(retention) || retention <= RETENTION_MARGIN_MS) return false;
+            if (possibleStartAgeMs >= retention - RETENTION_MARGIN_MS) {
+              try {
+                await client.workflow.getHandle(OrderSagaClient.workflowIdFor(orderId)).describe();
+                return true; // Includes failed/closed workflows: never restart them.
+              } catch (error) {
+                if (!(error instanceof WorkflowNotFoundError)) throw error;
+                sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'ambiguous' });
+                return false;
+              }
+            }
+          }
+          await client.workflow.start('orderSaga', {
+            taskQueue: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE,
+            workflowId: OrderSagaClient.workflowIdFor(orderId),
+            workflowIdReusePolicy: WorkflowIdReusePolicy.REJECT_DUPLICATE,
+            args: [
+              {
+                orderId,
+                fulfillmentWindowDays: this.env.MARKETPLACE_FULFILLMENT_WINDOW_DAYS,
+                receiptWindowDays: this.env.MARKETPLACE_RECEIPT_WINDOW_DAYS,
+                reminderIntervalDays: this.env.MARKETPLACE_REMINDER_INTERVAL_DAYS,
+                recheckIntervalHours: this.env.MARKETPLACE_SAGA_RECHECK_HOURS,
+              },
+            ],
+          });
+          sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'accepted' });
+          return true;
+        }),
+      );
     } catch (error) {
       if (error instanceof WorkflowExecutionAlreadyStartedError) {
         // A replayed placement: this order's saga is running or has already
         // run. That is the one outcome here that is not a problem.
         this.logger.debug({ orderId }, 'The order saga was already started');
-        return;
+        return true;
       }
-      this.logger.error({ orderId, err: error }, 'Could not start the order saga');
+      // By class and code only: the failure's own text may quote the address.
+      this.logger.error(
+        { orderId, failure: foreignFailure(error) },
+        'Could not start the order saga',
+      );
+      sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'retry' });
+      return false;
     }
   }
 
@@ -131,11 +300,22 @@ export class OrderSagaClient implements OnModuleDestroy {
         this.logger.warn({ orderId, signalName }, 'No running saga to signal');
         return;
       }
-      this.logger.error({ orderId, signalName, err: error }, 'Could not signal the order saga');
+      this.logger.error(
+        { orderId, signalName, failure: foreignFailure(error) },
+        'Could not signal the order saga',
+      );
     }
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.connection?.close();
+    await this.stop();
+    try {
+      await this.connection?.close();
+    } catch (error) {
+      const failure = foreignFailure(error);
+      throw new Error(
+        `TEMPORAL_ADDRESS: Temporal close failed (${failure.type}, code ${failure.code ?? 'unknown'})`,
+      );
+    }
   }
 }

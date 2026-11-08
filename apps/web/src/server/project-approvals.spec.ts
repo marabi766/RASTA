@@ -9,6 +9,7 @@ import {
   fetchProjectApprovals,
 } from './projects';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * Reading what the project write screens are drawn from: the version a command
@@ -21,7 +22,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'owner',
   organizationId: 'ORG_OWNER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_OWNER'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -69,7 +70,7 @@ const STEP = {
   stepOrder: 1,
   policyId: 'POL_1',
   policyVersion: 1,
-  approvalType: 'تایید فنی',
+  approvalType: 'تأیید فنی',
   authorityOrganizationId: 'ORG_COUNCIL',
   authorityRole: 'UNION_ADMIN',
   authorityLabel: 'شورای شهر',
@@ -104,7 +105,7 @@ const POLICY = (over: Record<string, unknown> = {}) => ({
   steps: [
     {
       stepOrder: 2,
-      approvalType: 'تایید مالی',
+      approvalType: 'تأیید مالی',
       authorityOrganizationId: 'O2',
       authorityRole: 'UNION_ADMIN',
       authorityLabel: 'استانداری',
@@ -113,7 +114,7 @@ const POLICY = (over: Record<string, unknown> = {}) => ({
     },
     {
       stepOrder: 1,
-      approvalType: 'تایید فنی',
+      approvalType: 'تأیید فنی',
       authorityOrganizationId: 'O1',
       authorityRole: 'UNION_ADMIN',
       authorityLabel: 'شورای شهر',
@@ -248,6 +249,35 @@ describe('the authority’s inbox', () => {
     expect((result as { data: { hasMore: boolean } }).data.hasMore).toBe(true);
   });
 
+  // PR-439 r1 F2, addendum E: membership is by own key now, so a step whose
+  // workflow is named like an Object.prototype member is filtered out like a
+  // tender step — the cursor is still followed and "more" stays honest.
+  const INHERITED = (id: string, workflowKey: string) => ({ ...STEP, id, workflowKey });
+  it('filters a workflow named like a prototype member and still follows the cursor', async () => {
+    const { impl, urls } = pages([
+      {
+        items: [INHERITED('P1', '__proto__'), INHERITED('P2', 'constructor')],
+        nextCursor: 'CUR_2',
+        hasMore: true,
+      },
+      { items: [INHERITED('P3', 'toString'), STEP], nextCursor: null, hasMore: false },
+    ]);
+    const result = await withFetch(impl, () => fetchApprovalInbox(SESSION));
+    expect(urls).toHaveLength(2);
+    expect(ids(result)).toEqual(['APR_1']);
+    expect((result as { data: { hasMore: boolean } }).data.hasMore).toBe(false);
+  });
+
+  it('says more may exist after the page limit of prototype-named workflows', async () => {
+    const { impl, urls } = pages([
+      { items: [INHERITED('P1', '__proto__')], nextCursor: 'CUR_N', hasMore: true },
+    ]);
+    const result = await withFetch(impl, () => fetchApprovalInbox(SESSION));
+    expect(urls).toHaveLength(INBOX_MAX_PAGES);
+    expect(ids(result)).toEqual([]);
+    expect((result as { data: { hasMore: boolean } }).data.hasMore).toBe(true);
+  });
+
   it('is unavailable, not empty, when a later page cannot be read and no project step was found', async () => {
     let call = 0;
     const impl = (async () => {
@@ -293,8 +323,8 @@ describe('the execution policy', () => {
         label: 'سیاست شورا',
         isSample: false,
         steps: [
-          { approvalType: 'تایید فنی', authorityLabel: 'شورای شهر' },
-          { approvalType: 'تایید مالی', authorityLabel: 'استانداری' },
+          { approvalType: 'تأیید فنی', authorityLabel: 'شورای شهر' },
+          { approvalType: 'تأیید مالی', authorityLabel: 'استانداری' },
         ],
       },
     });
@@ -348,7 +378,11 @@ describe('the execution policy', () => {
   });
 
   it('reads nothing for a session with no organization', async () => {
-    const { result, urls } = await read({ items: [] }, 200, { ...SESSION, organizationId: null });
+    const { result, urls } = await read({ items: [] }, 200, {
+      ...SESSION,
+      organizationId: null,
+      accessToken: actingAccessToken(null),
+    });
     expect(result.kind).toBe('NOT_FOUND');
     expect(urls).toEqual([]);
   });

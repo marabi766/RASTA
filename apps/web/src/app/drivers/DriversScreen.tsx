@@ -10,8 +10,11 @@ import {
   TableScroll,
 } from '@/ui';
 import { driverStatusLabel, driverStatusOptions } from '@/lib/labels';
-import { formatJalaliDateLong } from '@/lib/format';
+import { formatJalaliDateLong, withoutBidiControls } from '@/lib/format';
 import type { DriverListQuery, DriverPage, ReadResult } from '@/server/drivers';
+import type { RosterPerson } from '@/server/driver-roster';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * The driver list (docs/16 § 16.6, `/drivers`).
@@ -27,18 +30,26 @@ import type { DriverListQuery, DriverPage, ReadResult } from '@/server/drivers';
 
 export interface DriversScreenProps {
   readonly result: ReadResult<DriverPage>;
-  readonly query: DriverListQuery;
+  readonly query: InContext<DriverListQuery>;
+  /**
+   * Every member of this organization by user id, when this person may list
+   * the members and the whole list was read (`server/driver-roster.ts`);
+   * otherwise null and the list has no name column. A driver row holds no
+   * name — identity-service does — and a person without the member-list right
+   * (`FLEET_MANAGER`) has no read that would give one (task 095).
+   */
+  readonly names?: ReadonlyMap<string, RosterPerson> | null;
 }
 
 /** Rebuilds this screen's URL with one value changed. */
-function hrefWith(query: DriverListQuery, changes: Partial<DriverListQuery>): string {
+function hrefWith(query: InContext<DriverListQuery>, changes: Partial<DriverListQuery>): string {
   const params = new URLSearchParams();
   const merged = { ...query, ...changes };
   if (merged.status) params.set('status', merged.status);
   if (merged.q) params.set('q', merged.q);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
-  return search ? `/drivers?${search}` : '/drivers';
+  return withContext(query.context, search ? `/drivers?${search}` : '/drivers');
 }
 
 const CONTROL =
@@ -46,7 +57,7 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function Filters({ query }: { query: DriverListQuery }) {
+function Filters({ query }: { query: InContext<DriverListQuery> }) {
   return (
     <form
       method="get"
@@ -54,6 +65,7 @@ function Filters({ query }: { query: DriverListQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="پالایش فهرست"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-status" className="flex flex-col gap-1 text-sm text-content-muted">
         وضعیت
         <select
@@ -89,7 +101,32 @@ function Filters({ query }: { query: DriverListQuery }) {
   );
 }
 
-function DriverRows({ page, query }: { page: DriverPage; query: DriverListQuery }) {
+function DriverName({ person }: { person: RosterPerson | undefined }) {
+  if (!person) {
+    // Not in the member list: the person left, or never was a member (a row
+    // registered before task 095). Said, not hidden — such a row is still
+    // assignable until somebody suspends it.
+    return <span className="text-content-muted">در فهرست اعضای این سازمان نیست</span>;
+  }
+  return (
+    <>
+      {withoutBidiControls(person.name)}
+      <span className="block text-content-muted">
+        <Identifier>{withoutBidiControls(person.username)}</Identifier>
+      </span>
+    </>
+  );
+}
+
+function DriverRows({
+  page,
+  query,
+  names,
+}: {
+  page: DriverPage;
+  query: InContext<DriverListQuery>;
+  names: ReadonlyMap<string, RosterPerson> | null;
+}) {
   return (
     <>
       <TableScroll label="فهرست رانندگان این سازمان">
@@ -97,6 +134,11 @@ function DriverRows({ page, query }: { page: DriverPage; query: DriverListQuery 
           <caption className="sr-only">فهرست رانندگان این سازمان</caption>
           <thead>
             <tr className="border-b border-border text-start text-content-muted">
+              {names ? (
+                <th scope="col" className="p-3 text-start font-medium">
+                  نام
+                </th>
+              ) : null}
               <th scope="col" className="p-3 text-start font-medium">
                 شمارهٔ پرسنلی
               </th>
@@ -114,6 +156,11 @@ function DriverRows({ page, query }: { page: DriverPage; query: DriverListQuery 
           <tbody>
             {page.items.map((driver) => (
               <tr key={driver.id} className="border-b border-border">
+                {names ? (
+                  <td className="p-3">
+                    <DriverName person={names.get(driver.userId)} />
+                  </td>
+                ) : null}
                 <td className="p-3">
                   <a
                     href={`/drivers/${encodeURIComponent(driver.id)}`}
@@ -169,7 +216,7 @@ function DriverRows({ page, query }: { page: DriverPage; query: DriverListQuery 
   );
 }
 
-export function DriversScreen({ result, query }: DriversScreenProps) {
+export function DriversScreen({ result, query, names = null }: DriversScreenProps) {
   const filtered = Boolean(query.status || query.q);
 
   return (
@@ -211,7 +258,7 @@ export function DriversScreen({ result, query }: DriversScreenProps) {
         ) : null}
 
         {result.kind === 'OK' && result.data.items.length > 0 ? (
-          <DriverRows page={result.data} query={query} />
+          <DriverRows page={result.data} query={query} names={names} />
         ) : null}
       </Section>
     </>

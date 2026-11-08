@@ -1,13 +1,15 @@
 import { z } from 'zod';
 import {
   cursorPaginationSchema,
-  seedIdSchema,
   ID_PREFIXES,
+  isoDateTime,
+  numberInput,
   plainText,
+  seedIdSchema,
   withMaxKeys,
   withoutBidiControlDeep,
-  numberInput,
 } from '@rasta/contracts';
+import { uniqueText } from '@rasta/nest-common';
 
 /**
  * Request and response shapes for organizations.
@@ -79,7 +81,7 @@ const coordinate = z
 
 const locationInput = z
   .object({
-    kind: z.enum(LOCATION_KINDS).default('PRIMARY'),
+    kind: z.enum(LOCATION_KINDS).prefault('PRIMARY'),
     addressLine: plainText().max(500).optional(),
     city: plainText().max(100).optional(),
     county: plainText().max(100).optional(),
@@ -110,8 +112,18 @@ export const MAX_METADATA_KEYS = 100;
  * value at any depth (#209) — they are stored and shown like any other text.
  */
 const freeFormMetadata = withoutBidiControlDeep(
-  withMaxKeys(z.record(z.unknown()), MAX_METADATA_KEYS),
+  withMaxKeys(z.record(z.string(), z.unknown()), MAX_METADATA_KEYS),
 );
+
+/**
+ * A registry code in its one form (FU-084): bidi controls refused first, as before, then folded and
+ * held to the canonical alphabet, so two codes a person cannot tell apart are one code. Case is kept.
+ * At most 64: every character of the form is one UTF-16 unit, so this is the code points
+ * `ck_organization_external_code_canonical` counts.
+ */
+const externalCode = plainText()
+  .pipe(uniqueText({ caseFold: false }))
+  .pipe(z.string().min(1).max(64));
 
 export const createOrganizationSchema = z
   .object({
@@ -120,9 +132,9 @@ export const createOrganizationSchema = z
     type: organizationTypeSchema,
     /** Omit for a root. Anything else must be an organization the caller may write to. */
     parentId: organizationId.optional(),
-    externalCode: plainText().min(1).max(64).optional(),
+    externalCode: externalCode.optional(),
     /** Type-specific attributes. Kept free-form so a new type needs no migration. */
-    metadata: freeFormMetadata.default({}),
+    metadata: freeFormMetadata.prefault({}),
     location: locationInput.optional(),
   })
   .strict();
@@ -133,7 +145,7 @@ export const updateOrganizationSchema = z
   .object({
     name: displayName.optional(),
     shortName: displayName.nullable().optional(),
-    externalCode: plainText().min(1).max(64).nullable().optional(),
+    externalCode: externalCode.nullable().optional(),
     metadata: freeFormMetadata.optional(),
   })
   .strict()
@@ -193,15 +205,15 @@ export const setPolicySchema = z
      * string value at any depth (#209).
      */
     value: withoutBidiControlDeep(z.unknown()),
-    inheritable: z.boolean().default(true),
+    inheritable: z.boolean().prefault(true),
     /**
      * Why this value was set. Required: a governance setting nobody can
      * explain later is not auditable, and these rows decide who may approve
      * what.
      */
     description: plainText().min(3).max(1000),
-    effectiveFrom: z.string().datetime().optional(),
-    effectiveTo: z.string().datetime().optional(),
+    effectiveFrom: z.string().check(isoDateTime()).optional(),
+    effectiveTo: z.string().check(isoDateTime()).optional(),
   })
   .strict()
   .refine(
@@ -226,7 +238,7 @@ export const createContactSchema = z
       .regex(/^(?:\+98|0)(?:9\d{9}|[1-8]\d{9})$/, 'Phone must be a valid Iranian number')
       .optional(),
     email: z.string().trim().toLowerCase().email().max(255).optional(),
-    isPrimary: z.boolean().default(false),
+    isPrimary: z.boolean().prefault(false),
   })
   .strict()
   .refine((v) => v.phone || v.email, { message: 'A contact needs a phone number or an email' });
@@ -241,9 +253,9 @@ export const nearbyQuerySchema = z
     latitude: numberInput(z.number().min(-90).max(90)),
     longitude: numberInput(z.number().min(-180).max(180)),
     /** Search radius in metres. Capped so one query cannot scan the country. */
-    radiusMeters: numberInput(z.number().int().min(1).max(500_000)).default(50_000),
+    radiusMeters: numberInput(z.number().int().min(1).max(500_000)).prefault(50_000),
     type: organizationTypeSchema.optional(),
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 

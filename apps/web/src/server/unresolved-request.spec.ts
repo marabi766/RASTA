@@ -1,6 +1,7 @@
 /**
  * @jest-environment node
  */
+import { createHash } from 'node:crypto';
 import Redis from 'ioredis';
 
 import type { RedisLike } from './refresh-coordinator';
@@ -8,6 +9,7 @@ import type { WebSession } from './session';
 import {
   INFLIGHT_LEASE_MS,
   MAX_PENDING_PER_LOGIN,
+  MAX_REQUEST_REF_LENGTH,
   memoryUnresolvedStore,
   PENDING_KEY_PREFIX,
   RECORD_RETENTION_AFTER_MS,
@@ -18,6 +20,7 @@ import {
   type UnresolvedStore,
 } from './unresolved-request-store';
 import { MAX_CLOCK_SKEW_MS } from './unresolved-request-policy';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The retention of an unresolved write request: what it keeps, for whom, and what
@@ -98,11 +101,13 @@ let counter = 0;
 const uniq = `${process.pid}-${Date.now()}`;
 function login(overrides: Partial<WebSession> = {}): WebSession {
   counter += 1;
+  const organizationId =
+    overrides.organizationId !== undefined ? overrides.organizationId : `ORG_${uniq}_${counter}`;
   return {
     subject: `USR_${uniq}_${counter}`,
     username: 'owner',
-    organizationId: `ORG_${uniq}_${counter}`,
-    accessToken: 'access-token-value',
+    organizationId,
+    accessToken: actingAccessToken(organizationId),
     accessTokenExpiresAt: 2_000_000_000,
     refreshToken: 'refresh-token-value',
     csrfToken: `csrf-${counter}`,
@@ -127,6 +132,7 @@ interface Backend {
   getRaw(key: string): Promise<string | null>;
   setRaw(key: string, raw: string): Promise<void>;
   members(setKey: string): Promise<string[]>;
+  /** Adds `member` to the index AFTER every member already in it (the order a purge walks). */
   addMember(setKey: string, member: string): Promise<void>;
   setKeys(session: WebSession): Promise<string[]>;
   reset(): Promise<void>;
@@ -258,7 +264,12 @@ function redisBackend(url: string): Backend {
     getRaw: (key) => redis.get(key),
     setRaw: async (key, raw) => void (await redis.set(key, raw, 'KEEPTTL')),
     members: (setKey) => redis.zrange(setKey, 0, -1),
-    addMember: async (setKey, member) => void (await redis.zadd(setKey, Date.now() + HOUR, member)),
+    // Scored above every member already there: ZRANGE (what a purge walks) lists it LAST, so a
+    // purge that deletes each valid member as it goes has deleted the valid ones before it refuses.
+    addMember: async (setKey, member) => {
+      const top = await redis.zrange(setKey, -1, -1, 'WITHSCORES');
+      await redis.zadd(setKey, top.length === 2 ? Number(top[1]) + 1 : Date.now() + HOUR, member);
+    },
     setKeys: async (s) =>
       redis.keys(
         `${PENDING_KEY_PREFIX}:org:${encodeURIComponent(s.organizationId ?? 'none')}:pwl:*`,
@@ -374,6 +385,18 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
         ref: 'stamp-of-sub_1',
         deadline: T() + WIN,
         inFlight: true,
+      });
+    });
+
+    it('keeps a bounded encrypted form snapshot and refuses an oversized ref', async () => {
+      const s = login();
+      const ref = 'a'.repeat(MAX_REQUEST_REF_LENGTH);
+      const first = await reserveNoLimit(s, 'snapshot', { ref });
+      if (first.kind !== 'RESERVED') throw new Error(first.kind);
+      await settleUnresolved(first.attempt, 'UNRESOLVED');
+      expect(await held(s, NO_LIMIT)).toMatchObject({ key: 'snapshot', ref });
+      expect(await reserveNoLimit(login(), 'oversized', { ref: ref + 'a' })).toMatchObject({
+        kind: 'UNAVAILABLE',
       });
     });
 
@@ -789,6 +812,200 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
     });
   });
 
+  describe('F1 expand/contract wallet compatibility', () => {
+    const scope = { purpose: 'wallet-top-up', target: 'WLT_1' };
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    // The old code path: the exact pre-person binding, with no compatibility option.
+    const oldBinding = (s: WebSession) => {
+      const org = encodeURIComponent(s.organizationId!);
+      const login = hash(`${s.subject}\n${s.csrfToken}`);
+      const bind = hash(`${s.subject}\n${s.csrfToken}\nwallet-top-up\nWLT_1`);
+      return {
+        org,
+        login,
+        bind,
+        purpose: scope.purpose,
+        target: scope.target,
+        recordKey: `${PENDING_KEY_PREFIX}:org:${org}:pw:${bind}`,
+        setKey: `${PENDING_KEY_PREFIX}:org:${org}:pwl:${login}`,
+      };
+    };
+    const oldReserve = (s: WebSession) => {
+      const binding = oldBinding(s);
+      return backend.store.reserve({
+        binding,
+        cap: MAX_PENDING_PER_LOGIN,
+        leaseMs: INFLIGHT_LEASE_MS,
+        windowMs: null,
+        key: 'old-key',
+        digest: 'old-body',
+        attemptId: 'a'.repeat(32),
+        fresh: {
+          v: 2,
+          ...scope,
+          org: binding.org,
+          login: binding.login,
+          bind: binding.bind,
+          id: 'b'.repeat(32),
+          attemptId: 'a'.repeat(32),
+          key: 'old-key',
+          digest: 'old-body',
+          issuedAt: T(),
+          ref: null,
+          deadline: 'NONE',
+          state: 'RESERVED',
+          wasUnresolved: false,
+        },
+      });
+    };
+    const next = (s: WebSession) =>
+      reserveUnresolved(s, scope, stamp('new-key', { deadline: null, windowMs: null }));
+
+    it('old-written hold is seen by new reads and prevents dispatch until explicit release', async () => {
+      const s = login();
+      expect((await oldReserve(s)).kind).toBe('RESERVED');
+      await backend.store.settle(oldBinding(s), 'b'.repeat(32), 'a'.repeat(32), 'UNRESOLVED');
+      const read = await readUnresolved(s, scope);
+      expect(read.kind).toBe('PENDING');
+      expect((await next(s)).kind).toBe('HELD');
+      if (read.kind !== 'PENDING') throw new Error('missing legacy hold');
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe(
+        'RELEASED',
+      );
+      expect((await next(s)).kind).toBe('RESERVED');
+    });
+    it('new-written hold is visible to the old code on rollback, including after settle', async () => {
+      const s = login();
+      const first = await next(s);
+      if (first.kind !== 'RESERVED') throw new Error('missing reservation');
+      expect((await backend.store.read(oldBinding(s))).record?.id).toBe(first.attempt.id);
+      expect((await oldReserve(s)).kind).toBe('HELD');
+      expect(await settleUnresolved(first.attempt, 'UNRESOLVED')).toBe(true);
+      expect((await oldReserve(s)).kind).toBe('HELD');
+      expect((await next({ ...s, csrfToken: 'second-device' })).kind).toBe('HELD');
+      const read = await readUnresolved(s, scope);
+      if (read.kind !== 'PENDING') throw new Error('missing hold');
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe(
+        'RELEASED',
+      );
+      expect((await backend.store.read(oldBinding(s))).record).toBeNull();
+    });
+    it.each([true, false])(
+      'mixed replicas allow one dispatch only, old starts first=%s',
+      async (oldFirst) => {
+        const s = login();
+        const replies = await Promise.all(
+          oldFirst ? [oldReserve(s), next(s)] : [next(s), oldReserve(s)],
+        );
+        expect(replies.map((r) => r.kind).sort()).toEqual(['HELD', 'RESERVED']);
+        expect((await oldReserve(s)).kind).toBe('HELD');
+        expect((await next(s)).kind).toBe('HELD');
+      },
+    );
+    it('two logins clear device A after two releases, with the person hold authoritative', async () => {
+      const a = login();
+      const b = { ...a, csrfToken: 'device-b' };
+      const x = await next(a);
+      if (x.kind !== 'RESERVED') throw new Error('missing X');
+      expect(await settleUnresolved(x.attempt, 'UNRESOLVED')).toBe(true);
+      const onB = await readUnresolved(b, scope);
+      if (onB.kind !== 'PENDING') throw new Error('missing X on B');
+      expect(await releaseUnresolved(b, scope, releaseToken(b, scope, onB.request))).toBe(
+        'RELEASED',
+      );
+      expect((await next(a)).kind).toBe('HELD'); // Legacy-A X still blocks a fresh dispatch.
+      const y = await next(b);
+      if (y.kind !== 'RESERVED') throw new Error('missing Y');
+      expect(await settleUnresolved(y.attempt, 'UNRESOLVED')).toBe(true);
+      const onA = await readUnresolved(a, scope);
+      if (onA.kind !== 'PENDING') throw new Error('missing Y on A');
+      expect(onA.request.id).toBe(y.attempt.id);
+      const refused = await next(a);
+      expect(refused.kind).toBe('HELD');
+      if (refused.kind !== 'HELD') throw new Error('expected hold');
+      const legacyX = await backend.getRaw(oldBinding(a).recordKey);
+      expect(await releaseUnresolved(a, scope, releaseToken(a, scope, onA.request))).toBe(
+        'RELEASED',
+      );
+      expect(refused.request.id).toBe(y.attempt.id); // Reserve agrees with read.
+      expect(await backend.getRaw(oldBinding(a).recordKey)).toBe(legacyX);
+      const remaining = await readUnresolved(a, scope);
+      if (remaining.kind !== 'PENDING') throw new Error('missing remaining X');
+      expect(remaining.request.id).toBe(x.attempt.id);
+      expect(await releaseUnresolved(a, scope, releaseToken(a, scope, remaining.request))).toBe(
+        'RELEASED',
+      );
+      expect(await readUnresolved(a, scope)).toEqual({ kind: 'NONE' });
+      expect((await next(a)).kind).toBe('RESERVED');
+    });
+    it('a different legacy reservation cannot override or wedge the person hold', async () => {
+      const s = login();
+      const person = await next(s);
+      if (person.kind !== 'RESERVED') throw new Error('missing person hold');
+      expect(await settleUnresolved(person.attempt, 'UNRESOLVED')).toBe(true);
+      // A login-keyed rollback build releases only its copy, then reserves another id.
+      expect(await backend.store.release(oldBinding(s), person.attempt.id, INFLIGHT_LEASE_MS)).toBe(
+        'RELEASED',
+      );
+      expect((await oldReserve(s)).kind).toBe('RESERVED');
+      const legacy = await backend.getRaw(oldBinding(s).recordKey);
+      const read = await readUnresolved(s, scope);
+      if (read.kind !== 'PENDING') throw new Error('missing person hold');
+      expect(read.request.id).toBe(person.attempt.id);
+      const refused = await next(s);
+      if (refused.kind !== 'HELD') throw new Error('expected hold');
+      expect(refused.request.id).toBe(person.attempt.id);
+      // A stale companion token cannot delete the authoritative person hold.
+      expect(
+        await releaseUnresolved(
+          s,
+          scope,
+          releaseToken(s, scope, { ...read.request, id: 'b'.repeat(32) }),
+        ),
+      ).toBe('STALE');
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe(
+        'RELEASED',
+      );
+      expect(await backend.getRaw(oldBinding(s).recordKey)).toBe(legacy);
+      const remaining = await readUnresolved(s, scope);
+      if (remaining.kind !== 'PENDING') throw new Error('missing legacy reservation');
+      expect(remaining.request.id).toBe('b'.repeat(32));
+      // With the person copy absent, the legacy copy is the authority: an old token is stale.
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe('STALE');
+      expect(await backend.getRaw(oldBinding(s).recordKey)).toBe(legacy);
+      expect((await next(s)).kind).toBe('HELD');
+    });
+    it('keeps the rollback hold when settling its copy succeeds but the person settle fails', async () => {
+      const s = login();
+      const first = await next(s);
+      if (first.kind !== 'RESERVED') throw new Error('missing reservation');
+      const settle = backend.store.settle.bind(backend.store);
+      const spy = jest
+        .spyOn(backend.store, 'settle')
+        .mockImplementationOnce(settle)
+        .mockRejectedValueOnce(new UnresolvedStoreUnavailable());
+      try {
+        expect(await settleUnresolved(first.attempt, 'UNRESOLVED')).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+      const read = await readUnresolved(s, scope);
+      if (read.kind !== 'PENDING') throw new Error('missing hold');
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe(
+        'IN_PROGRESS',
+      );
+      expect((await oldReserve(s)).kind).toBe('HELD');
+    });
+    it('a corrupt legacy companion refuses a new dispatch and remains untouched', async () => {
+      const s = login();
+      await oldReserve(s);
+      await backend.setRaw(oldBinding(s).recordKey, '{broken');
+      expect((await readUnresolved(s, scope)).kind).toBe('UNAVAILABLE');
+      expect((await next(s)).kind).toBe('UNAVAILABLE');
+      expect(await backend.getRaw(oldBinding(s).recordKey)).toBe('{broken');
+    });
+  });
+
   describe('records written by the first Redis version (r4 shape, no purpose)', () => {
     const r4 = (key: string, over: Record<string, unknown> = {}) => ({
       v: 1,
@@ -1008,8 +1225,18 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
     it.each([
       ['another person', (s: WebSession) => ({ ...s, subject: `${s.subject}-2` })],
       ['a later login', (s: WebSession) => ({ ...s, csrfToken: 'a-later-login' })],
-      ['another organization', (s: WebSession) => ({ ...s, organizationId: 'ORG_OTHER' })],
-      ['no organization', (s: WebSession) => ({ ...s, organizationId: null })],
+      [
+        'another organization',
+        (s: WebSession) => ({
+          ...s,
+          organizationId: 'ORG_OTHER',
+          accessToken: actingAccessToken('ORG_OTHER'),
+        }),
+      ],
+      [
+        'no organization',
+        (s: WebSession) => ({ ...s, organizationId: null, accessToken: actingAccessToken(null) }),
+      ],
     ])('%s reads nothing, reserves its own, and cannot release it', async (_name, other) => {
       const s = login();
       const mine = await reserved(s);
@@ -1020,6 +1247,63 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
       const request = (await held(s)) as never;
       expect(await releaseUnresolved(o, SCOPE, releaseToken(s, SCOPE, request))).toBe('STALE');
       expect(await held(s)).toMatchObject({ key: 'sub_1' });
+    });
+
+    it('memberships change between save and read: A’s request is not B’s, and is still A’s', async () => {
+      const a = login();
+      const mine = await reserved(a);
+      await settleUnresolved(mine.attempt, 'UNRESOLVED');
+      // The same login, its token now acting for B only (A's membership ended).
+      const b = {
+        ...a,
+        organizationId: 'ORG_B_ONLY',
+        accessToken: actingAccessToken('ORG_B_ONLY'),
+      };
+      expect(await readUnresolved(b, SCOPE)).toEqual({ kind: 'NONE' });
+      // Nothing of A's was removed by it.
+      expect(await held(a)).toMatchObject({ key: 'sub_1' });
+    });
+
+    it('a record an older cookie keyed under its stale copy holds the scope, is never re-sent, and goes only by release (PR 405 r2 F1)', async () => {
+      // The build before task 100 kept the login's organization A as the copy while the
+      // token acted for B, and keyed this login's records under A.
+      const before = login();
+      const written = await reserved(before);
+      await settleUnresolved(written.attempt, 'UNRESOLVED');
+      // Brought into step: acting for B, the stale copy kept beside it; A no longer listed.
+      const after: WebSession = {
+        ...before,
+        organizationId: 'ORG_B_NOW',
+        accessToken: actingAccessToken('ORG_B_NOW'),
+        formerOrganizationId: before.organizationId,
+      };
+      const read = await readUnresolved(after, SCOPE);
+      expect(read).toMatchObject({ kind: 'PENDING', request: { key: 'sub_1', former: true } });
+      if (read.kind !== 'PENDING') throw new Error('held');
+      expect(mayResend(read.request, read.now)).toBe(false);
+      // Nothing is sent over it — not even the same key and body.
+      expect(await reserve(after, 'sub_1')).toMatchObject({
+        kind: 'HELD',
+        reason: 'RECONCILE_ONLY',
+      });
+      expect(await reserve(after, 'sub_2')).toMatchObject({
+        kind: 'HELD',
+        reason: 'RECONCILE_ONLY',
+      });
+      // The explicit release, fenced to that record, lets go of it — and only then.
+      expect(await releaseUnresolved(after, SCOPE, releaseToken(after, SCOPE, read.request))).toBe(
+        'RELEASED',
+      );
+      expect(await readUnresolved(after, SCOPE)).toEqual({ kind: 'NONE' });
+      expect(await reserve(after, 'sub_2')).toMatchObject({ kind: 'RESERVED' });
+    });
+
+    it('a session whose organization cannot be told reads and reserves nothing: it throws', async () => {
+      const s = login();
+      const untold = { ...s, accessToken: actingAccessToken(s.organizationId, []) };
+      await expect(readUnresolved(untold, SCOPE)).rejects.toThrow();
+      await expect(reserve(untold, 'sub_1')).rejects.toThrow();
+      expect(await purgeUnresolved(untold)).toBe(false);
     });
 
     it('is keyed by purpose and by target', async () => {
@@ -1180,15 +1464,23 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
     it('a corrupt member stops the whole purge: no record and no index entry is touched', async () => {
       const s = login();
       const { keys, setKey } = await threeScopes(s);
+      // The corrupt one is the LAST the purge walks, behind two valid members: a purge that deletes
+      // each valid member as it goes has already deleted them when it reaches this one.
+      const order = await backend.members(setKey);
+      const corrupt = order[order.length - 1]!;
+      expect(order).toHaveLength(3);
       await backend.setRaw(
-        keys[1]!,
-        JSON.stringify({ ...JSON.parse((await backend.getRaw(keys[1]!))!), state: 'BOGUS' }),
+        corrupt,
+        JSON.stringify({ ...JSON.parse((await backend.getRaw(corrupt))!), state: 'BOGUS' }),
       );
       const before = await snapshot(keys, setKey);
       expect(await purgeUnresolved(s)).toBe(false);
       expect(await snapshot(keys, setKey)).toEqual(before);
       // The valid holds of the others are still there, and still held.
-      expect(await held(s, { purpose: 'filler', target: 'A' })).toMatchObject({ key: 'k-A' });
+      for (const [i, target] of ['A', 'B', 'C'].entries()) {
+        if (keys[i] === corrupt) continue;
+        expect(await held(s, { purpose: 'filler', target })).toMatchObject({ key: `k-${target}` });
+      }
     });
 
     it('an index entry that points at another login’s (valid) record is not deleted, and stops the purge', async () => {

@@ -204,6 +204,7 @@ describe('supplier lifecycle', () => {
     const suspended = await asOperator(() =>
       w.suspensions.suspend(supplier.id, {
         reason: 'Two buyers reported undelivered orders in one week',
+        latestSuspensionId: null,
       }),
     );
 
@@ -228,6 +229,7 @@ describe('supplier lifecycle', () => {
       () =>
         w.suspensions.reinstate(supplier.id, {
           reason: 'The two orders were delivered late, not never',
+          suspensionId: suspended.suspensions[0]!.id,
         }),
       operatorOrg,
     );
@@ -282,8 +284,11 @@ describe('supplier lifecycle', () => {
     const supplier = await asSupplier(org, () =>
       w.suppliers.register({ displayName: 'A workshop', capabilities: ['WORKSHOP_SERVICE'] }),
     );
-    await asOperator(() =>
-      w.suspensions.suspend(supplier.id, { reason: 'A stated reason for the record' }),
+    const suspended = await asOperator(() =>
+      w.suspensions.suspend(supplier.id, {
+        reason: 'A stated reason for the record',
+        latestSuspensionId: null,
+      }),
     );
     const before = await outboxFor(w.prisma, org);
 
@@ -299,7 +304,10 @@ describe('supplier lifecycle', () => {
     try {
       await expect(
         asOperator(() =>
-          w.suspensions.reinstate(supplier.id, { reason: 'The orders were delivered late' }),
+          w.suspensions.reinstate(supplier.id, {
+            reason: 'The orders were delivered late',
+            suspensionId: suspended.suspensions[0]!.id,
+          }),
         ),
       ).rejects.toThrow('failure after the outbox insert');
     } finally {
@@ -319,13 +327,25 @@ describe('supplier lifecycle', () => {
     );
 
     await expect(
-      asOperator(() => w.suspensions.reinstate(supplier.id, { reason: 'Nothing to lift here' })),
+      asOperator(() =>
+        w.suspensions.reinstate(supplier.id, {
+          reason: 'Nothing to lift here',
+          suspensionId: 'SSP_NONE',
+        }),
+      ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
 
-    await asOperator(() => w.suspensions.suspend(supplier.id, { reason: 'A stated reason' }));
+    await asOperator(() =>
+      w.suspensions.suspend(supplier.id, { reason: 'A stated reason', latestSuspensionId: null }),
+    );
 
     await expect(
-      asOperator(() => w.suspensions.suspend(supplier.id, { reason: 'Another stated reason' })),
+      asOperator(() =>
+        w.suspensions.suspend(supplier.id, {
+          reason: 'Another stated reason',
+          latestSuspensionId: null,
+        }),
+      ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
   });
 
@@ -344,7 +364,9 @@ describe('supplier lifecycle', () => {
     );
     expect(before.items.map((item) => item.id)).toContain(supplier.id);
 
-    await asOperator(() => w.suspensions.suspend(supplier.id, { reason: 'A stated reason' }));
+    await asOperator(() =>
+      w.suspensions.suspend(supplier.id, { reason: 'A stated reason', latestSuspensionId: null }),
+    );
 
     // Filtered in SQL, before pagination: filtering the page afterwards would
     // return short pages and, past the first, drop rows entirely.

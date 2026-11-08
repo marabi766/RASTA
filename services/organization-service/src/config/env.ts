@@ -3,7 +3,7 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
-  EnvValidationError,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
@@ -11,19 +11,24 @@ import {
 import { organizationOperationBudgets } from './operation-budgets';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
 /**
  * organization-service configuration.
  *
  * No Keycloak admin credentials here: this service never provisions accounts.
  * It verifies tokens, which needs only the public JWKS endpoint.
  */
+const UNKNOWN_SETTER_ROLE = fixed('Unknown role in GOVERNANCE_POLICY_SETTER_ROLES');
+
 export const organizationEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * Maximum depth of the organization tree.
@@ -32,7 +37,7 @@ export const organizationEnvSchema = baseEnvSchema
      * The limit exists to stop a cycle or a bad import producing an unbounded
      * chain that makes every subtree query pathological.
      */
-    MAX_HIERARCHY_DEPTH: z.coerce.number().int().min(1).max(20).default(8),
+    MAX_HIERARCHY_DEPTH: z.coerce.number().int().min(1).max(20).prefault(8),
 
     /**
      * Roles that may set governance policy (`POST /v1/organizations/:id/policies`).
@@ -55,7 +60,7 @@ export const organizationEnvSchema = baseEnvSchema
      */
     GOVERNANCE_POLICY_SETTER_ROLES: z
       .string()
-      .default('SYSTEM_ADMIN,UNION_ADMIN')
+      .prefault('SYSTEM_ADMIN,UNION_ADMIN')
       .transform((raw) =>
         raw
           .split(',')
@@ -65,11 +70,13 @@ export const organizationEnvSchema = baseEnvSchema
       .pipe(
         z
           .array(z.enum(PLATFORM_ROLES), {
-            errorMap: () => ({ message: 'Unknown role in GOVERNANCE_POLICY_SETTER_ROLES' }),
+            error: UNKNOWN_SETTER_ROLE,
           })
-          .min(1, 'GOVERNANCE_POLICY_SETTER_ROLES must name at least one role'),
+          .min(1, fixed('GOVERNANCE_POLICY_SETTER_ROLES must name at least one role')),
       ),
   });
+
+export const ORGANIZATION_ENV_MESSAGES = seal();
 
 export type OrganizationEnv = z.infer<typeof organizationEnvSchema>;
 
@@ -85,26 +92,20 @@ export function loadOrganizationEnv(source: NodeJS.ProcessEnv = process.env): Or
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'organization-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: organizationOperationBudgets },
+    { operationBudgets: organizationOperationBudgets, fixedMessages: ORGANIZATION_ENV_MESSAGES },
   );
 }
 
 /**
  * `MAX_HIERARCHY_DEPTH` alone, by the service's own schema and default. The demo seed has no use
  * for the rest of the service's configuration, but holds the rows it writes to the depth the
- * running service enforces (Codex r1 on #295).
+ * running service enforces (Codex r1 on #295). Through `loadEnv`, so it is refused by the same
+ * formatter as the service's whole configuration and never with the value written (#385 r2 F2).
  */
 export function loadMaxHierarchyDepth(source: NodeJS.ProcessEnv = process.env): number {
-  const result = organizationEnvSchema.pick({ MAX_HIERARCHY_DEPTH: true }).safeParse(source);
-  if (!result.success) {
-    throw new EnvValidationError(
-      result.error.issues.map((issue) => ({
-        path: issue.path.join('.') || '(root)',
-        message: issue.message,
-      })),
-    );
-  }
-  return result.data.MAX_HIERARCHY_DEPTH;
+  return loadEnv(organizationEnvSchema.pick({ MAX_HIERARCHY_DEPTH: true }), source, {
+    fixedMessages: ORGANIZATION_ENV_MESSAGES,
+  }).MAX_HIERARCHY_DEPTH;
 }
 
 export function corsOrigins(env: OrganizationEnv): string[] {

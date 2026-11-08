@@ -16,7 +16,10 @@ import {
   updateAssetFormValues,
 } from '@/server/asset-commands';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { UpdateAssetFormState } from './form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The `/assets/[id]` edit form's server action.
@@ -43,9 +46,13 @@ import type { UpdateAssetFormState } from './form-state';
 
 export async function submitUpdateAsset(
   assetId: string,
-  _previous: UpdateAssetFormState,
+  previous: UpdateAssetFormState,
   form: FormData,
 ): Promise<UpdateAssetFormState> {
+  return keepUnconfirmed(previous, form, () => attemptUpdateAsset(assetId, form));
+}
+
+async function attemptUpdateAsset(assetId: string, form: FormData): Promise<UpdateAssetFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
@@ -100,7 +107,10 @@ export async function submitUpdateAsset(
 
   if (result.kind === 'CREATED') {
     redirect(
-      `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${mintFlash(session, assetId, 'updated')}`,
+      withContext(
+        pageContext(session),
+        `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${mintFlash(session, assetId, 'updated')}`,
+      ),
     );
   }
 
@@ -108,7 +118,10 @@ export async function submitUpdateAsset(
     case 'INVALID':
       if (result.message === ASSET_EDIT_CONFLICT_MESSAGE) {
         redirect(
-          `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${mintFlash(session, assetId, 'conflict')}`,
+          withContext(
+            pageContext(session),
+            `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${mintFlash(session, assetId, 'conflict')}`,
+          ),
         );
       }
       return {

@@ -1,7 +1,11 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import {
   cancelAggregationSchema,
   listAggregationsQuerySchema,
@@ -80,9 +84,9 @@ export class DemandController {
   })
   async submit(
     @Body(zodPipe(submitDemandSchema)) dto: SubmitDemandDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<DemandView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<DemandView>(
       SUBMIT_DEMAND_ENDPOINT,
       key,
@@ -132,9 +136,9 @@ export class DemandController {
   async withdraw(
     @Param('id') id: string,
     @Body(zodPipe(withdrawDemandSchema)) dto: WithdrawDemandDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<DemandView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<DemandView>(
       WITHDRAW_DEMAND_ENDPOINT,
       key,
@@ -213,9 +217,9 @@ export class AggregationController {
   async cancel(
     @Param('id') id: string,
     @Body(zodPipe(cancelAggregationSchema)) dto: CancelAggregationDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<AggregationView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<AggregationView>(
       CANCEL_AGGREGATION_ENDPOINT,
       key,

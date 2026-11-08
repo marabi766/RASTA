@@ -305,6 +305,10 @@ describe('a refused request reaches nothing upstream — a retried payment inclu
       status: () => response,
       json: () => undefined,
       end: () => undefined,
+      // The controller watches for the caller leaving (main, #708); this one stays.
+      closed: false,
+      once: () => response,
+      off: () => response,
     };
     const outcome = await runWithContext(context, () =>
       controller.handle(request, response as never),

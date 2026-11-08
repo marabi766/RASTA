@@ -33,6 +33,7 @@ import {
 } from './asset-documents';
 import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The attach-document command: who is offered the form, what a person may type
@@ -48,7 +49,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -402,7 +403,7 @@ describe('the chain a file travels', () => {
     });
     // Both gateway calls carry the session's token and the submission as the key.
     for (const call of g.calls) {
-      expect(call.headers.authorization).toBe('Bearer access-token-value');
+      expect(call.headers.authorization).toBe(`Bearer ${SESSION.accessToken}`);
       expect(call.headers['idempotency-key']).toBe(SUBMISSION);
     }
   });
@@ -524,6 +525,22 @@ describe('the chain a file travels', () => {
     const g = gateway([intent(), new TypeError('terminated')]);
     const outcome = await upload(g, storage(new Response(null, { status: 200 })));
     expect(outcome.kind).toBe('UNCONFIRMED');
+  });
+
+  it.each([500, 502, 503])(
+    'says a registration the platform answered %s is unconfirmed: it may follow the commit (FU-189)',
+    async (status) => {
+      const g = gateway([intent(), new Response(null, { status })]);
+      const outcome = await upload(g, storage(new Response(null, { status: 200 })));
+      expect(outcome.kind).toBe('UNCONFIRMED');
+    },
+  );
+
+  it('still says an intent answered 503 failed: an intent is only a permission, no document exists', async () => {
+    const g = gateway([new Response(null, { status: 503 })]);
+    const outcome = await upload(g, storage(new Response(null, { status: 200 })));
+    expect(outcome.kind).toBe('FAILED');
+    expect(g.calls).toHaveLength(1);
   });
 });
 

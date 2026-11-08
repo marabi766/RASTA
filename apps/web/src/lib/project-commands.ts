@@ -1,6 +1,7 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
-import { firstIssuePerField } from './form-issues';
+import { firstIssuePerField, formMessage } from './form-issues';
 import {
   IRR,
   MoneyInputError,
@@ -10,6 +11,7 @@ import {
 } from './format';
 import type { ProjectStatus } from './project-fields';
 import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
+import { ownHas, ownValue } from '@/lib/own-key';
 
 /**
  * The commands of the project write screens (EXP-004; construction-service
@@ -36,7 +38,7 @@ import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
  *   GeoJSON polygon, the portal never reads it back (`server/projects.ts`), and
  *   a form that wrote what it cannot show would collect a thing nobody can check.
  *
- * Wording: new text on these screens carries no hamza and no combining hamza.
+ * Wording: standard Persian orthography (hamza included, no U+0654); see `orthography.spec.ts`.
  */
 
 export const PROJECT_COMMANDS = [
@@ -94,15 +96,15 @@ export const PROJECT_COMMAND_LABELS: Readonly<Record<ProjectCommand, string>> = 
 export const PROJECT_COMMAND_CONSEQUENCES: Readonly<Record<ProjectCommand, string>> = {
   edit: 'فقط تا وقتی پروژه پیش‌نویس یا نیازمند اصلاح است ویرایش می‌شود؛ پس از درخواست موافقت، آنچه موافقت می‌شود تغییر نمی‌کند. فقط فیلدهایی که عوض کرده‌اید فرستاده می‌شود. محدوده عملیات از این فرم تغییر نمی‌کند.',
   requestApproval:
-    'مراحل سیاست موافقت فعال سازمان که به برآورد این پروژه می‌خورد در یک دور تازه کپی می‌شود و نخستین مرجع از شما موافقت می‌خواهد. سامانه هیچ پروژه‌ای را خودکار یا پیش‌فرض تایید نمی‌کند: بدون سیاست فعال، درخواست پذیرفته نمی‌شود. تنظیمات استقرار می‌تواند حداقل نیازهای ارسال‌شده و وجود برآورد را شرط کند.',
+    'مراحل سیاست موافقت فعال سازمان که به برآورد این پروژه می‌خورد در یک دور تازه کپی می‌شود و نخستین مرجع از شما موافقت می‌خواهد. سامانه هیچ پروژه‌ای را خودکار یا پیش‌فرض تأیید نمی‌کند: بدون سیاست فعال، درخواست پذیرفته نمی‌شود. تنظیمات استقرار می‌تواند حداقل نیازهای ارسال‌شده و وجود برآورد را شرط کند.',
   cancel:
     'لغو پایانی است و پروژه لغوشده دوباره باز نمی‌شود. دلیل لغو در پرونده می‌ماند. دور موافقت بازمانده با لغو پایان می‌یابد. پروژه‌ای که مناقصه تمام‌نشده دارد لغو نمی‌شود؛ نخست مناقصه را لغو کنید. اجرای شروع‌شده را از اینجا نمی‌شود لغو کرد.',
   start:
-    'پروژه تاییدشده به حالت در حال اجرا می‌رود. تا وقتی مرز قرارداد ساخته نشده، شروع هیچ قراردادی را ثبت نمی‌کند؛ اگر استقرار شروع را به قرارداد امضاشده مشروط کرده باشد، سامانه شروع را نمی‌پذیرد.',
+    'پروژه تأییدشده به حالت در حال اجرا می‌رود. تا وقتی مرز قرارداد ساخته نشده، شروع هیچ قراردادی را ثبت نمی‌کند؛ اگر استقرار شروع را به قرارداد امضاشده مشروط کرده باشد، سامانه شروع را نمی‌پذیرد.',
   complete:
     'پروژه فقط وقتی تکمیل می‌شود که آخرین گزارش پیشرفت ارسال‌شده ۱۰۰٪ باشد. اگر برای تکمیل موافقت نهایی تعریف شده باشد، همین کار دور موافقت تکمیل را باز می‌کند و پروژه با آخرین موافقت تکمیل می‌شود؛ وگرنه همین حالا تکمیل می‌شود.',
   grant:
-    'تصمیم صریح مرجع است و هیچ موافقت خودکاری یا بر پایه مهلت نیست. آخرین موافقت یک دور، پروژه را تایید می‌کند (یا برای دور تکمیل، آن را تکمیل می‌کند). شماره تصمیم و شرایط اختیاری‌اند و در پرونده می‌مانند.',
+    'تصمیم صریح مرجع است و هیچ موافقت خودکاری یا بر پایه مهلت نیست. آخرین موافقت یک دور، پروژه را تأیید می‌کند (یا برای دور تکمیل، آن را تکمیل می‌کند). شماره تصمیم و شرایط اختیاری‌اند و در پرونده می‌مانند.',
   reject:
     'رد دور را پایان می‌دهد؛ مرحله‌های بعدی کنار می‌روند و پروژه برای اصلاح به صاحبش برمی‌گردد. دلیل رد لازم است و در پرونده می‌ماند. سامانه جای مرجع تصمیم نمی‌گیرد.',
 };
@@ -290,9 +292,9 @@ const fa = (value: number): string => toPersianDigits(String(value));
 function text(label: string, min: number, max: number) {
   return z
     .string()
-    .min(1, `${label} را بنویسید`)
-    .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-    .max(max, `${label} حداکثر ${fa(max)} نویسه است`);
+    .min(1, formMessage(`${label} را بنویسید`))
+    .min(min, formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`))
+    .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`));
 }
 
 /** The estimate as construction-service takes it: whole rial minor units, `0` to the BIGINT bound. */
@@ -338,13 +340,13 @@ export type ParsedProjectForm<B, F extends string> =
 export function parseCreateForm(
   values: ProjectFormValues,
 ): ParsedProjectForm<ProjectBody, ProjectField> {
-  const parsed = projectFormSchema.safeParse(values);
+  const parsed = legacyParse(projectFormSchema, values);
   const estimate = parseEstimate(values.estimatedCost);
   if (!parsed.success || !estimate.ok) {
     return {
       ok: false,
       fieldErrors: {
-        ...(parsed.success ? {} : firstIssuePerField(parsed.error, PROJECT_FIELDS)),
+        ...(parsed.success ? {} : firstIssuePerField(parsed.refusal, PROJECT_FIELDS)),
         ...(estimate.ok ? {} : { estimatedCost: estimate.message }),
       },
     };
@@ -387,8 +389,8 @@ export function parseEditForm(
   const fieldErrors: Partial<Record<ProjectField, string>> = {};
   const body: { -readonly [K in keyof UpdateBody]: UpdateBody[K] } = {};
 
-  const parsed = projectFormSchema.safeParse(values);
-  const issues = parsed.success ? {} : firstIssuePerField(parsed.error, PROJECT_FIELDS);
+  const parsed = legacyParse(projectFormSchema, values);
+  const issues = parsed.success ? {} : firstIssuePerField(parsed.refusal, PROJECT_FIELDS);
   for (const field of changed) {
     if (field === 'estimatedCost') continue;
     const issue = issues[field];
@@ -408,15 +410,15 @@ export function parseEditForm(
 
 const reasonSchema = z.object({ reason: text('دلیل', MIN_REASON_LENGTH, MAX_REASON_LENGTH) });
 
-export const CANCEL_UNCONFIRMED_MESSAGE = 'برای لغو باید تایید کنید که پایانی بودن آن را می‌دانید';
+export const CANCEL_UNCONFIRMED_MESSAGE = 'برای لغو باید تأیید کنید که پایانی بودن آن را می‌دانید';
 
 export function parseCancelForm(
   values: CancelFormValues,
 ): ParsedProjectForm<{ readonly reason: string }, CancelField> {
-  const reason = reasonSchema.safeParse({ reason: values.reason });
+  const reason = legacyParse(reasonSchema, { reason: values.reason });
   const fieldErrors: Partial<Record<CancelField, string>> = reason.success
     ? {}
-    : firstIssuePerField(reason.error, ['reason']);
+    : firstIssuePerField(reason.refusal, ['reason']);
   if (values.confirm !== 'yes') fieldErrors.confirm = CANCEL_UNCONFIRMED_MESSAGE;
   if (Object.keys(fieldErrors).length > 0) return { ok: false, fieldErrors };
   return { ok: true, body: { reason: values.reason } };
@@ -433,21 +435,26 @@ export function parseGrantForm(
   { readonly decisionNumber?: string; readonly conditions?: string },
   GrantField
 > {
-  const parsed = z
-    .object({
-      decisionNumber: z
-        .string()
-        .max(
-          MAX_DECISION_NUMBER_LENGTH,
-          `شماره تصمیم حداکثر ${fa(MAX_DECISION_NUMBER_LENGTH)} نویسه است`,
-        ),
-      conditions: z
-        .string()
-        .max(MAX_CONDITIONS_LENGTH, `شرایط حداکثر ${fa(MAX_CONDITIONS_LENGTH)} نویسه است`),
-    })
-    .safeParse(values);
+  const grantSchema = z.object({
+    decisionNumber: z
+      .string()
+      .max(
+        MAX_DECISION_NUMBER_LENGTH,
+        formMessage(`شماره تصمیم حداکثر ${fa(MAX_DECISION_NUMBER_LENGTH)} نویسه است`),
+      ),
+    conditions: z
+      .string()
+      .max(
+        MAX_CONDITIONS_LENGTH,
+        formMessage(`شرایط حداکثر ${fa(MAX_CONDITIONS_LENGTH)} نویسه است`),
+      ),
+  });
+  const parsed = legacyParse(grantSchema, values);
   if (!parsed.success)
-    return { ok: false, fieldErrors: firstIssuePerField(parsed.error, GRANT_FIELDS) };
+    return {
+      ok: false,
+      fieldErrors: firstIssuePerField(parsed.refusal, GRANT_FIELDS),
+    };
   return {
     ok: true,
     body: {
@@ -460,11 +467,12 @@ export function parseGrantForm(
 export function parseRejectForm(
   values: RejectFormValues,
 ): ParsedProjectForm<{ readonly reason: string }, RejectField> {
-  const reason = z
-    .object({ reason: text('دلیل رد', MIN_REASON_LENGTH, MAX_REASON_LENGTH) })
-    .safeParse({ reason: values.reason });
+  const rejectSchema = z.object({
+    reason: text('دلیل رد', MIN_REASON_LENGTH, MAX_REASON_LENGTH),
+  });
+  const reason = legacyParse(rejectSchema, { reason: values.reason });
   if (!reason.success) {
-    return { ok: false, fieldErrors: firstIssuePerField(reason.error, ['reason']) };
+    return { ok: false, fieldErrors: firstIssuePerField(reason.refusal, ['reason']) };
   }
   return { ok: true, body: { reason: values.reason } };
 }
@@ -495,9 +503,9 @@ export const OPERATION_TYPE_NOT_ALLOWED_MESSAGE =
  * default, and this is said as a state, not as a failure.
  */
 export const NO_POLICY_MESSAGE =
-  'برای این سازمان سیاست موافقت فعالی برای اجرای پروژه نیست. سامانه بدون سیاست هیچ پروژه‌ای را تایید نمی‌کند؛ نخست باید یک سیاست موافقت نوشته و فعال شود.';
+  'برای این سازمان سیاست موافقت فعالی برای اجرای پروژه نیست. سامانه بدون سیاست هیچ پروژه‌ای را تأیید نمی‌کند؛ نخست باید یک سیاست موافقت نوشته و فعال شود.';
 export const NO_APPLICABLE_STEP_MESSAGE =
-  'سیاست موافقت فعال، برای برآورد این پروژه هیچ مرحله‌ای ندارد و سامانه بی مرحله چیزی را تایید نمی‌کند. برآورد را بررسی کنید یا سیاست را تغییر دهید.';
+  'سیاست موافقت فعال، برای برآورد این پروژه هیچ مرحله‌ای ندارد و سامانه بی مرحله چیزی را تأیید نمی‌کند. برآورد را بررسی کنید یا سیاست را تغییر دهید.';
 
 /**
  * The refusals of the service that carry only a sentence: each is matched whole
@@ -610,26 +618,10 @@ export const PENDING_CAPACITY_MESSAGE =
   'شمار درخواست‌های روشن‌نشده این نشست به سقف رسیده است و چیزی فرستاده نشد. ' +
   'نخست درخواست‌های روشن‌نشده را بررسی و رها کنید.';
 
-/** The release form was drawn for a request that has since changed. */
-export const RELEASE_STALE_MESSAGE =
-  'درخواست روشن‌نشده از زمان باز شدن این صفحه تغییر کرده است و چیزی تغییر نکرد. صفحه را تازه کنید و دوباره بررسی کنید.';
-
 /** An unresolved create exists and this post is a different request. */
 export const HELD_OTHER_MESSAGE =
   'درخواست پیشینی هنوز روشن نشده است و درخواست دیگری فرستاده نشد. صفحه را تازه کنید؛ ' +
   'نخست همان درخواست را بفرستید یا پس از بررسی فهرست کامل پروژه‌ها، با پذیرفتن خطر تکرار، درخواست تازه بفرستید.';
-
-/**
- * Whether a refusal status proves the command was not applied. Only a 4xx does:
- * the gateway or the service answered before doing anything. A 5xx may follow a
- * commit — construction-service commits, then reads the record again to answer,
- * and that read can fail, as can the gateway while relaying the answer — so no
- * 5xx (503 included: the portal cannot tell the gateway's from the service's) is
- * "nothing changed". Those are unconfirmed.
- */
-export function isProvenRefusalStatus(status: number): boolean {
-  return status >= 400 && status < 500;
-}
 
 export function projectFailureText(status: number): string {
   if (status === 401) return SESSION_REFUSAL_MESSAGES.NO_SESSION;
@@ -643,7 +635,7 @@ export function projectFailureText(status: number): string {
 
 export const POLICY_CLOSED_TITLE = 'سیاست موافقت فعالی نیست؛ سامانه بسته است';
 export const POLICY_CLOSED_TEXT =
-  'برای اجرای پروژه‌های این سازمان سیاست موافقت فعالی برقرار نیست و سامانه به‌جای هیچ مرجعی تصمیم نمی‌گیرد. تا وقتی سیاستی نوشته و فعال نشود، هیچ پروژه‌ای به مرحله تایید نمی‌رسد و درخواست موافقت پذیرفته نمی‌شود. سیاست را مرجع تعیین‌کننده سازمان می‌نویسد و مدیر پلتفرم فعال می‌کند.';
+  'برای اجرای پروژه‌های این سازمان سیاست موافقت فعالی برقرار نیست و سامانه به‌جای هیچ مرجعی تصمیم نمی‌گیرد. تا وقتی سیاستی نوشته و فعال نشود، هیچ پروژه‌ای به مرحله تأیید نمی‌رسد و درخواست موافقت پذیرفته نمی‌شود. سیاست را مرجع تعیین‌کننده سازمان می‌نویسد و مدیر پلتفرم فعال می‌کند.';
 export const POLICY_UNKNOWN_TEXT =
   'وضعیت سیاست موافقت خوانده نشد، پس نمی‌توانیم بگوییم سامانه باز است یا بسته. درخواست موافقت همچنان فرستاده می‌شود و سرویس خودش تصمیم می‌گیرد.';
 
@@ -665,12 +657,12 @@ export const APPROVAL_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function approvalStatusLabel(status: string): string {
-  return APPROVAL_STATUS_LABELS[status] ?? status;
+  return ownValue(APPROVAL_STATUS_LABELS, status) ?? status;
 }
 
 export function workflowLabel(key: string): string {
-  return WORKFLOW_LABELS[key] ?? key;
+  return ownValue(WORKFLOW_LABELS, key) ?? key;
 }
 
 /** Project workflows only: a tender step is decided on its tender's screen. */
-export const isProjectWorkflow = (key: string): boolean => key in WORKFLOW_LABELS;
+export const isProjectWorkflow = (key: string): boolean => ownHas(WORKFLOW_LABELS, key);

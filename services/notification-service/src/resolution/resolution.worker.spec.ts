@@ -1,5 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { registry } from '@rasta/observability';
-import { tryGetContext } from '@rasta/nest-common';
+import { InternalTokenService, tryGetContext } from '@rasta/nest-common';
 import type { NotificationIntent } from '../generated/prisma';
 import {
   LeaseLostError,
@@ -10,6 +11,7 @@ import {
   type RecipientPort,
   type RecipientQuery,
 } from '../recipients/recipient.port';
+import { IdentityHttpRecipientAdapter } from '../recipients/identity-http.adapter';
 import type { ScrubbedLogger } from '../logging/scrub';
 import { ResolutionWorker, type ResolutionWorkerOptions } from './resolution.worker';
 
@@ -24,6 +26,8 @@ const options: ResolutionWorkerOptions = {
 };
 
 function intent(overrides: Partial<NotificationIntent> = {}): NotificationIntent {
+  // One reading of the clock for every field that means "now".
+  const now = new Date();
   return {
     id: 'NTI_1',
     organizationId: 'ORG_A',
@@ -51,7 +55,7 @@ function intent(overrides: Partial<NotificationIntent> = {}): NotificationIntent
     },
     status: 'PENDING',
     resolutionAttempts: 0,
-    nextResolutionAt: new Date(),
+    nextResolutionAt: now,
     lastResolutionError: null,
     claimToken: 'token-1',
     claimOwner: 'worker-test',
@@ -59,8 +63,8 @@ function intent(overrides: Partial<NotificationIntent> = {}): NotificationIntent
     resolvedAt: null,
     dispatchedAt: null,
     terminalReason: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    createdAt: now,
+    updatedAt: now,
     ...overrides,
   };
 }
@@ -398,6 +402,65 @@ describe('ResolutionWorker', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('runs its next tick after identity stalls a response body (#502 r1 F1)', async () => {
+    // The real adapter, the real deadline: identity sends headers and then
+    // never ends the first body. Without a deadline on the body that batch
+    // never finishes, and `tickGuarded` skips every tick after it.
+    let calls = 0;
+    const adapter = new IdentityHttpRecipientAdapter(
+      { baseUrl: 'http://identity.test', timeoutMs: 30 },
+      new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
+      (async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{"items":['));
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            items: [{ id: 'USR_1', status: 'ACTIVE', roles: ['FLEET_MANAGER'] }],
+            hasMore: false,
+          }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
+    const repo = fakeRepository([intent()]);
+    const worker = new ResolutionWorker(
+      repo.repository,
+      adapter,
+      { ...options, pollIntervalMs: 10 },
+      silent(),
+    );
+    worker.start();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const giveUp = setTimeout(() => reject(new Error('the next tick never ran')), 5_000);
+        const poll = setInterval(() => {
+          if (repo.dispatched.length > 0) {
+            clearTimeout(giveUp);
+            clearInterval(poll);
+            resolve();
+          }
+        }, 10);
+      });
+    } finally {
+      // Bounded: a batch that never ends must fail this test, not hang it.
+      await worker.stop({ deadlineAt: Date.now() + 200 });
+    }
+
+    // The stalled batch ended as a timeout and was deferred; a later tick dispatched.
+    expect(repo.deferred.map((row) => row.errorClass)).toContain('TIMEOUT');
+    expect(repo.dispatched).toHaveLength(1);
+    expect(calls).toBeGreaterThanOrEqual(2);
   });
 
   describe('stopping on shutdown (OutboxShutdown)', () => {

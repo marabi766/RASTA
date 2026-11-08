@@ -40,6 +40,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { readUrl, tryReadUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
 
 // What each service's schema must contain, and the SQL that checks it. Kept in
@@ -50,9 +51,11 @@ import {
   verifierConnection,
   verifierRoleProblem,
   CONNECTED_ROLE_PROBE,
+  UNREADABLE_DATABASE_URL,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
+  downChainProblems,
   dropScratchDatabase,
   ledgerAssertionScript,
   newScratchDatabase,
@@ -75,12 +78,14 @@ function usage(message) {
 const args = process.argv.slice(2);
 const service = args[0];
 if (!service) usage('A service name is required.');
-if (!EXPECTED[service]) usage(`No expected-object list for "${service}".`);
+// Echoed only once it is one of EXPECTED's services (#385 r6).
+if (!Object.hasOwn(EXPECTED, service))
+  usage('No expected-object list for that service; it is not repeated.');
 
 const schemaFlag = args.indexOf('--schema');
 const scratchSchema = schemaFlag >= 0 ? args[schemaFlag + 1] : 'migration_check';
 if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
-  usage(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
+  usage('--schema must be a plain lowercase identifier; its value is not repeated.');
 }
 
 const serviceDir = join(REPO_ROOT, 'services', `${service}-service`);
@@ -103,6 +108,12 @@ if (connection.error) {
 }
 // In UTC whatever the server's or the role's default (L7-37).
 const baseUrl = withUtcSession(connection.url);
+// A URL that does not parse is refused here, by the variable's name only, before
+// any helper below would refuse it as an uncaught throw (#385 r5).
+if (tryReadUrl(baseUrl) === null) {
+  console.error(`${connection.key}: ${UNREADABLE_DATABASE_URL}. Refusing to verify.`);
+  process.exit(1);
+}
 
 // …and that variable really names the migrator, not a superuser or any other
 // role (verifierRoleProblem in the lib).
@@ -166,7 +177,7 @@ let scratchCreated = false;
 
 /** A throwaway schema (or database). Nothing this script does can reach the real one. */
 function scratchUrl(schema = targetSchema) {
-  const url = new URL(baseUrl);
+  const url = readUrl(baseUrl, { refusal: UNREADABLE_DATABASE_URL });
   if (scratchDatabase) url.pathname = `/${scratchDatabase}`;
   url.searchParams.set('schema', schema);
   return url.toString();
@@ -384,6 +395,28 @@ function dropScratch() {
 const expected = EXPECTED[service];
 const startedAt = Date.now();
 
+// Before anything runs: a down chain that would leave a newer migration applied
+// under what it rolls back, or a step whose effect on the ledger cannot be told,
+// refuses the whole verification (downChainProblems in the lib, FU-240).
+const chainModel = expected.dataRollback
+  ? (() => {
+      try {
+        return downChainProblems(expected.dataRollback, migrations, (name) =>
+          readFileSync(join(migrationsDir, name, 'migration.sql'), 'utf8'),
+        );
+      } catch (error) {
+        return { problems: [error.message], keptApplied: new Map() };
+      }
+    })()
+  : { problems: [], keptApplied: new Map() };
+if (chainModel.problems.length > 0) {
+  console.error(
+    `${service}-service: the rollback against real data cannot be verified as written:\n  ` +
+      chainModel.problems.join('\n  '),
+  );
+  process.exit(1);
+}
+
 console.log(`Verifying migration reversibility for ${service}-service`);
 console.log(`  migrations : ${migrations.join(', ')}`);
 console.log(
@@ -514,6 +547,10 @@ if (expected.dataRollback) {
   const downsFor = (step) =>
     Array.isArray(step.runDownScript) ? step.runDownScript : [probe.migration];
 
+  // The migrations each down chain left applied above the oldest it rolled back,
+  // named if the rollback does not end where it began (below).
+  const keptApplied = new Set();
+
   for (const [stepIndex, step] of probe.steps.entries()) {
     if (step.runDownScript && step.mustFail) {
       // A down script that must refuse the data in front of it — and, run as a
@@ -529,6 +566,7 @@ if (expected.dataRollback) {
         );
       }
       console.log(`  ✓ ${step.label}`);
+      for (const name of chainModel.keptApplied.get(stepIndex) ?? []) keptApplied.add(name);
     } else if (step.reapply) {
       deploy(step.label);
     } else if (step.deployMustFail) {
@@ -554,6 +592,33 @@ if (expected.dataRollback) {
     } else {
       mustRun(step.label, step.sql);
     }
+  }
+  // It ends where it began: exactly the deployed schema, every migration in the
+  // ledger. A down chain that left a newer migration applied under what it rolled
+  // back gets that migration's objects back in their older form from the
+  // re-deploy, and the whole-chain reversal below would hold each down script to
+  // that lost state instead (FU-240). Not after each deploy: a migration whose
+  // effect depends on the rows in front of it (a foreign key left NOT VALID over
+  // a probe's rows) is meant to differ until the probe has cleaned up.
+  {
+    const context = 'the rollback against real data, at its end';
+    const kept = [...keptApplied].sort();
+    const hint =
+      kept.length > 0
+        ? `\nIts down chains left these newer migrations applied: ${kept.join(', ')}. ` +
+          'One that redefines what a chain rolled back must be listed in that chain.'
+        : '';
+    const exact = sql(
+      searchPath(targetSchema) +
+        assertSnapshotScript(metaSchema, POST_UP, targetSchema, context, undefined, {
+          extensionHome,
+        }),
+    );
+    if (!exact.ok) fail(`${context}: the schema is not the deployed one:\n${exact.output}${hint}`);
+    const ledger = sql(ledgerAssertionScript(migrations, context));
+    if (!ledger.ok)
+      fail(`${context}: the ledger is not every migration, applied:\n${ledger.output}${hint}`);
+    console.log(`  ✓ ${context}: exactly the deployed schema, every migration in the ledger`);
   }
   console.log('');
 }

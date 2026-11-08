@@ -218,13 +218,14 @@ export class Actor {
   readonly username: E2eUser | (string & {});
   private readonly token: SessionToken;
   private readonly config: Pick<E2eConfig, 'gatewayUrl'>;
-  private readonly fetchImpl: Fetch;
+  /** Absent: send()'s own fetch, inside the audited transport (src/http.ts). */
+  private readonly fetchImpl?: Fetch;
 
   constructor(
     username: E2eUser | (string & {}),
     token: SessionToken,
     config: Pick<E2eConfig, 'gatewayUrl'>,
-    fetchImpl: Fetch = fetch,
+    fetchImpl?: Fetch,
   ) {
     this.username = username;
     this.token = token;
@@ -270,9 +271,8 @@ export class Actor {
     const headers: Record<string, string> = {
       'x-correlation-id': correlationId,
       accept: 'application/json',
-      ...(options.internalToken
-        ? { 'x-internal-token': options.internalToken }
-        : { authorization: `Bearer ${await this.token.value()}` }),
+      // The internal token travels in the request, and send() alone sets its header.
+      ...(options.internalToken ? {} : { authorization: `Bearer ${await this.token.value()}` }),
     };
     if (options.idempotencyKey) headers['idempotency-key'] = options.idempotencyKey;
     if (options.replayDeadline !== undefined) {
@@ -289,6 +289,7 @@ export class Actor {
         baseUrl: options.baseUrl ?? this.config.gatewayUrl,
         path,
         headers,
+        ...(options.internalToken ? { internalToken: options.internalToken } : {}),
         body: options.body,
       },
       this.fetchImpl,

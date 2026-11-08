@@ -1,4 +1,5 @@
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { EventPublisher } from '../src/events/publisher';
 import {
@@ -12,8 +13,10 @@ import {
 import { http, idemKey, reasons, seedSigned } from './amendment-helpers';
 import {
   cleanup,
+  configureDeductionRule,
   eventsOf,
   newOrganizationId,
+  retireDeductionRule,
   seedDraft,
   untilSessionsWaitOnALock,
   wire,
@@ -68,21 +71,9 @@ describe('statements of a signed contract', () => {
         include: { lines: true, deductions: true },
       }),
     );
-  /** What no route does yet (Q-125): an employer's deduction rule, written as configuration. */
+  /** What no route does yet (CON-003-2): an employer's deduction rule, approved by a second person. */
   const configure = (organizationId: string, name: string, rateBp: number) =>
-    runUnscoped('the suite configures a deduction rule: no route writes one yet (Q-125)', () =>
-      w.prisma.client.deductionRule.create({
-        data: {
-          id: `DDR_${ulid()}`,
-          organizationId,
-          name,
-          rateBp,
-          base: 'GROSS',
-          createdAt: new Date(),
-          createdBy: 'USR-ITEST-CONFIG',
-        },
-      }),
-    );
+    configureDeductionRule(w.prisma, organizationId, name, rateBp);
   const statementEvents = async (employer: string) =>
     (await eventsOf(w.prisma, employer)).filter((e) => e.eventName.startsWith('STATEMENT_'));
   const refusedEvents = (employer: string) =>
@@ -152,10 +143,13 @@ describe('statements of a signed contract', () => {
         draftedBy: expect.any(String),
         draftedAt: res.body.createdAt,
       });
-      const text = JSON.stringify(events);
-      for (const secret of ['1500000001', '1200000000', '300000001', 'Excavation', 'Formwork']) {
-        expect(text).not.toContain(secret);
-      }
+      expectNotDisclosed(events, [
+        '1500000001',
+        '1200000000',
+        '300000001',
+        'Excavation',
+        'Formwork',
+      ]);
     });
 
     it('keeps amounts exact past 2^53 and Persian text intact', async () => {
@@ -224,12 +218,7 @@ describe('statements of a signed contract', () => {
       const foreign = await configure(elsewhere, 'Retention', 500);
       const contractorsOwn = await configure(c.contractor, 'Retention', 500);
       const retired = await configure(c.employer, 'Old retention', 500);
-      await runUnscoped('the suite retires a rule', () =>
-        w.prisma.client.deductionRule.update({
-          where: { id: retired.id },
-          data: { retiredAt: new Date(Date.now() + 1000) },
-        }),
-      );
+      await retireDeductionRule(w.prisma, c.employer, retired.id);
       for (const deductionRuleId of [`DDR_${ulid()}`, foreign.id, contractorsOwn.id, retired.id]) {
         const res = await draft(
           c.id,

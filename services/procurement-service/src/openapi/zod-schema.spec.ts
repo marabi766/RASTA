@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { codePointLength, toJsonSchema, type JsonSchema } from './zod-schema';
+import { isoDateTime, parsableUrl, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { codePointLength, toJsonSchema, type JsonSchema } from '@rasta/nest-common';
 import {
   aggregationViewSchema,
   cancelAggregationSchema,
@@ -50,13 +51,13 @@ describe('the constructs the demand DTOs are built from', () => {
   });
 
   it('publishes the formats a client can validate against', () => {
-    expect(toJsonSchema(z.string().url()).format).toBe('uri');
+    expect(toJsonSchema(z.string().check(parsableUrl())).format).toBe('uri');
     expect(toJsonSchema(z.string().email()).format).toBe('email');
-    expect(toJsonSchema(z.string().datetime()).format).toBe('date-time');
+    expect(toJsonSchema(z.string().check(isoDateTime())).format).toBe('date-time');
   });
 
   it('publishes a default rather than hiding it', () => {
-    expect(toJsonSchema(z.number().int().default(25))).toEqual({
+    expect(toJsonSchema(z.number().int().prefault(25))).toEqual({
       type: 'integer',
       default: 25,
     });
@@ -87,7 +88,7 @@ describe('the constructs the demand DTOs are built from', () => {
   });
 
   it('publishes a record as an open object with a typed value', () => {
-    expect(toJsonSchema(z.record(z.string()))).toEqual({
+    expect(toJsonSchema(z.record(z.string(), z.string()))).toEqual({
       type: 'object',
       additionalProperties: { type: 'string' },
     });
@@ -178,7 +179,7 @@ describe('the real demand DTOs', () => {
     ['withdrawal', withdrawDemandSchema, { expectedVersion: 1 }],
     ['cancellation', cancelAggregationSchema, { expectedVersion: 1 }],
   ])(
-    'counts a %s reason in characters at both bounds, and publishes 8..500',
+    'counts a %s reason in characters at both bounds, and marks its post-trim bounds as omitted (FU-120)',
     (_l, schema, rest) => {
       const issues = (reason: string) => {
         const parsed = schema.safeParse({ ...rest, reason });
@@ -199,7 +200,11 @@ describe('the real demand DTOs', () => {
       );
       expect(issues('a'.repeat(500))).toEqual([]);
       const properties = toJsonSchema(schema).properties as Record<string, JsonSchema>;
-      expect(properties.reason).toMatchObject({ type: 'string', minLength: 8, maxLength: 500 });
+      expect(properties.reason).toEqual({
+        type: 'string',
+        pattern: WITHOUT_BIDI_CONTROL.source,
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
     },
   );
 

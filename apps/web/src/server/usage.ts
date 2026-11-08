@@ -1,5 +1,5 @@
 import { TZDate } from '@date-fns/tz';
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -18,6 +18,7 @@ import {
 
 import type { WebSession } from './session';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 export { EMPTY_USAGE_FORM, USAGE_FIELDS };
 export type { UsageField, UsageFormValues };
@@ -88,12 +89,14 @@ const optionalQuantity = (maxIntegerDigits: number) =>
       if (!QUANTITY.test(value)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'عددی نامنفی با حداکثر دو رقم اعشار وارد کنید',
+          message: formMessage('عددی نامنفی با حداکثر دو رقم اعشار وارد کنید'),
         });
       } else if ((value.split('.')[0] ?? '').length > maxIntegerDigits) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `حداکثر ${toPersianDigits(String(maxIntegerDigits))} رقم پیش از اعشار مجاز است`,
+          message: formMessage(
+            `حداکثر ${toPersianDigits(String(maxIntegerDigits))} رقم پیش از اعشار مجاز است`,
+          ),
         });
       }
     })
@@ -127,11 +130,14 @@ export function localDateTimeToIso(raw: string, timeZone = DISPLAY_TIME_ZONE): s
 
 const localDateTime = z
   .string()
-  .min(1, 'تاریخ و ساعت را وارد کنید')
+  .min(1, formMessage('تاریخ و ساعت را وارد کنید'))
   .transform((raw, ctx) => {
     const iso = localDateTimeToIso(raw);
     if (iso === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'تاریخ یا ساعت معتبر نیست' });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: formMessage('تاریخ یا ساعت معتبر نیست'),
+      });
       return z.NEVER;
     }
     return iso;
@@ -141,8 +147,8 @@ export const usageFormSchema = z
   .object({
     assetId: z
       .string()
-      .min(1, 'ماشین را انتخاب کنید')
-      .refine((value) => assetId.safeParse(value).success, 'شناسهٔ ماشین معتبر نیست'),
+      .min(1, formMessage('ماشین را انتخاب کنید'))
+      .refine((value) => assetId.safeParse(value).success, formMessage('شناسهٔ ماشین معتبر نیست')),
     periodStart: localDateTime,
     periodEnd: localDateTime,
     hours: optionalQuantity(8),
@@ -152,7 +158,7 @@ export const usageFormSchema = z
     notes: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().max(1000, 'یادداشت حداکثر ۱۰۰۰ نویسه است'))
+      .pipe(z.string().max(1000, formMessage('یادداشت حداکثر ۱۰۰۰ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
   })
   .superRefine((values, ctx) => {
@@ -160,14 +166,14 @@ export const usageFormSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['hours'],
-        message: 'دست‌کم یکی از ساعت کارکرد یا کیلومتر را وارد کنید',
+        message: formMessage('دست‌کم یکی از ساعت کارکرد یا کیلومتر را وارد کنید'),
       });
     }
     if (new Date(values.periodEnd) <= new Date(values.periodStart)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['periodEnd'],
-        message: 'پایان بازه باید پس از شروع آن باشد',
+        message: formMessage('پایان بازه باید پس از شروع آن باشد'),
       });
     }
   });
@@ -183,7 +189,7 @@ export type ParsedUsageForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<UsageField, string>> };
 
 export function parseUsageForm(values: UsageFormValues, submissionId: string): ParsedUsageForm {
-  const parsed = usageFormSchema.safeParse(values);
+  const parsed = legacyParse(usageFormSchema, values);
   if (parsed.success) {
     return {
       ok: true,
@@ -191,7 +197,10 @@ export function parseUsageForm(values: UsageFormValues, submissionId: string): P
     };
   }
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUsageField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isUsageField),
+  };
 }
 
 function isUsageField(value: string): value is UsageField {
@@ -208,8 +217,8 @@ const usageRecordSchema = z.object({
   assetId: z.string(),
   periodStart: z.string(),
   periodEnd: z.string(),
-  hours: z.string().nullable().default(null),
-  kilometres: z.string().nullable().default(null),
+  hours: z.string().nullable().prefault(null),
+  kilometres: z.string().nullable().prefault(null),
 });
 
 export type UsageRecord = z.infer<typeof usageRecordSchema>;

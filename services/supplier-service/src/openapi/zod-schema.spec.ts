@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { isoDateTime, parsableUrl, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { toJsonSchema } from '@rasta/nest-common';
 import {
   registerSupplierSchema,
   rejectQualificationSchema,
@@ -49,13 +50,13 @@ describe('the constructs the supplier DTOs are built from', () => {
   });
 
   it('publishes the formats a client can validate against', () => {
-    expect(toJsonSchema(z.string().url()).format).toBe('uri');
+    expect(toJsonSchema(z.string().check(parsableUrl())).format).toBe('uri');
     expect(toJsonSchema(z.string().email()).format).toBe('email');
-    expect(toJsonSchema(z.string().datetime()).format).toBe('date-time');
+    expect(toJsonSchema(z.string().check(isoDateTime())).format).toBe('date-time');
   });
 
   it('publishes a default rather than hiding it', () => {
-    expect(toJsonSchema(z.number().int().default(25))).toEqual({
+    expect(toJsonSchema(z.number().int().prefault(25))).toEqual({
       type: 'integer',
       default: 25,
     });
@@ -86,7 +87,7 @@ describe('the constructs the supplier DTOs are built from', () => {
   });
 
   it('publishes a record as an open object with a typed value', () => {
-    expect(toJsonSchema(z.record(z.string()))).toEqual({
+    expect(toJsonSchema(z.record(z.string(), z.string()))).toEqual({
       type: 'object',
       additionalProperties: { type: 'string' },
     });
@@ -172,13 +173,17 @@ describe('the real supplier DTOs', () => {
     ]);
   });
 
-  it('publishes the rejection reason as required, with its minimum length', () => {
+  it('publishes the rejection reason as required, with an explicit post-trim omission (FU-120)', () => {
     // A decision with no reason is not an audit record, and a client should be
     // able to see the minimum before it sends "x".
     const schema = toJsonSchema(rejectQualificationSchema);
 
     expect(schema.required).toEqual(['reason']);
-    expect((schema.properties as Record<string, { minLength: number }>).reason.minLength).toBe(8);
+    expect((schema.properties as Record<string, unknown>).reason).toEqual({
+      type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
   });
 
   it('publishes evidence as identifiers and labels, and nothing fetchable', () => {

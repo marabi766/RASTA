@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse, stringify } from 'yaml';
 import {
   checkBootstrapExample,
   checkCiUp,
@@ -13,6 +14,7 @@ import {
   composeServices,
   workflowSteps,
 } from './check-kafka-credential-scope-lib.mjs';
+import { KEY_SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (path) => readFileSync(resolve(ROOT, path), 'utf8');
@@ -284,19 +286,37 @@ test('an unnamed step, or one written in flow style, is checked like any other',
 
 test('the real workflow fails the check when a start step keeps the directory or a test step takes the admin’s', () => {
   const real = read('.github/workflows/ci.yml');
-  const kept = real.replaceAll('          unset KAFKA_SECRETS_DIR\n', '');
-  assert.notEqual(kept, real);
-  assert.ok(checkWorkflow(kept).some((problem) => /without first unsetting/.test(problem)));
-  const widened = real.replace(
-    '          pnpm run test:integration\n        env:\n',
-    '          pnpm run test:integration\n        env:\n          KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets\n',
-  );
-  assert.notEqual(widened, real);
+  const parsed = parse(real);
+  const kept = structuredClone(parsed);
+  for (const job of Object.values(kept.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (typeof step.run === 'string')
+        step.run = step.run.replace(/^[\t ]*unset KAFKA_SECRETS_DIR[\t ]*(?:\r?\n|$)/gm, '');
+    }
+  }
+  assert.notDeepEqual(kept, parsed);
   assert.ok(
-    checkWorkflow(widened).some((problem) =>
-      /"Integration tests" is given KAFKA_ADMIN_SECRETS_DIR/.test(problem),
-    ),
+    checkWorkflow(stringify(kept)).some((problem) => /without first unsetting/.test(problem)),
   );
+  // Mutate parsed steps, not the spelling of a command or YAML anchor. Every
+  // shard and the unsharded security gate must reject the admin directory.
+  let checked = 0;
+  for (const [job, value] of Object.entries(parsed.jobs)) {
+    for (const [index, step] of (value.steps ?? []).entries()) {
+      if (!step.run?.includes('pnpm run test:integration')) continue;
+      const widened = structuredClone(parsed);
+      widened.jobs[job].steps[index].env.KAFKA_ADMIN_SECRETS_DIR =
+        '${{ runner.temp }}/rasta-kafka-admin-secrets';
+      assert.ok(
+        checkWorkflow(stringify(widened)).some((problem) =>
+          problem.includes(`"${step.name}" is given KAFKA_ADMIN_SECRETS_DIR`),
+        ),
+        `${job}: ${step.name}`,
+      );
+      checked += 1;
+    }
+  }
+  assert.ok(checked >= 5, 'the four suite shards and filtered security gate are checked');
 });
 
 test('kafka-credentials.sh hands out exactly each scope, each from its own directory', async () => {
@@ -385,4 +405,33 @@ test('kafka-credentials.sh hands out exactly each scope, each from its own direc
     rmSync(services, { recursive: true, force: true });
     rmSync(admins, { recursive: true, force: true });
   }
+});
+
+// #385 r4: the files these read may hold any name. A known principal's is
+// named; one no principal has is shown as a placeholder or a count.
+test('a Kafka password named for no known principal is flagged, and never named', () => {
+  for (const key of KEY_SENTINELS) {
+    const line = `KAFKA_SASL_PASSWORD_${key}=x\n`;
+    for (const problems of [
+      checkLocalEnv(line, SERVICES),
+      checkLocalEnv(`export ${line}`, SERVICES),
+      checkEnvExample(line, SERVICES),
+      checkBootstrapExample(
+        `KAFKA_SASL_PASSWORD_ADMIN=a\nKAFKA_SASL_PASSWORD_OPS_REPLAY=b\n${line}`,
+      ),
+    ]) {
+      assert.equal(problems.length, 1, key);
+      assert.match(problems[0], /named for no known principal/);
+      assertNoSentinel(problems.join('\n'), key);
+    }
+  }
+  // A known principal is still named.
+  assert.match(
+    checkLocalEnv('KAFKA_SASL_PASSWORD_ADMIN=x\n', SERVICES)[0],
+    /KAFKA_SASL_PASSWORD_ADMIN,/,
+  );
+  assert.match(
+    checkBootstrapExample('KAFKA_SASL_PASSWORD_ADMIN=a\nKAFKA_SASL_PASSWORD_KAFKA_UI=b\n')[0],
+    /it assigns ADMIN, KAFKA_UI$/,
+  );
 });

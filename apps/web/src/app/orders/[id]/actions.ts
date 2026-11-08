@@ -9,7 +9,9 @@ import { mayDispatch } from '@/server/money-gate';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { issueOrderCommand, orderCommandFormValues, parseOrderCommand } from '@/server/orders';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { OrderCommandFormState } from './form-state';
+import { flashHref } from '@/server/flash';
 
 /**
  * The one server action behind every command on `/orders/[id]`.
@@ -33,7 +35,14 @@ import type { OrderCommandFormState } from './form-state';
  */
 export async function submitOrderCommand(
   orderId: string,
-  _previous: OrderCommandFormState,
+  previous: OrderCommandFormState,
+  form: FormData,
+): Promise<OrderCommandFormState> {
+  return keepUnconfirmed(previous, form, () => attemptOrderCommand(orderId, form));
+}
+
+async function attemptOrderCommand(
+  orderId: string,
   form: FormData,
 ): Promise<OrderCommandFormState> {
   const session = await currentSession();
@@ -71,7 +80,14 @@ export async function submitOrderCommand(
       // not a returned state, so a refresh cannot repeat the command — and on
       // `orders` a repeat would replay, not act twice, but the page should not
       // lean on that.
-      redirect(`/orders/${encodeURIComponent(orderId)}?done=${parsed.request.command}`);
+      redirect(
+        flashHref(
+          session,
+          `/orders/${encodeURIComponent(orderId)}`,
+          orderId,
+          parsed.request.command,
+        ),
+      );
       break;
     case 'INVALID':
       return {

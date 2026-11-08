@@ -1,4 +1,10 @@
-import { DLQ_REASONS, digitsToBigInt, type EventEnvelope } from '@rasta/contracts';
+import {
+  digitsToBigInt,
+  DLQ_REASONS,
+  type EventEnvelope,
+  isoDateTime,
+  legacyParse,
+} from '@rasta/contracts';
 import {
   UnprocessableEventError,
   invalidPayloadError,
@@ -49,7 +55,7 @@ const maintenanceCompletedPayload = z.object({
   organizationId: identifier,
   type: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
   scheduleId: identifier.nullable(),
-  completedAt: z.string().datetime({ offset: true }),
+  completedAt: z.string().check(isoDateTime({ offset: true })),
   downtimeMinutes: z.number().int().nonnegative().max(2_147_483_647).nullable(),
   totalCostMinor: z
     .string()
@@ -91,9 +97,9 @@ export interface MaintenanceFact {
 export function toMaintenanceFact(envelope: EventEnvelope): MaintenanceFact | null {
   if (envelope.eventName !== MAINTENANCE_COMPLETED) return null;
 
-  const parsed = maintenanceCompletedPayload.safeParse(envelope.payload);
+  const parsed = legacyParse(maintenanceCompletedPayload, envelope.payload);
   if (!parsed.success) {
-    throw invalidPayloadError(envelope, parsed.error, MAINTENANCE_COMPLETED_FIELDS);
+    throw invalidPayloadError(envelope, parsed.refusal, MAINTENANCE_COMPLETED_FIELDS);
   }
   const payload = parsed.data;
 

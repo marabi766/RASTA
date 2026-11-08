@@ -38,7 +38,7 @@ describe('identity stream sequencing', () => {
   });
 
   afterAll(async () => {
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const assertConsistent = (row: {

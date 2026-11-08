@@ -53,10 +53,12 @@ export function withheldBase({ event, before, cwd, remote = 'origin' }) {
   if (event === 'push') {
     if (!before || ZERO_SHA.test(before)) {
       throw new Error(
-        `the push names no previous main (github.event.before "${before ?? ''}"): nothing to compare the withheld list with`,
+        'the push names no previous main (github.event.before is empty or the zero commit): ' +
+          'nothing to compare the withheld list with',
       );
     }
-    if (!SHA.test(before)) throw new Error(`github.event.before "${before}" is not a commit id`);
+    // Not repeated until it is one: before the check it is any text (#385 r4).
+    if (!SHA.test(before)) throw new Error('github.event.before is not a commit id');
     if (!commitOf(git, before)) {
       const fetch = git('fetch', '--no-tags', '--depth=1', remote, before);
       if (fetch.status !== 0) {
@@ -70,7 +72,9 @@ export function withheldBase({ event, before, cwd, remote = 'origin' }) {
       throw new Error(`the previous main ${before} is not a commit here after fetching it`);
     return base;
   }
-  throw new Error(`no withheld-list base for event "${event ?? ''}" (pull_request or push only)`);
+  throw new Error(
+    'no withheld-list base for this event: GITHUB_EVENT_NAME is pull_request or push only',
+  );
 }
 
 /** A withheld list, as `service task SETTING` entries. */

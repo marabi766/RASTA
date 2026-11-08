@@ -56,6 +56,20 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   // So is a levels-and-badges version (COM-012 criterion 2).
   ['recognition_rule', 'trg_recognition_rule_append_only'],
   ['recognition_rule', 'trg_recognition_rule_no_truncate'],
+  // What a settlement reversal is capped by and bound to (RLG-002-1).
+  ['settlement', 'trg_settlement_append_only'],
+  ['settlement', 'trg_settlement_no_truncate'],
+  ['ledger_account', 'trg_ledger_account_identity_fixed'],
+  // A settlement proves it happened when it is written (FU-097).
+  ['settlement', 'trg_settlement_creation_proven'],
+  ['commission', 'trg_commission_creation_proven'],
+  ['commission', 'trg_commission_no_truncate'],
+  ['settlement_creation_quarantine', 'trg_settlement_creation_quarantine_frozen'],
+  ['settlement_creation_quarantine', 'trg_settlement_creation_quarantine_no_truncate'],
+  ['settlement_reversal', 'trg_settlement_reversal_not_quarantined'],
+  // Who decided a row standing on another's hold, and why (FU-138).
+  ['transaction_hold_decision', 'trg_transaction_hold_decision_guard'],
+  ['transaction_hold_decision', 'trg_transaction_hold_decision_no_truncate'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
@@ -80,7 +94,23 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
       createDb: false,
       createRole: false,
       bypassRls: false,
+      replication: false,
     });
+  });
+
+  it('can execute the commission pricing and rule-change helpers as the real runtime login', async () => {
+    // A rolled-back scope mutation proves both application call sites remain usable
+    // after a privilege split, without retaining transaction-local scope settings.
+    const rollback = new Error('rollback runtime helper probe');
+    await expect(
+      runtime.$transaction(async (tx) => {
+        const identity = await tx.$queryRaw<{ role: string }[]>`SELECT current_user::text AS role`;
+        expect(identity).toEqual([{ role: 'rasta_economic' }]);
+        await tx.$executeRaw`SELECT commission_pricing_scope_lock('runtime-acl-probe', 'PARTS', NULL)`;
+        await tx.$queryRaw`SELECT commission_rule_scope_change('runtime-acl-probe', 'PARTS', NULL)`;
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
   });
 
   it('may not DISABLE any trigger in the schema — the guards included', async () => {

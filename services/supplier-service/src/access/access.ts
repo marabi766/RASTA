@@ -376,6 +376,26 @@ export function assertNotDecidingOwnCase(supplier: SupplierOwnership): void {
 }
 
 /**
+ * Whether the caller may read a reviewer's private decision note on this
+ * supplier's qualifications.
+ *
+ * The note is written by a platform reviewer for the platform's record, so it
+ * is projected to the people who could have written it: platform scope, and
+ * **not** a member of the supplier's organization (Codex review of PR 366,
+ * finding 1). The second half is the same membership-set rule as
+ * {@link assertNotDecidingOwnCase}, for the same reason: a `UNION_ADMIN` who
+ * also belongs to the supplier is the supplier's side reading its own file, and
+ * the role they hold does not change that. The supplier's own organization reads
+ * the rejection reason, which is the part written for it.
+ *
+ * A predicate rather than an assertion: it shapes what a reader the caller has
+ * already admitted is shown, and never refuses a read.
+ */
+export function mayReadReviewerNote(supplier: SupplierOwnership): boolean {
+  return hasPlatformScope() && !isMemberOfOrganization(supplier.organizationId);
+}
+
+/**
  * Whether the caller may decide this supplier's qualification or suspension.
  *
  * The two checks in order, and the order is the point: platform scope first, so

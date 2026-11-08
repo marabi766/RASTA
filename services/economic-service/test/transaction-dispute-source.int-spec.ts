@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * A transaction's dispute follows its source (docs/24 Q-138), and the dispute
@@ -81,6 +81,7 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
         sourceType: 'ORDER',
         sourceReference: orderId,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     expect(created.body.status).toBe('HELD');
@@ -228,7 +229,8 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
 
       const resolved = await resolve(transactionId, await saga(), resolveKey).expect(200);
       expect(resolved.body).toMatchObject({
-        status: 'PENDING_SETTLEMENT',
+        // Disputed while HELD, never authorised: back to HELD (D-083).
+        status: 'HELD',
         disputeReason: REASON,
         disputeResolution: RESOLUTION,
         disputeResolvedBy: 'economic-service',
@@ -363,7 +365,7 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
 
         const resolved = await resolve(transactionId, resolver()).expect(200);
         expect(resolved.body).toMatchObject({
-          status: 'PENDING_SETTLEMENT',
+          status: 'HELD',
           disputeReason: REASON,
           disputeResolution: RESOLUTION,
           disputeResolvedBy: expect.stringMatching(/^USR-APITEST-/),

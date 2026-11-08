@@ -5,6 +5,7 @@ import { axe } from 'jest-axe';
 import { OffersScreen } from './OffersScreen';
 import { formatMoney } from '@/lib/format';
 import type { Offer, OffersPage, Product, ReadResult } from '@/server/marketplace';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The offer-comparison screen, in every state the two independent reads it
@@ -43,6 +44,7 @@ function render_(
 ) {
   return render(
     <OffersScreen
+      context={TEST_CONTEXT}
       product={product}
       offers={offers}
       productId="PRD_1"
@@ -51,22 +53,6 @@ function render_(
     />,
   );
 }
-
-describe('the supplier qualification column', () => {
-  it.each([
-    ['SUBMITTED', 'ارسال‌شده'],
-    ['APPROVED', 'تأییدشده'],
-    ['REJECTED', 'ردشده'],
-    ['UNAVAILABLE', 'هنوز فعال نیست'],
-  ])('says %s in Persian', (state, label) => {
-    const { getByText, container } = render_(undefined, {
-      kind: 'OK',
-      data: { items: [{ ...OFFER, supplierQualification: state }] },
-    });
-    expect(getByText(label)).toBeInTheDocument();
-    expect(container.textContent).not.toContain(state);
-  });
-});
 
 describe('the product header', () => {
   it('shows the product’s own name and unit', () => {
@@ -105,9 +91,12 @@ describe('the offers table', () => {
   });
 
   it('never renders the qualification as a check nobody performed', () => {
-    const { getByText, queryByText } = render_();
-    expect(getByText('هنوز فعال نیست')).toBeInTheDocument();
-    expect(queryByText('تأییدشده')).toBeNull();
+    // No directory answer was passed: the badge is «نامشخص», not «واجد صلاحیت».
+    const { getByText, queryByText, container } = render_();
+    expect(getByText('وضعیت نامشخص')).toBeInTheDocument();
+    expect(queryByText('واجد صلاحیت')).toBeNull();
+    // Neutral (task 248 wording rule): no verdict on the supplier, no promise that it will change.
+    expect(container.textContent).not.toMatch(/هنوز|فعال نیست|رد شد|فاقد صلاحیت|بی‌صلاحیت/);
   });
 
   it('shows an empty offer list as empty, not as an error', () => {
