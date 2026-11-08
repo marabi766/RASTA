@@ -10,6 +10,7 @@ import {
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
 import { Prisma, PrismaClient } from '../generated/prisma';
+import { walletBelowZeroRefusal } from '../wallet/balances';
 
 /**
  * Models carrying an `organizationId` and therefore scoped automatically.
@@ -183,9 +184,14 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * configured statement timeout cannot cut that wait short (#268 r4).
    */
   transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), {
-      maxWait: CONTENTION_TRANSACTION_MAX_WAIT_MS,
-      timeout: CONTENTION_TRANSACTION_TIMEOUT_MS,
-    });
+    return this.client
+      .$transaction((tx) => fn(tx as ExtendedPrismaClient), {
+        maxWait: CONTENTION_TRANSACTION_MAX_WAIT_MS,
+        timeout: CONTENTION_TRANSACTION_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        // A wallet below zero, refused by the database (FU-228): a typed refusal, not a 500.
+        throw walletBelowZeroRefusal(error) ?? error;
+      });
   }
 }
