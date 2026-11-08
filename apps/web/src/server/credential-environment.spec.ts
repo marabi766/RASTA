@@ -56,14 +56,9 @@ beforeEach(() => {
 
 /** Each transport, sending its credential with the caller's own body (or none). */
 const TRANSPORTS = {
-  credentialFetch: (body?: string, fetchImpl?: typeof fetch) =>
-    credentialFetch(
-      `${origin}/api`,
-      { method: 'POST', headers: { authorization: BEARER }, body },
-      fetchImpl,
-    ),
-  putToSignedUrl: (body?: string, fetchImpl?: typeof fetch) =>
-    putToSignedUrl(`${origin}/bucket/key?${SIGNATURE}`, { body }, fetchImpl),
+  credentialFetch: (body?: string) =>
+    credentialFetch(`${origin}/api`, { method: 'POST', headers: { authorization: BEARER }, body }),
+  putToSignedUrl: (body?: string) => putToSignedUrl(`${origin}/bucket/key?${SIGNATURE}`, { body }),
 };
 const NAMES = Object.keys(TRANSPORTS) as (keyof typeof TRANSPORTS)[];
 
@@ -93,20 +88,8 @@ describe.each(NAMES)('%s in an altered runtime (FU-249)', (name) => {
     expect(received).toEqual([]);
   });
 
-  it('sends nothing through a replaced global dispatcher', async () => {
-    const slot = Symbol.for('undici.globalDispatcher.1');
-    const transport = jest.fn<Promise<Response>, Parameters<typeof fetch>>();
-    Object.defineProperty(globalThis, slot, { value: capturing, configurable: true });
-    try {
-      await expect(send('own-body', transport)).rejects.toBeInstanceOf(
-        CredentialEnvironmentRefusedError,
-      );
-    } finally {
-      delete (globalThis as Record<symbol, unknown>)[slot];
-    }
-    expect(transport).not.toHaveBeenCalled();
-  });
-
+  // A replaced global dispatcher: Node's slot is the host's under jest, so that
+  // case is proven where it is real, in scripts/credential-fetch.test.mjs.
   it('still sends its credential and body through an unaltered runtime', async () => {
     const response = await send('own-body');
     expect(await response.text()).toBe('ok');

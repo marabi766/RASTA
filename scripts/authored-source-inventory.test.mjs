@@ -1732,6 +1732,8 @@ const PASSES_GLOBALS_ON = [
   'apps/web/src/test/build-controller.mjs', // also loads the supervisor by a built URL
   'apps/web/src/test/setup.ts',
   'packages/config/src/command-failure.js',
+  'packages/config/src/credential-environment.js', // reads Node's global dispatcher slot (a symbol key), FU-249
+  'packages/config/src/credential-environment.spec.ts', // replaces that slot to prove the refusal
   'packages/testing/src/disclosure-guard.ts',
   'scripts/credential-fetch.test.mjs', // replaces Node's global dispatcher slot (a symbol key) to prove FU-249
   'scripts/exchange-deadline-rule.test.mjs', // :2054 `Math.constructor(...)` on a builtin, as test data

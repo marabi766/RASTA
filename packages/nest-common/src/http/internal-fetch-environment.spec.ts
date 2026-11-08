@@ -73,20 +73,8 @@ describe('internalFetch in an altered runtime (FU-249)', () => {
     expect(received).toEqual([]);
   });
 
-  it('sends nothing through a replaced global dispatcher', async () => {
-    const slot = Symbol.for('undici.globalDispatcher.1');
-    const transport = jest.fn<Promise<Response>, Parameters<typeof fetch>>();
-    Object.defineProperty(globalThis, slot, { value: capturing, configurable: true });
-    try {
-      await expect(
-        internalFetch(origin, { headers: { 'x-internal-token': TOKEN } }, transport),
-      ).rejects.toBeInstanceOf(CredentialEnvironmentRefusedError);
-    } finally {
-      delete (globalThis as Record<symbol, unknown>)[slot];
-    }
-    expect(transport).not.toHaveBeenCalled();
-  });
-
+  // A replaced global dispatcher: Node's slot is the host's under jest, so that
+  // case is proven where it is real, in scripts/credential-fetch.test.mjs.
   it('still sends, token and body, through an unaltered runtime', async () => {
     const response = await internalFetch(origin, {
       method: 'POST',
