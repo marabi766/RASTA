@@ -10,7 +10,7 @@ import {
   type ReadResult,
   type TransactionListQuery,
 } from '@/server/wallet';
-import { readWalletReleaseFeedback } from '@/server/wallet-release-feedback';
+import { readReleaseFeedback } from '@/server/release-feedback';
 import { restoreTopUp } from '@/server/top-up-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { WalletScreen } from './WalletScreen';
@@ -91,12 +91,7 @@ export default async function WalletPage({
         topUpState={topUp}
         releaseOutcome={
           wallet.kind === 'OK'
-            ? readWalletReleaseFeedback(
-                session,
-                wallet.data.id,
-                params.release,
-                topUp?.kind === 'IDLE',
-              )
+            ? readReleaseFeedback(session, wallet.data.id, params.release, topUp?.kind === 'IDLE')
             : undefined
         }
       />

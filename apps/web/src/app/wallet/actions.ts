@@ -23,16 +23,10 @@ import {
   requestDigest,
   settleUnresolved,
 } from '@/server/unresolved-request';
-import { pageHref } from '@/server/page-context';
-import { walletReleaseFeedback } from '@/server/wallet-release-feedback';
+import { settleRelease } from '@/server/release-feedback';
 import { isProvenRefusal } from '@/server/write';
 
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-  type TopUpFormState,
-} from './form-state';
+import type { TopUpFormState } from './form-state';
 
 /**
  * `/wallet`'s one server action.
@@ -157,10 +151,11 @@ async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpForm
 export async function releaseUnresolvedTopUp(walletId: string, form: FormData): Promise<void> {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/wallet');
-  if (!verifyCsrf(session, form).ok) redirect('/wallet');
-  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/wallet');
-  const outcome = await releaseUnresolved(session, topUpScope(walletId), form.get(RELEASE_FIELD));
-  redirect(
-    pageHref(session, '/wallet', { release: walletReleaseFeedback(session, walletId, outcome) }),
-  );
+  return settleRelease({
+    session,
+    form,
+    back: '/wallet',
+    subject: walletId,
+    release: (current, token) => releaseUnresolved(current, topUpScope(walletId), token),
+  });
 }
