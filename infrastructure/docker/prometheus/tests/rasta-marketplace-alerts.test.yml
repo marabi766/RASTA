@@ -105,29 +105,305 @@ tests:
         alertname: RastaMarketplaceSagaNoLiveWorker
         exp_alerts: []
 
-  - interval: 1h
+  # #792 r1 F2: one settlement past the hour bounces RECEIPT_CONFIRMED <-> SETTLING
+  # (retries) every two minutes. The episode is the same, so the replica keeps
+  # counting it overdue: the one alert, with no reason label, fires at 7m and
+  # stays firing through every handoff, never pending again (the per-reason
+  # alert of r1 reset its 5m at each one). It clears once the order settles.
+  - interval: 1m
     input_series:
-      # Hourly rounds on one replica, then the release is confirmed.
-      - series: 'rasta_marketplace_saga_release_unconfirmed_total{service="marketplace-service",instance="replica-1"}'
-        values: '0 0 1 2 3 3 3 3 3'
-      # Another replica restarts after that: a reset is not a round.
-      - series: 'rasta_marketplace_saga_release_unconfirmed_total{service="marketplace-service",instance="replica-2"}'
-        values: '4 4 4 4 4 4 4 0 0'
+      - series: 'rasta_marketplace_saga_unresolved_overdue{service="marketplace-service",instance="replica-1"}'
+        values: '0 0 1x30 0x5'
+      - series: 'rasta_marketplace_saga_unresolved_orders{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
+        values: '0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0x5'
+      - series: 'rasta_marketplace_saga_unresolved_orders{service="marketplace-service",instance="replica-1",reason="RECEIPT_CONFIRMED"}'
+        values: '0 0 0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1 0 0 0x5'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
+        values: '3600+60x32 0x5'
     alert_rule_test:
-      - eval_time: 1h
-        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+      - eval_time: 6m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
         exp_alerts: []
-      - eval_time: 4h
-        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+      - eval_time: 7m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
         exp_alerts:
           - exp_labels:
               severity: critical
             exp_annotations:
-              summary: A decided dispute's release is unconfirmed
-              description: economic-service has not confirmed a dispute release, so the obligation stays DISPUTED and its funds held. The saga keeps trying; the log names the order.
-              runbook: docs/runbooks/marketplace-saga-deploy.md
-      - eval_time: 8h
-        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 8m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 12m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 13m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 24m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 32m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 33m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts: []
+
+  # A cancellation of an order whose hold is unconfirmed: PENDING -> CANCELLING
+  # at 10m, refund still owed. Firing before, at and after the handoff.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unresolved_overdue{service="marketplace-service",instance="replica-1"}'
+        values: '0 1x20 0x3'
+      - series: 'rasta_marketplace_saga_unresolved_orders{service="marketplace-service",instance="replica-1",reason="PENDING"}'
+        values: '0 1x9 0x13'
+      - series: 'rasta_marketplace_saga_unresolved_orders{service="marketplace-service",instance="replica-1",reason="CANCELLING"}'
+        values: '0x10 1x10 0x3'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 10m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 11m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 21m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 22m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts: []
+
+  # A decided dispute's release overdue (DISPUTE_RELEASE), then released at 13m
+  # while the settlement it unblocked is itself overdue (the order went
+  # RECEIPT_CONFIRMED at the decision): the alert neither clears nor re-pends.
+  # Then a second release, owed on a later dispute, overdue alongside (count 2):
+  # still the same instance.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unresolved_overdue{service="marketplace-service",instance="replica-1"}'
+        values: '0 1x11 1x8 2x6 0x3'
+      - series: 'rasta_marketplace_saga_unresolved_orders{service="marketplace-service",instance="replica-1",reason="DISPUTE_RELEASE"}'
+        values: '0 1x11 0x8 1x6 0x3'
+      - series: 'rasta_marketplace_saga_unresolved_orders{service="marketplace-service",instance="replica-1",reason="RECEIPT_CONFIRMED"}'
+        values: '0x12 1x14 0x3'
+      - series: 'rasta_marketplace_saga_unresolved_orders{service="marketplace-service",instance="replica-1",reason="CANCELLING"}'
+        values: '0x29'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 12m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 13m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 21m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 22m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 28m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 29m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts: []
+
+  # The database clock is set back an hour at 11m. The replica ages against
+  # saga_monitor_clock, which does not run back, so the overdue count holds
+  # (the SQL is proven in saga-unresolved.int-spec.ts). The age gauges are fed
+  # falling here only to show the rule reads none of them: the replica's own
+  # cannot fall, they age against the same reference.
+  # Replica-2 is then withdrawn as stale (a hung read) at 16m: replica-1 is
+  # enough. Both gone at 22m: unknown, still firing with no gap. A reporter
+  # back at 29m with nothing overdue clears it.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unresolved_overdue{service="marketplace-service",instance="replica-1"}'
+        values: '0 1x14 1x5 stale _x6 0x3'
+      - series: 'rasta_marketplace_saga_unresolved_overdue{service="marketplace-service",instance="replica-2"}'
+        values: '0 1x14 stale _x13 0x3'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
+        values: '0 4000x9 400x10 stale _x6 0x3'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-2",reason="SETTLING"}'
+        values: '0 4000x9 400x5 stale _x13 0x3'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 11m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 12m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 16m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 22m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 28m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An unresolved financial episode is over an hour old
+              description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 29m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts: []
+
+  # Never overdue: episodes under the hour, whatever their reasons do. The age
+  # gauge passing 3600 with the count at 0 is a state the replica does not
+  # produce; it is here to show that the rule reads only the count.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unresolved_overdue{service="marketplace-service",instance="replica-1"}'
+        values: '0x20'
+      - series: 'rasta_marketplace_saga_unresolved_orders{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
+        values: '1x20'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
+        values: '3000+60x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
         exp_alerts: []
   - interval: 1h
     input_series:

@@ -81,6 +81,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
     const economic = {
       createObligation: method('createObligation', async () => ({ id: `TXN_${ulid()}` })),
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       authoriseSettlement: method('authoriseSettlement', async () => undefined),
       settle: method('settle', settle),
       refund: method('refund', async () => undefined),
@@ -118,6 +120,9 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     // When the workflow scheduled each activity: fixed at its first attempt
     // and kept by every retry, as Temporal does.
     const scheduled = new Map<number, number>();
+    // Later than the last one, as the workflow schedules one after another: a call
+    // record is owned by the command scheduled last (#836 r1 R1).
+    let last = 0;
     return {
       /** Schedules `activityId` at `at` rather than at its first attempt. */
       schedule(activityId: number, at: number): void {
@@ -128,7 +133,10 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         attempt: number,
         fn: (acts: OrderActivities) => Promise<R>,
       ): Promise<R> {
-        if (!scheduled.has(activityId)) scheduled.set(activityId, Date.now());
+        if (!scheduled.has(activityId)) {
+          last = Math.max(Date.now(), last + 1);
+          scheduled.set(activityId, last);
+        }
         const env = new MockActivityEnvironment({
           workflowExecution: { workflowId: `order-${orderId}`, runId },
           activityId: String(activityId),
@@ -199,6 +207,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
 
     const economic = {
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       createObligation: async (input: { orderId: string }) => {
         calls.push('createObligation');
         obligation.orderId = input.orderId;
@@ -587,8 +597,14 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     );
     const { dispute } = await saga.run(11, 1, (a) => a.readOrder(orderId));
 
-    for (const attempt of [1, 2, 3]) {
+    // Every attempt of a step before the next is scheduled, as the workflow
+    // awaits each: an attempt of a step once a later one owns its call record
+    // is refused before it calls (#836 r1 R1).
+    const attempts = [1, 2, 3];
+    for (const attempt of attempts) {
       await saga.run(4, attempt, (a) => a.authoriseSettlement(orderId, transactionId));
+    }
+    for (const attempt of attempts) {
       // economic-service's identity of the dispute it filed, answered by
       // every attempt from the record of the first.
       await expect(
@@ -596,9 +612,13 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           a.disputeObligation(orderId, transactionId, dispute!.id, 'still not what we ordered'),
         ),
       ).resolves.toBe('TXD_STUB');
+    }
+    for (const attempt of attempts) {
       await saga.run(13, attempt, (a) =>
         a.resolveObligationDispute(orderId, transactionId, dispute!.id, 'refunded'),
       );
+    }
+    for (const attempt of attempts) {
       await saga.run(14, attempt, (a) => a.compensate(orderId, transactionId, 'refunded'));
     }
 
@@ -955,7 +975,10 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     describe('the record of the release it now owes', () => {
       const recordOf = (orderId: string) =>
         runUnscoped('the test reads the record the step left', () =>
-          prisma.client.sagaUnconfirmedCall.findMany({ where: { orderId } }),
+          // The release's record; the hold has its own (#836 r1 R2a).
+          prisma.client.sagaUnconfirmedCall.findMany({
+            where: { orderId, operation: 'resolveObligationDispute' },
+          }),
         );
 
       it('is written with the dispute, under the buyer, and a retry does not reopen it', async () => {

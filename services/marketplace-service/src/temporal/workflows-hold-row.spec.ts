@@ -1,10 +1,16 @@
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
-import { ApplicationFailure } from '@temporalio/activity';
+import { ApplicationFailure, Context } from '@temporalio/activity';
 import type { WorkflowHandle } from '@temporalio/client';
 import { RastaError } from '@rasta/nest-common';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
-import { createActivities, type OrderActivities } from './activities';
+import { eventually as askUntil, signalling, stopQuietly } from '../../test/legacy-handoff';
+import { currentDeadline, runBounded, SETTLE_MS } from '../../test/worker-deadline';
+import {
+  createActivities,
+  ECONOMIC_HOLD_RULE_UNCONFIRMED,
+  type OrderActivities,
+} from './activities';
 import {
   HOLD_DEADLINE_PASSED,
   HOLD_FENCE,
@@ -30,7 +36,15 @@ import type { EconomicClient } from '../economic/economic.client';
  * spec against PostgreSQL (`order-hold-fence.int-spec.ts`).
  */
 
-jest.setTimeout(120_000);
+/**
+ * What the worker runs of one test may take, all of them together (FU-214):
+ * no less than jest's whole test took before, and inside jest's timeout, with
+ * room to stop what the test started.
+ */
+const TEST_BUDGET_MS = 120_000;
+jest.setTimeout(TEST_BUDGET_MS + 60_000);
+/** How long, at least, a saga is given to come quiet before it is terminated. */
+const QUIET_FLOOR_MS = SETTLE_MS / 4;
 
 const INPUT: OrderSagaInput = {
   orderId: 'ORD_ROW',
@@ -53,9 +67,37 @@ interface Row {
 }
 type Sent = { holdNotAfter?: string };
 
+/** The hold's call record (#836, FU-145), as `openSagaCall`/`confirmSagaCall` keep it. */
+interface CallRecord {
+  open: boolean;
+  generation: number;
+  /** The row's count of sends at each opening. */
+  openedAtClaims: number[];
+}
+const freshRecord = (): CallRecord => ({ open: false, generation: 0, openedAtClaims: [] });
+
 /** What the three repository methods do in SQL, over one row, by `now`. */
-function ordersOver(row: Row, now: () => Promise<number> | number) {
+function ordersOver(
+  row: Row,
+  now: () => Promise<number> | number,
+  record: CallRecord = freshRecord(),
+) {
   return {
+    openSagaCall: async () => {
+      const started = !record.open;
+      record.open = true;
+      record.generation += 1;
+      record.openedAtClaims.push(row.claims);
+      return { generation: record.generation, started };
+    },
+    confirmSagaCall: async (
+      _o: unknown,
+      _operation: unknown,
+      _subject: unknown,
+      opening: { generation: number },
+    ) => {
+      if (opening.generation === record.generation) record.open = false;
+    },
     describe: async () => ({
       id: INPUT.orderId,
       status: row.status,
@@ -119,16 +161,19 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
       throw refuse(BROKE);
     },
     attempt = 1,
+    record: CallRecord = freshRecord(),
+    advertises: () => Promise<boolean> = async () => true,
   ) {
     const sent: Sent[] = [];
     const activities = createActivities({
-      orders: ordersOver(row, () => 0) as unknown as OrderService,
+      orders: ordersOver(row, () => 0, record) as unknown as OrderService,
       economic: {
         createObligation: async (input: Sent) => {
           sent.push(input);
           return send(input);
         },
         readObligation: async () => ({ status: 'HELD', heldProven: true }),
+        requiresOrderHoldDeadline: advertises,
       } as unknown as EconomicClient,
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
       currentAttempt: () => attempt,
@@ -215,6 +260,231 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
     expect(row.closed).toBe(false);
   });
 
+  /**
+   * #836 with #812: the call record opens once the row has counted the send, and closes on
+   * a refusal only where both rules hold: the row's proof (first attempt, first send ever,
+   * the sends now shut) and the record's (it began here; economic-service's own refusal
+   * that held nothing, under its own status).
+   */
+  describe('the call record (#836, FU-145)', () => {
+    /** economic-service's own refusal before any effect, as the client reports it. */
+    const ownRefusal = () =>
+      new RastaError(BROKE as never, 'refused', {
+        internalContext: { operation: 'x', status: 422 },
+      });
+
+    it('the first send there has ever been, refused before any effect: opened after the claim, then confirmed', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities } = activity(
+        row,
+        () => {
+          expect(record.open).toBe(true);
+          throw ownRefusal();
+        },
+        1,
+        record,
+      );
+      const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(caught).toMatchObject({ type: BROKE, details: [REFUSED_ON_FIRST_ATTEMPT] });
+      expect(row.closed).toBe(true);
+      expect(record).toMatchObject({ open: false, openedAtClaims: [1] });
+    });
+
+    it('a refusal the row proves but that is not economic-service’s own: the record stays open', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities } = activity(row, undefined, 1, record);
+      await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(row.closed).toBe(true);
+      expect(record.open).toBe(true);
+    });
+
+    it.each([
+      [
+        'a replacement run (an earlier send counted)',
+        { holdNotAfter: EARLIER, claims: 1 },
+        PROPOSED,
+        1,
+      ],
+      ['a later attempt', {}, PROPOSED, 2],
+      ['a round from before the fence', {}, undefined, 1],
+    ] as const)(
+      '%s: economic-service’s own refusal leaves the record open',
+      async (_name, over, proposed, attempt) => {
+        const row = freshRow(over);
+        const record = freshRecord();
+        const { activities } = activity(
+          row,
+          () => {
+            throw ownRefusal();
+          },
+          attempt,
+          record,
+        );
+        const caught = await failure(activities.createObligation(INPUT.orderId, proposed));
+        expect(caught.details ?? []).toEqual([]);
+        expect(record.open).toBe(true);
+      },
+    );
+
+    it('an earlier record still open: this refusal began nothing, and confirms nothing', async () => {
+      const row = freshRow();
+      const record: CallRecord = { open: true, generation: 3, openedAtClaims: [0] };
+      const { activities } = activity(
+        row,
+        () => {
+          throw ownRefusal();
+        },
+        1,
+        record,
+      );
+      await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(record).toMatchObject({ open: true, generation: 4 });
+    });
+
+    it('a deadline refusal leaves the record open: a send claimed before it may still land', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities } = activity(
+        row,
+        () => {
+          throw new RastaError(HOLD_DEADLINE_PASSED as never, 'past it', {
+            internalContext: { operation: 'x', status: 422 },
+          });
+        },
+        1,
+        record,
+      );
+      const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(caught.type).toBe(HOLD_DEADLINE_PASSED);
+      expect(record.open).toBe(true);
+    });
+
+    it.each([
+      ['its sends closed', { claims: 1, closed: true }],
+      ['the order closed', { status: 'FAILED' }],
+    ] as const)('a row with %s sends nothing and opens no record', async (_name, over) => {
+      const row = freshRow(over);
+      const record = freshRecord();
+      const { activities, sent } = activity(row, undefined, 1, record);
+      await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(sent).toEqual([]);
+      expect(record).toEqual(freshRecord());
+    });
+
+    it('a proven refusal, then an older run: the confirmed record is not reopened', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const refusing = () => {
+        throw ownRefusal();
+      };
+      await failure(
+        activity(row, refusing, 1, record).activities.createObligation(INPUT.orderId, PROPOSED),
+      );
+      expect(record.open).toBe(false);
+      const older = activity(row, refusing, 1, record);
+      const caught = await failure(older.activities.createObligation(INPUT.orderId, EARLIER));
+      expect(caught.type).toBe(HOLD_SENDS_CLOSED);
+      expect(record).toMatchObject({ open: false, generation: 1 });
+    });
+
+    /**
+     * #836 with #948 (FU-233, D-150/D-154): the row is proof only on economic-service's
+     * explicit yes, asked again after the send. Where it is not had then, the refusal is not
+     * proof, so the record is not confirmed, even for economic-service's own refusal on the
+     * first send there has ever been.
+     */
+    it.each([
+      ['its explicit no', async (): Promise<boolean> => false, false],
+      [
+        'no answer',
+        async (): Promise<boolean> => {
+          throw new Error('timed out');
+        },
+        true,
+      ],
+    ] as const)(
+      'the rule after the send is %s: economic-service’s own refusal leaves the record open',
+      async (_name, after, rowClosed) => {
+        const row = freshRow();
+        const record = freshRecord();
+        let asked = 0;
+        const { activities, sent } = activity(
+          row,
+          () => {
+            throw ownRefusal();
+          },
+          1,
+          record,
+          async () => ((asked += 1) === 1 ? true : after()),
+        );
+        const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+        expect(sent).toHaveLength(1);
+        expect(caught.details ?? []).toEqual([]);
+        expect(row.closed).toBe(rowClosed);
+        expect(record).toMatchObject({ open: true, generation: 1, openedAtClaims: [1] });
+      },
+    );
+
+    it('the rule not had before the send: nothing sent, no record opened', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities, sent } = activity(row, undefined, 1, record, async () => false);
+      const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(caught.type).toBe(ECONOMIC_HOLD_RULE_UNCONFIRMED);
+      expect(sent).toEqual([]);
+      expect(record).toEqual(freshRecord());
+    });
+
+    it('a row kept closed with the rule unanswered, then a yes: the next attempt sends nothing and the record stays open', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      let asked = 0;
+      const first = activity(
+        row,
+        () => {
+          throw ownRefusal();
+        },
+        1,
+        record,
+        async () => {
+          if ((asked += 1) > 1) throw new Error('timed out');
+          return true;
+        },
+      );
+      await failure(first.activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(row.closed).toBe(true);
+      const next = activity(row, undefined, 2, record);
+      const ended = await failure(next.activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(next.sent).toEqual([]);
+      expect(ended.type).toBe(HOLD_SENDS_CLOSED);
+      expect(record).toMatchObject({ open: true, generation: 1 });
+    });
+
+    it('answered: the record the send opened is confirmed', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities } = activity(row, () => ({ id: 'TXN' }), 1, record);
+      await expect(activities.createObligation(INPUT.orderId, PROPOSED)).resolves.toEqual({
+        transactionId: 'TXN',
+      });
+      expect(record).toMatchObject({ open: false, generation: 1, openedAtClaims: [1] });
+    });
+
+    it('answered without a send (the id already on the order): an earlier open record is confirmed', async () => {
+      const row = freshRow({ economicTransactionId: 'TXN', claims: 1 });
+      const record: CallRecord = { open: true, generation: 1, openedAtClaims: [1] };
+      const { activities, sent } = activity(row, undefined, 2, record);
+      await expect(activities.createObligation(INPUT.orderId, PROPOSED)).resolves.toEqual({
+        transactionId: 'TXN',
+      });
+      expect(sent).toEqual([]);
+      expect(record).toMatchObject({ open: false, generation: 2 });
+      expect(row.claims).toBe(1);
+    });
+  });
+
   it('the row cannot record the proof: no proof, and the retry stays in doubt', async () => {
     const row = freshRow();
     const orders = {
@@ -229,6 +499,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
         createObligation: async () => {
           throw refuse(BROKE);
         },
+        requiresOrderHoldDeadline: async () => true,
       } as unknown as EconomicClient,
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
       currentAttempt: () => 1,
@@ -237,6 +508,196 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
     expect(caught.details ?? []).toEqual([]);
     expect(row.closed).toBe(false);
   });
+
+  /**
+   * FU-233: the row is proof only while economic-service says it refuses a send no row
+   * counted (D-150). Its release before the rule does not say it (`heldProven` alone), and
+   * an answer that does not come is no yes either.
+   */
+  const UNCONFIRMED: [string, () => Promise<boolean>][] = [
+    ['economic-service before D-150 does not say it', async () => false],
+    [
+      'the capability cannot be read',
+      async () => {
+        throw new Error('unreadable');
+      },
+    ],
+  ];
+
+  it.each(UNCONFIRMED)('%s: no hold is sent, nothing counted, no proof', async (_n, advertises) => {
+    const row = freshRow();
+    const { activities, sent } = activity(row, undefined, 1, freshRecord(), advertises);
+    const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(sent).toEqual([]);
+    // Not retried within this scheduling (#948 r1, F1): a retry's send would be a later
+    // attempt's, whose refusal is no proof. The saga's next round sends on a first attempt.
+    expect(caught).toMatchObject({ type: ECONOMIC_HOLD_RULE_UNCONFIRMED, nonRetryable: true });
+    expect(caught.details ?? []).toEqual([]);
+    expect(row).toMatchObject({ claims: 0, holdNotAfter: null, closed: false });
+  });
+
+  it.each(UNCONFIRMED)('%s: an empty row does not say no hold can land', async (_n, advertises) => {
+    const row = freshRow();
+    const { activities } = activity(row, undefined, 1, freshRecord(), advertises);
+    await expect(activities.noHoldCanLand(INPUT.orderId)).resolves.toBe(false);
+    expect(row.closed).toBe(false);
+  });
+
+  it('a closed order’s row, on economic-service’s explicit no, reads as from before the fence', async () => {
+    const row = freshRow({ status: 'CANCELLED', holdNotAfter: EARLIER, claims: 1, closed: true });
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => false);
+    await expect(activities.readOrder(INPUT.orderId)).resolves.toMatchObject({
+      status: 'CANCELLED',
+      holdNotAfter: null,
+      holdSendsClosed: false,
+      holdMayHaveSent: true,
+    });
+    const trusted = activity(row);
+    await expect(trusted.activities.readOrder(INPUT.orderId)).resolves.toMatchObject({
+      holdNotAfter: EARLIER,
+      holdSendsClosed: true,
+    });
+  });
+
+  it('a closed order’s row, with no answer: the read waits for one, and a blip changes nothing', async () => {
+    const row = freshRow({ status: 'FAILED', claims: 1, closed: true });
+    let down = true;
+    let asked = 0;
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => {
+      asked += 1;
+      if (down) throw new Error('timed out');
+      return true;
+    });
+    await expect(failure(activities.readOrder(INPUT.orderId))).resolves.toMatchObject({
+      type: ECONOMIC_HOLD_RULE_UNCONFIRMED,
+      nonRetryable: false,
+    });
+    // Asked again within the read before it gives up (review of #948 r1, F1).
+    expect(asked).toBe(3);
+    down = false;
+    await expect(activities.readOrder(INPUT.orderId)).resolves.toMatchObject({
+      holdSendsClosed: true,
+      holdMayHaveSent: true,
+    });
+  });
+
+  it('a closed order’s row, one blip: asked again within the read, which answers', async () => {
+    const row = freshRow({ status: 'FAILED', claims: 1, closed: true });
+    let asked = 0;
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => {
+      if ((asked += 1) === 1) throw new Error('timed out');
+      return true;
+    });
+    await expect(activities.readOrder(INPUT.orderId)).resolves.toMatchObject({
+      holdSendsClosed: true,
+    });
+  });
+
+  it.each([
+    ['an open order', freshRow({ claims: 1, closed: true })],
+    [
+      'an order with its obligation',
+      freshRow({ status: 'CANCELLED', economicTransactionId: 'T', closed: true }),
+    ],
+    ['a closed order whose row proves nothing', freshRow({ status: 'FAILED', claims: 1 })],
+  ])('%s: read as it is, without asking', async (_n, row) => {
+    let asked = 0;
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => {
+      asked += 1;
+      return false;
+    });
+    await expect(activities.readOrder(INPUT.orderId)).resolves.toMatchObject({
+      holdSendsClosed: row.closed,
+    });
+    expect(asked).toBe(0);
+  });
+
+  it('a blip before the send is asked again: the first send still goes on attempt 1, its refusal proof', async () => {
+    const row = freshRow();
+    let answers = 0;
+    const { activities, sent } = activity(row, undefined, 1, freshRecord(), async () => {
+      if ((answers += 1) === 1) throw new Error('timed out');
+      return true;
+    });
+    const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(sent).toHaveLength(1);
+    expect(caught).toMatchObject({ type: BROKE, details: [REFUSED_ON_FIRST_ATTEMPT] });
+    expect(row.closed).toBe(true);
+  });
+
+  it.each([
+    ['its first refusal', BROKE],
+    ['the fence’s refusal', HOLD_DEADLINE_PASSED],
+  ])('the rule gone while the send was out: %s is no proof', async (_n, code) => {
+    const row = freshRow();
+    let asked = 0;
+    const { activities, sent } = activity(
+      row,
+      () => {
+        throw refuse(code);
+      },
+      1,
+      freshRecord(),
+      async () => (asked += 1) === 1,
+    );
+    const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(sent).toHaveLength(1);
+    expect(caught.details ?? []).toEqual([]);
+    expect(row.closed).toBe(false);
+  });
+
+  /**
+   * Review of #948 r1, F1: a refusal that is proof once the rule says yes. Unanswered after
+   * the send, the proof is kept on the row (closed), and decided by the next yes, never lost.
+   */
+  it('its first refusal, the rule unanswered after the send: the row keeps the proof, and the next attempt ends on it without sending', async () => {
+    const row = freshRow();
+    let asked = 0;
+    const { activities, sent } = activity(row, undefined, 1, freshRecord(), async () => {
+      if ((asked += 1) > 1) throw new Error('timed out');
+      return true;
+    });
+    const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(sent).toHaveLength(1);
+    // Not proof yet: the workflow waits, as for any refusal it cannot take at its word.
+    expect(caught.details ?? []).toEqual([]);
+    expect(row).toMatchObject({ claims: 1, closed: true });
+
+    const next = activity(row, undefined, 2);
+    const ended = await failure(next.activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(next.sent).toEqual([]);
+    expect(ended).toMatchObject({ type: HOLD_SENDS_CLOSED, details: [HOLD_SENDS_CLOSED] });
+  });
+
+  it('its first refusal, the rule unanswered after the send and then its explicit no: the kept proof decides nothing', async () => {
+    const row = freshRow();
+    let asked = 0;
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => {
+      if ((asked += 1) > 1) throw new Error('timed out');
+      return true;
+    });
+    await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(row.closed).toBe(true);
+
+    const refused = activity(row, undefined, 1, freshRecord(), async () => false);
+    const caught = await failure(refused.activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(refused.sent).toEqual([]);
+    expect(caught).toMatchObject({ type: ECONOMIC_HOLD_RULE_UNCONFIRMED });
+    expect(caught.details ?? []).toEqual([]);
+    await expect(refused.activities.noHoldCanLand(INPUT.orderId)).resolves.toBe(false);
+  });
+
+  it('a later attempt’s refusal, the rule unanswered: nothing is kept, the sends stay open', async () => {
+    // The first claim there has been, on attempt 2: only the attempt keeps this from proof.
+    const row = freshRow();
+    let asked = 0;
+    const { activities } = activity(row, undefined, 2, freshRecord(), async () => {
+      if ((asked += 1) > 1) throw new Error('timed out');
+      return true;
+    });
+    await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(row).toMatchObject({ claims: 1, closed: false });
+  });
 });
 
 describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
@@ -244,9 +705,23 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
   let workflowBundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
   let queues = 0;
 
+  /** Set when a test may have stalled the server's clock: the next test gets a new one. */
+  let stalled = false;
+  let budgetEndsAt = 0;
+
   beforeAll(async () => {
     workflowBundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
     env = await createTemporalTestEnvironment();
+  }, 300_000);
+  beforeEach(async () => {
+    if (stalled) {
+      // The new one first: `env` never names a server already torn down.
+      const fresh = await createTemporalTestEnvironment();
+      await env.teardown();
+      env = fresh;
+      stalled = false;
+    }
+    budgetEndsAt = Date.now() + TEST_BUDGET_MS;
   }, 300_000);
   afterAll(async () => {
     await env?.teardown();
@@ -266,6 +741,7 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
     row: Row,
     overrides: Record<string, Fn> = {},
     holds: (input: Sent) => Promise<unknown> = emptyWallet,
+    advertises: () => Promise<boolean> = async () => true,
   ) {
     const calls: string[] = [];
     const sent: Sent[] = [];
@@ -280,6 +756,7 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
           return holds(input);
         },
         readObligation: async () => ({ status: 'HELD', heldProven: true }),
+        requiresOrderHoldDeadline: advertises,
       } as unknown as EconomicClient,
     });
     const close = (to: string) => async () => {
@@ -328,53 +805,63 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
       workflowBundle,
       activities,
     });
-    return running.runUntil(async () => {
-      const handle = await env.client.workflow.start(orderSaga, {
-        taskQueue,
-        workflowId: taskQueue,
-        args: [{ ...INPUT, ...input }],
-      });
-      try {
-        return await body(handle);
-      } finally {
+    // Under what is left of the test's budget (FU-214): every wait and SDK call
+    // in `body` ends with it, and `body` is awaited before the worker stops.
+    const ms = Math.max(budgetEndsAt - Date.now(), 0);
+    return runBounded(
+      running,
+      { what: 'the test to drive the saga', ms, connection: env.connection },
+      async (deadline) => {
+        const latest = env.client.workflow.getHandle(taskQueue);
+        let result: T;
+        try {
+          const handle = signalling(
+            env,
+            await env.client.workflow.start(orderSaga, {
+              taskQueue,
+              workflowId: taskQueue,
+              args: [{ ...INPUT, ...input }],
+            }),
+          );
+          result = await body(handle);
+        } catch (error) {
+          // Cut off, an awaited result may have left the clock unlocked, and
+          // what follows must fit in the settle window; otherwise the saga gets
+          // what is left of the budget to come quiet, as on success.
+          const cutOff = deadline.signal.aborted;
+          if (cutOff) stalled = true;
+          const window = cutOff
+            ? QUIET_FLOOR_MS
+            : Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+          if ((await stopQuietly(env.connection, latest, window, QUIET_FLOOR_MS)) !== undefined) {
+            stalled = true;
+          }
+          throw error;
+        }
         // Not with an activity running: the test server would not skip time again.
-        await atRest(handle).catch(() => undefined);
-        await handle.terminate('test finished').catch(() => undefined);
-      }
-    });
+        const window = Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+        const loud = await stopQuietly(env.connection, latest, window, QUIET_FLOOR_MS);
+        if (loud !== undefined) {
+          stalled = true;
+          throw new Error(`${loud}: stopped with an activity in flight`);
+        }
+        return result;
+      },
+    );
   }
 
-  async function eventually(predicate: () => boolean | Promise<boolean>, what: string) {
-    for (let i = 0; i < 800; i += 1) {
-      if (await predicate()) return;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    throw new Error(`Timed out waiting for ${what}`);
-  }
-  async function atRest(handle: WorkflowHandle) {
-    await eventually(async () => {
-      if ((await handle.describe()).status.name !== 'RUNNING') return true;
-      const last = (await handle.fetchHistory()).events?.at(-1);
-      return Boolean(
-        last?.timerStartedEventAttributes ??
-        last?.timerCanceledEventAttributes ??
-        last?.workflowTaskCompletedEventAttributes,
-      );
-    }, 'the saga to come to rest');
-  }
+  /** Asks until `predicate` holds, under the run's deadline; refused outside a run (FU-214). */
+  const eventually = (predicate: () => boolean | Promise<boolean>, what: string): Promise<void> =>
+    askUntil(currentDeadline(what), async () => predicate(), what);
   const phase = async (handle: WorkflowHandle) =>
     (await handle.query<SagaStatus, []>('status')).phase;
-  async function resultOf(handle: WorkflowHandle): Promise<unknown> {
-    let timer: NodeJS.Timeout | undefined;
-    const stuck = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('The saga did not end')), 90_000);
-    });
-    try {
-      return await Promise.race([handle.result(), stuck]);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
+  /**
+   * `handle.result()`: the run's deadline ends it, and the body is awaited
+   * before the worker stops (FU-214); outside a run it is refused.
+   */
+  const resultOf = (handle: WorkflowHandle): Promise<unknown> =>
+    currentDeadline('the saga to end').call(() => handle.result());
+
   /** The row of a run whose first send was `ago`, its answer never heard, then reset. */
   const leftBy = async (over: Partial<Row> = {}, ago = 60_000) => {
     const holdNotAfter = holdDeadlineFrom((await env.currentTimeMs()) - ago);
@@ -484,6 +971,54 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
     expect(s.rounds).toEqual([]);
     expect(row).toMatchObject({ claims: 1, closed: true });
     expect(s.calls).not.toContain('noHoldCanLand');
+  });
+
+  /**
+   * Review of #948 r1, F1 (FU-233): the first send's refusal is proof once economic-service
+   * has said yes before it. A capability question that then goes unanswered only delays that
+   * proof: it does not leave the order waiting out the deadline and margin.
+   */
+  it('a first run, its first send refused and the rule unanswered right after: the order still closes before the deadline', async () => {
+    const row = freshRow();
+    let blip = false;
+    const s = saga(
+      row,
+      {
+        noteEconomicCallUnconfirmed: (_id: never, operation: never, _r: never, words: never) => {
+          blip = false;
+          s.rounds.push(`${String(operation)}: ${String(words)}`);
+        },
+      },
+      async (input) => {
+        blip = true;
+        return emptyWallet(input);
+      },
+      async () => {
+        if (blip) throw new Error('timed out');
+        return true;
+      },
+    );
+    const started = await env.currentTimeMs();
+    await expect(drive(s, resultOf)).resolves.toBe('FAILED');
+    expect(s.closedAt[0] - started).toBeLessThan(HOLD_FENCE.clockMarginMs);
+    expect(s.sent).toHaveLength(1);
+    expect(row).toMatchObject({ claims: 1, closed: true });
+  });
+
+  it('a first run, the rule unanswered before its first send: the send still goes on a first attempt, and its refusal closes the order', async () => {
+    const row = freshRow();
+    const s = saga(row, {}, emptyWallet, async () => {
+      // Unanswered on the first scheduling's first attempt only: back by its retry.
+      if (Context.current().info.attempt === 1 && s.sent.length === 0 && s.rounds.length === 0) {
+        throw new Error('connection refused');
+      }
+      return true;
+    });
+    const started = await env.currentTimeMs();
+    await expect(drive(s, resultOf)).resolves.toBe('FAILED');
+    expect(s.closedAt[0] - started).toBeLessThan(HOLD_FENCE.clockMarginMs);
+    expect(s.sent).toHaveLength(1);
+    expect(row).toMatchObject({ claims: 1, closed: true });
   });
 
   it('a first run, cancelled as its first send is refused: closes at once, with no doubt', async () => {
@@ -631,6 +1166,8 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
    */
   describe('an older build’s send, on an order this build placed (#812 r3 F1, D-150)', () => {
     function economicService({ fenced = true } = {}) {
+      /** `orderHoldDeadlineRequired`: the release with the rule says it, one before does not. */
+      const advertises = async () => fenced;
       const ledger = { funded: false, held: [] as string[], refunded: [] as string[] };
       let heldWith: string | undefined;
       const holds = async (input: Sent): Promise<{ id: string }> => {
@@ -652,6 +1189,7 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
       return {
         ledger,
         holds,
+        advertises,
         /** What the saga can see of the ledger: the lookup, and the refund. */
         overrides: {
           findObligation: () => {
@@ -733,7 +1271,7 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
       async (_name, rowOf, decides) => {
         const row = await rowOf();
         const economic = economicService();
-        await decides(saga(row, economic.overrides, economic.holds), row);
+        await decides(saga(row, economic.overrides, economic.holds, economic.advertises), row);
 
         expect(await economic.olderBuildsSendLands(row)).toMatchObject({
           code: 'HOLD_DEADLINE_REQUIRED',
@@ -743,14 +1281,67 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
     );
 
     it.each(CONSEQUENCES)(
-      'before D-150, %s, and the older send that lands is held for good',
+      'before D-150, its row taken as proof all the same, %s, and the older send that lands is held for good',
       async (_name, rowOf, decides) => {
         const row = await rowOf();
         const economic = economicService({ fenced: false });
-        await decides(saga(row, economic.overrides, economic.holds), row);
+        // What FU-233 refuses: the row trusted without the rule's yes.
+        await decides(
+          saga(row, economic.overrides, economic.holds, async () => true),
+          row,
+        );
 
         expect(await economic.olderBuildsSendLands(row)).toEqual({ id: 'TXN_OLDER' });
         expect(economic.stranded()).toEqual(['TXN_OLDER']);
+      },
+    );
+
+    /**
+     * Review of #812 r4, N1 trigger (a) (FU-233): economic-service rolled back below D-150
+     * and an older marketplace build sending again without the gate. That release does not
+     * say it refuses an uncounted send, so this build decides nothing on the row and sends
+     * nothing: it waits with the alert on, and the older send that lands is found, then
+     * refunded on a cancelled order or adopted on an open one. Never stranded.
+     */
+    const RESCUES: [string, () => Promise<Row>, 'CANCELLED' | 'FUNDS_HELD'][] = [
+      ['zero count', async () => freshRow(cancelling), 'CANCELLED'],
+      ['first-ever refusal', async () => freshRow(), 'FUNDS_HELD'],
+      ['deadline expiry', async () => (await leftBy()).row, 'FUNDS_HELD'],
+      ['closed-order recovery', async () => freshRow({ status: 'CANCELLED' }), 'CANCELLED'],
+    ];
+    it.each(RESCUES)(
+      'before D-150, which does not say it: %s decides nothing on the row, and the older send that lands is not stranded',
+      async (_name, rowOf, ends) => {
+        const row = await rowOf();
+        const economic = economicService({ fenced: false });
+        const s = saga(
+          row,
+          {
+            ...economic.overrides,
+            markFundsHeld: () => {
+              row.status = 'FUNDS_HELD';
+              return 'FUNDS_HELD';
+            },
+          },
+          economic.holds,
+          economic.advertises,
+        );
+        await drive(s, async (handle) => {
+          await eventually(() => s.rounds.length > 0, 'the wait');
+          expect(row.status).not.toBe('FAILED');
+          expect(await economic.olderBuildsSendLands(row)).toEqual({ id: 'TXN_OLDER' });
+          await handle.signal(retryDisputeRelease);
+          if (ends === 'CANCELLED') {
+            await expect(resultOf(handle)).resolves.toBe('CANCELLED');
+          } else {
+            await eventually(() => s.calls.includes('markFundsHeld'), 'the hold adopted');
+          }
+        });
+        expect(s.sent).toEqual([]);
+        expect(row.closed).toBe(false);
+        expect(row.status).toBe(ends);
+        if (ends === 'CANCELLED') expect(economic.stranded()).toEqual([]);
+        else expect(economic.ledger.refunded).toEqual([]);
       },
     );
 

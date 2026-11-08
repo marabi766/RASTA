@@ -76,7 +76,7 @@ export default tseslint.config(
   {
     // Production source only, as in the services: specs and test helpers
     // build credential sentinels against local fakes.
-    files: [code('src/**/*')],
+    files: [code('src/**/*'), 'next.config.mjs', 'upload-limit.cjs'],
     ignores: ['**/*.spec.{ts,tsx}', 'src/test/**'],
     plugins: { internal },
     rules: {
@@ -84,6 +84,11 @@ export default tseslint.config(
       'internal/raw-http': 'error',
       'internal/exchange-deadline': 'error',
     },
+  },
+  {
+    files: ['next.config.mjs', 'upload-limit.cjs'],
+    languageOptions: { globals: { process: 'readonly' } },
+    rules: { '@typescript-eslint/no-require-imports': 'off' },
   },
   {
     // Live suites aim at an endpoint the environment names, with real

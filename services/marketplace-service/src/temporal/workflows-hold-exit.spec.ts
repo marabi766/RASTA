@@ -1,5 +1,7 @@
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import { eventually as askUntil, signalling, stopQuietly } from '../../test/legacy-handoff';
+import { currentDeadline, runBounded, SETTLE_MS } from '../../test/worker-deadline';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ApplicationFailure } from '@temporalio/activity';
 import type { WorkflowHandle, WorkflowHandleWithFirstExecutionRunId } from '@temporalio/client';
@@ -33,7 +35,15 @@ import {
  * with an empty lookup after it, ends the wait. The saga stays one margin more.
  */
 
-jest.setTimeout(120_000);
+/**
+ * What the worker runs of one test may take, all of them together (FU-214):
+ * no less than jest's whole test took before, and inside jest's timeout, with
+ * room to stop what the test started.
+ */
+const TEST_BUDGET_MS = 120_000;
+jest.setTimeout(TEST_BUDGET_MS + 60_000);
+/** How long, at least, a saga is given to come quiet before it is terminated. */
+const QUIET_FLOOR_MS = SETTLE_MS / 4;
 
 /** From the first send to the first request whose refusal counts. */
 const LIMIT_MS = HOLD_FENCE.sendWindowMs + HOLD_FENCE.clockMarginMs;
@@ -103,9 +113,23 @@ describe('a hold refused after a lost answer (#812)', () => {
   let workflowBundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
   let queues = 0;
 
+  /** Set when a test may have stalled the server's clock: the next test gets a new one. */
+  let stalled = false;
+  let budgetEndsAt = 0;
+
   beforeAll(async () => {
     workflowBundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
     env = await createTemporalTestEnvironment();
+  }, 300_000);
+  beforeEach(async () => {
+    if (stalled) {
+      // The new one first: `env` never names a server already torn down.
+      const fresh = await createTemporalTestEnvironment();
+      await env.teardown();
+      env = fresh;
+      stalled = false;
+    }
+    budgetEndsAt = Date.now() + TEST_BUDGET_MS;
   }, 300_000);
   afterAll(async () => {
     await env?.teardown();
@@ -186,29 +210,54 @@ describe('a hold refused after a lost answer (#812)', () => {
       workflowBundle,
       activities,
     });
-    return running.runUntil(async () => {
-      const handle = await env.client.workflow.start(orderSaga, {
-        taskQueue,
-        workflowId: taskQueue,
-        args: [{ ...INPUT, ...input }],
-      });
-      const latest = env.client.workflow.getHandle(taskQueue);
-      try {
-        return await body(handle, taskQueue);
-      } finally {
-        await atRest(latest).catch(() => undefined);
-        await latest.terminate('test finished').catch(() => undefined);
-      }
-    });
+    // Under what is left of the test's budget (FU-214): every wait and SDK call
+    // in `body` ends with it, and `body` is awaited before the worker stops.
+    const ms = Math.max(budgetEndsAt - Date.now(), 0);
+    return runBounded(
+      running,
+      { what: 'the test to drive the saga', ms, connection: env.connection },
+      async (deadline) => {
+        const latest = env.client.workflow.getHandle(taskQueue);
+        let result: T;
+        try {
+          const handle = signalling(
+            env,
+            await env.client.workflow.start(orderSaga, {
+              taskQueue,
+              workflowId: taskQueue,
+              args: [{ ...INPUT, ...input }],
+            }),
+          );
+          result = await body(handle, taskQueue);
+        } catch (error) {
+          // Cut off, an awaited result may have left the clock unlocked, and
+          // what follows must fit in the settle window; otherwise the saga gets
+          // what is left of the budget to come quiet, as on success.
+          const cutOff = deadline.signal.aborted;
+          if (cutOff) stalled = true;
+          const window = cutOff
+            ? QUIET_FLOOR_MS
+            : Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+          if ((await stopQuietly(env.connection, latest, window, QUIET_FLOOR_MS)) !== undefined) {
+            stalled = true;
+          }
+          throw error;
+        }
+        // Not with an activity running: the test server would not skip time again.
+        const window = Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+        const loud = await stopQuietly(env.connection, latest, window, QUIET_FLOOR_MS);
+        if (loud !== undefined) {
+          stalled = true;
+          throw new Error(`${loud}: stopped with an activity in flight`);
+        }
+        return result;
+      },
+    );
   }
 
-  async function eventually(predicate: () => boolean | Promise<boolean>, what: string) {
-    for (let i = 0; i < 800; i += 1) {
-      if (await predicate()) return;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    throw new Error(`Timed out waiting for ${what}`);
-  }
+  /** Asks until `predicate` holds, under the run's deadline; refused outside a run (FU-214). */
+  const eventually = (predicate: () => boolean | Promise<boolean>, what: string): Promise<void> =>
+    askUntil(currentDeadline(what), async () => predicate(), what);
   async function atRest(handle: WorkflowHandle) {
     await eventually(async () => {
       if ((await handle.describe()).status.name !== 'RUNNING') return true;
@@ -224,18 +273,13 @@ describe('a hold refused after a lost answer (#812)', () => {
     (await handle.query<SagaStatus, []>('status')).phase;
   const phaseIs = (handle: WorkflowHandle, expected: string) =>
     eventually(async () => (await phase(handle)) === expected, `phase ${expected}`);
-  /** `handle.result()`, or a failure a stuck saga cannot hide: it would skip time for good. */
-  async function resultOf(handle: WorkflowHandle): Promise<unknown> {
-    let timer: NodeJS.Timeout | undefined;
-    const stuck = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('The saga did not end')), 60_000);
-    });
-    try {
-      return await Promise.race([handle.result(), stuck]);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
+  /**
+   * `handle.result()`, or a failure a stuck saga cannot hide: it would skip time
+   * for good. The run's deadline ends it, and the body is awaited before the
+   * worker stops (FU-214); outside a run it is refused.
+   */
+  const resultOf = (handle: WorkflowHandle): Promise<unknown> =>
+    currentDeadline('the saga to end').call(() => handle.result());
   const replay = async (handle: WorkflowHandle) =>
     Worker.runReplayHistory({ workflowBundle }, await handle.fetchHistory(), handle.workflowId);
   /** A run continued in the hold's wait, whose first send was `age` ago. */
@@ -979,7 +1023,7 @@ describe('a hold refused after a lost answer (#812)', () => {
       const result = await drive(
         s,
         async (handle, id) => {
-          const latest = env.client.workflow.getHandle(id);
+          const latest = signalling(env, env.client.workflow.getHandle(id));
           await eventually(() => s.calls.includes('markFailed'), 'the exit');
           await atRest(latest);
           for (let i = 0; i < 60; i += 1) {
@@ -989,7 +1033,7 @@ describe('a hold refused after a lost answer (#812)', () => {
             }
             await atRest(latest);
             await latest.signal(retryDisputeRelease);
-            await new Promise((resolve) => setTimeout(resolve, 50));
+            await currentDeadline('the watch to roll over').sleep(50);
           }
           const resume = await inputOf(id, (await latest.describe()).runId);
           expect(resume?.lateHoldWatch?.until).toEqual(expect.any(Number));

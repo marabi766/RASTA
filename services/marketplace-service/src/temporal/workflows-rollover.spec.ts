@@ -1,7 +1,18 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
-import { eventually as askUntil, handOff, queryQuiet } from '../../test/legacy-handoff';
-import { runBounded, type Deadline, type RunsUntil } from '../../test/worker-deadline';
+import {
+  eventually as askUntil,
+  handOff,
+  queryQuiet,
+  stopQuietly,
+} from '../../test/legacy-handoff';
+import {
+  cleanUp,
+  runBounded,
+  SETTLE_MS,
+  type Deadline,
+  type RunsUntil,
+} from '../../test/worker-deadline';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MockActivityEnvironment } from '@temporalio/testing';
@@ -64,6 +75,12 @@ it('step identity isolates runs and stays stable on retry for patched and legacy
   expect((await step('RUN_A', '41')).key).toBe('order-ORD_ROLLOVER/RUN_A/41');
 });
 
+/**
+ * How long, at least, a saga is given to come quiet before it is terminated:
+ * a body cut off at its deadline has {@link SETTLE_MS} for that and the stop.
+ */
+const QUIET_FLOOR_MS = SETTLE_MS / 4;
+
 describe('history rollover on real Temporal', () => {
   let env: TestWorkflowEnvironment;
   let serial = 0;
@@ -76,6 +93,8 @@ describe('history rollover on real Temporal', () => {
   // Every wait inside a worker's callback goes through this deadline (FU-192
   // r2): an unanswered request would otherwise leave the callback pending and
   // the worker running past the test.
+  // Every SDK call in the body carries it, so a test's `finally` stops its
+  // workflow through `cleanUp`, under a deadline of its own (FU-214).
   const bounded = <T>(worker: RunsUntil, body: (deadline: Deadline) => Promise<T>): Promise<T> =>
     runBounded(
       worker,
@@ -192,7 +211,7 @@ describe('history rollover on real Temporal', () => {
           );
         });
       } finally {
-        await handle.terminate();
+        await cleanUp(env.client.connection, () => handle.terminate());
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -279,7 +298,9 @@ describe('history rollover on real Temporal', () => {
         expect(new Set(seen.map((s) => s.run)).size).toBeGreaterThan(1);
         expect(new Set(seen.map((s) => s.id)).size).toBe(seen.length);
       } finally {
-        await env.client.workflow.getHandle(taskQueue).terminate();
+        await cleanUp(env.client.connection, () =>
+          env.client.workflow.getHandle(taskQueue).terminate(),
+        );
       }
     });
   });
@@ -392,7 +413,9 @@ describe('history rollover on real Temporal', () => {
         expect(settle).toHaveBeenCalledTimes(1);
         expect(disputeObligation).not.toHaveBeenCalled();
       } finally {
-        await env.client.workflow.getHandle(taskQueue).terminate();
+        await cleanUp(env.client.connection, () =>
+          env.client.workflow.getHandle(taskQueue).terminate(),
+        );
       }
     });
   });
@@ -452,7 +475,9 @@ describe('history rollover on real Temporal', () => {
         await env.sleep('1 hour');
         expect(disputes).toEqual(['DSP_OLD', 'DSP_NEW']);
       } finally {
-        await env.client.workflow.getHandle(taskQueue).terminate();
+        await cleanUp(env.client.connection, () =>
+          env.client.workflow.getHandle(taskQueue).terminate(),
+        );
       }
     });
   });
@@ -578,7 +603,7 @@ describe('history rollover on real Temporal', () => {
           );
         }
       } finally {
-        await latest.terminate();
+        await cleanUp(env.client.connection, () => latest.terminate());
       }
     });
   });
@@ -685,7 +710,7 @@ describe('history rollover on real Temporal', () => {
           );
         }
       } finally {
-        await latest.terminate();
+        await cleanUp(env.client.connection, () => latest.terminate());
       }
     });
   });
@@ -750,7 +775,7 @@ describe('history rollover on real Temporal', () => {
         expect(resumed).not.toHaveProperty('unconfirmedCall');
         await atRest(taskQueue, deadline);
       } finally {
-        await latest.terminate();
+        await cleanUp(env.client.connection, () => latest.terminate());
       }
     });
   });
@@ -850,7 +875,7 @@ describe('history rollover on real Temporal', () => {
         // A terminated activity would stall the server's clock for the next test.
         await atRest(taskQueue, deadline);
       } finally {
-        await latest.terminate();
+        await cleanUp(env.client.connection, () => latest.terminate());
       }
     });
   });
@@ -934,7 +959,7 @@ describe('history rollover on real Temporal', () => {
         expect((await handle.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
         await atRest(taskQueue, deadline);
       } finally {
-        await handle.terminate();
+        await cleanUp(env.client.connection, () => handle.terminate());
       }
     });
   });
@@ -1036,7 +1061,7 @@ describe('history rollover on real Temporal', () => {
           await handle.signal('retryDisputeRelease');
           expect(await handle.result()).toBe(site.done);
         } finally {
-          await handle.terminate().catch(() => undefined);
+          await cleanUp(env.client.connection, () => handle.terminate()).catch(() => undefined);
         }
       });
     });
@@ -1125,9 +1150,19 @@ describe('history rollover on real Temporal', () => {
             taskQueue,
           );
         }
-      } finally {
-        await handle.terminate().catch(() => undefined);
+      } catch (error) {
+        await stopQuietly(env.client.connection, handle, QUIET_FLOOR_MS);
+        throw error;
       }
+      // From a quiet history (FU-214): terminated with an activity in flight,
+      // the saga stalls this file's one test server for every later test.
+      const loud = await stopQuietly(
+        env.client.connection,
+        handle,
+        4 * QUIET_FLOOR_MS,
+        QUIET_FLOOR_MS,
+      );
+      if (loud !== undefined) throw new Error(`${loud}: stopped with an activity in flight`);
     });
   });
 
@@ -1189,9 +1224,19 @@ describe('history rollover on real Temporal', () => {
         expect(rounds[0]).toBe(5);
         expect(sends).toBe(1);
         expect((await handle.query<SagaStatus>('status')).phase).toBe('HOLD_UNCONFIRMED');
-      } finally {
-        await handle.terminate().catch(() => undefined);
+      } catch (error) {
+        await stopQuietly(env.client.connection, handle, QUIET_FLOOR_MS);
+        throw error;
       }
+      // From a quiet history (FU-214): terminated with an activity in flight,
+      // the saga stalls this file's one test server for every later test.
+      const loud = await stopQuietly(
+        env.client.connection,
+        handle,
+        4 * QUIET_FLOOR_MS,
+        QUIET_FLOOR_MS,
+      );
+      if (loud !== undefined) throw new Error(`${loud}: stopped with an activity in flight`);
     });
   });
 
@@ -1318,7 +1363,7 @@ describe('history rollover on real Temporal', () => {
           );
         }
       } finally {
-        await latest.terminate().catch(() => undefined);
+        await cleanUp(env.client.connection, () => latest.terminate()).catch(() => undefined);
       }
     });
   });
@@ -1502,7 +1547,7 @@ describe('history rollover on real Temporal', () => {
           expect(went[0]).toBe(movedOn ? 'disputeObligation' : 'authoriseSettlement');
           await atRest(taskQueue, deadline);
         } finally {
-          await handle.terminate();
+          await cleanUp(env.client.connection, () => handle.terminate());
         }
       });
     },

@@ -1,11 +1,25 @@
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
-import { handOff, pollWithin, queryQuiet } from '../../test/legacy-handoff';
-import { runBounded } from '../../test/worker-deadline';
+import {
+  eventually as askUntil,
+  handOff,
+  clearOfTimers,
+  queryQuiet,
+  quiet,
+  signalling,
+  stopQuietly as stopWhenQuiet,
+} from '../../test/legacy-handoff';
+import {
+  cleanUp,
+  currentDeadline,
+  runBounded,
+  SETTLE_MS,
+  type Deadline,
+} from '../../test/worker-deadline';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
-import { bundleWorkflowCode, Worker } from '@temporalio/worker';
+import { bundleWorkflowCode, Worker, type WorkflowBundle } from '@temporalio/worker';
 import { ERROR_STATUS } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
-import { ApplicationFailure } from '@temporalio/activity';
+import { ApplicationFailure, Context } from '@temporalio/activity';
 import {
   ActivityFailure,
   CancelledFailure,
@@ -51,8 +65,6 @@ import type { OrderService } from '../order/order.service';
  * {@link Party.silently} commits without the signal, which is how a lost
  * signal is reproduced.
  */
-
-jest.setTimeout(120_000);
 
 const INPUT: OrderSagaInput = {
   orderId: 'ORD_TEST',
@@ -264,36 +276,46 @@ function recordingActivities(order: FakeOrder, overrides: Partial<OrderActivitie
   return { calls, rounds, failures, effects, activities };
 }
 
-/** A party acting on the order the way the HTTP layer does: commit, then signal. */
+/**
+ * A party acting on the order the way the HTTP layer does: commit, then
+ * signal. Both only once no timer of the saga's is about to fire
+ * ({@link clearOfTimers}): a timer firing after the commit would let the saga's
+ * own re-read act on it first, and one firing during the signal's task stalls
+ * the test server.
+ */
 class Party {
   constructor(
     private readonly order: FakeOrder,
     private readonly handle: WorkflowHandle,
   ) {}
 
-  async confirm(): Promise<void> {
-    this.order.confirm();
-    await this.handle.signal('orderConfirmed');
+  private async act(command: () => void, signal: string, ...args: unknown[]): Promise<void> {
+    await clearOfTimers(this.handle);
+    command();
+    await this.handle.signal(signal, ...args);
   }
-  async fulfil(): Promise<void> {
-    this.order.fulfil();
-    await this.handle.signal('orderFulfilled');
+
+  confirm(): Promise<void> {
+    return this.act(() => this.order.confirm(), 'orderConfirmed');
   }
-  async confirmReceipt(): Promise<void> {
-    this.order.confirmReceipt();
-    await this.handle.signal('receiptConfirmed');
+  fulfil(): Promise<void> {
+    return this.act(() => this.order.fulfil(), 'orderFulfilled');
   }
-  async dispute(reason: string): Promise<void> {
-    this.order.raiseDispute(reason);
-    await this.handle.signal('orderDisputed', reason);
+  confirmReceipt(): Promise<void> {
+    return this.act(() => this.order.confirmReceipt(), 'receiptConfirmed');
   }
-  async resolve(outcome: 'SETTLE' | 'REFUND', resolution: string): Promise<void> {
-    this.order.resolveDispute(outcome, resolution);
-    await this.handle.signal('disputeResolved', outcome);
+  dispute(reason: string): Promise<void> {
+    return this.act(() => this.order.raiseDispute(reason), 'orderDisputed', reason);
   }
-  async cancel(reason: string): Promise<void> {
-    this.order.cancel(reason);
-    await this.handle.signal('orderCancelled', reason);
+  resolve(outcome: 'SETTLE' | 'REFUND', resolution: string): Promise<void> {
+    return this.act(
+      () => this.order.resolveDispute(outcome, resolution),
+      'disputeResolved',
+      outcome,
+    );
+  }
+  cancel(reason: string): Promise<void> {
+    return this.act(() => this.order.cancel(reason), 'orderCancelled', reason);
   }
 
   /** The command commits, and its signal is lost. */
@@ -302,15 +324,23 @@ class Party {
   }
 }
 
-/** Polls, in real time, until the saga has moved the order where a test needs it. */
 /**
- * How long one drive, or one wait for a result, may take before the test gives
- * up — well inside jest's 120 s, so that a stuck saga is terminated and its
- * worker shut down by `run()` itself. When jest's own timeout fired first, the
- * worker was still running: the next test failed with "Cannot close
- * connection while Workers hold a reference", and every test after it too.
+ * How long the worker runs of one test may take, all of them together: the
+ * drives, the results and every wait inside them. One budget per test and not
+ * one per step, so that a slow step on a loaded runner spends what the others
+ * did not use; and well inside jest's own timeout, which leaves room to stop
+ * what the test started (FU-214). When jest's timeout fired first, the worker
+ * was still running and the next test failed with "Cannot close connection
+ * while Workers hold a reference"; when a step's own timer fired, the drive it
+ * abandoned ran on, and failed later tests with its assertions or, once its
+ * server was torn down, with "Channel has been shut down".
  */
-const STEP_DEADLINE_MS = 45_000;
+const TEST_BUDGET_MS = 90_000;
+jest.setTimeout(TEST_BUDGET_MS + 60_000);
+let budgetEndsAt = 0;
+beforeEach(() => {
+  budgetEndsAt = Date.now() + TEST_BUDGET_MS;
+});
 
 /** The send's own refusal on its first attempt, as the activity marks it: nothing moved. */
 const provenRefusal = (): Error =>
@@ -322,25 +352,16 @@ const provenRefusal = (): Error =>
   });
 
 /**
- * Asks until `predicate` holds, every ask raced against the step deadline: a
- * request that is never answered ends the wait too, with the deadline's error
- * (FU-192 r2).
+ * Asks until `predicate` holds, under the deadline of the run this is called
+ * in: each ask is raced against it, and it ends the wait (FU-192 r2, FU-214).
+ * Called outside a run, it is refused — it would have nothing to end it.
  */
-const eventually = (predicate: () => Promise<boolean>, what: string) =>
-  pollWithin(STEP_DEADLINE_MS, predicate, what);
+const eventually = (predicate: () => Promise<boolean>, what: string): Promise<void> =>
+  askUntil(currentDeadline(what), predicate, what);
 
-/** `promise`, or a rejection naming `what` once `ms` have passed. */
-async function within<T>(ms: number, promise: Promise<T>, what: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Timed out after ${ms} ms waiting for ${what}`)), ms);
-  });
-  try {
-    return await Promise.race([promise, expired]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
+/** {@link eventually} for a condition on what the test itself records. */
+const until = (predicate: () => boolean, what: string): Promise<void> =>
+  askUntil(currentDeadline(what), async () => predicate(), what);
 
 /**
  * The saga has nothing in flight: the last thing it did was arm a timer, or
@@ -359,12 +380,189 @@ async function atRest(handle: WorkflowHandle): Promise<void> {
   }, 'the saga to come to rest');
 }
 
-async function until(predicate: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 400; i += 1) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
+/**
+ * Every activity the saga scheduled has been answered, and it waits on a timer
+ * or on nothing: where a count, a phase or an absence is read after skipping
+ * time. `env.sleep` returns once the server's clock has moved; the rounds its
+ * timers started can still be running on the worker, and a count read then
+ * races them (FU-214).
+ */
+const settled = (handle: WorkflowHandle): Promise<void> =>
+  quiet(handle, currentDeadline('the saga to be quiet'));
+
+/**
+ * An activity held until `release` is called — or until its worker stops,
+ * which cancels it: a held activity that ignored that would keep the worker
+ * from ever shutting down after its test was cut off.
+ */
+function heldUntil(release: (resolve: () => void) => void): Promise<void> {
+  return Promise.race([new Promise<void>(release), Context.current().cancelled]);
+}
+
+/** One bundle of the workflow code for the file: per worker, it cost more than the tests. */
+let workflowBundle: WorkflowBundle;
+beforeAll(async () => {
+  workflowBundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
+}, 300_000);
+
+/**
+ * The workflow code for replaying a history: bundled by the replay itself, as
+ * before. The shared bundle is instrumented under `test:coverage`, and a replay
+ * worker has no sink for its counters.
+ */
+const replayOptions = (): { workflowsPath: string } => ({
+  workflowsPath: require.resolve('./workflows'),
+});
+
+/**
+ * How long, at least, a workflow is given to come quiet before it is
+ * terminated. A body cut off at its deadline has {@link SETTLE_MS} for what
+ * follows: its history tail (half of this), then for its one workflow this to
+ * come quiet and this again to be described and terminated.
+ */
+const QUIET_FLOOR_MS = SETTLE_MS / 4;
+
+/** A test server whose clock a test may have stalled; replaced before the next test. */
+const stalled = new WeakSet<TestWorkflowEnvironment>();
+
+/** The workflows a worker's run started, and when each is stopped. */
+interface Stops {
+  /** Stopped when the run ends, however it ends. */
+  always(handle: WorkflowHandle): void;
+  /** Stopped only when the run fails: it is handed to another worker otherwise. */
+  onFailure(handle: WorkflowHandle): void;
+}
+
+/**
+ * The one way this file runs a worker (FU-214). Its run is bounded by what is
+ * left of the test's {@link TEST_BUDGET_MS}: every wait inside ends with it, every SDK call
+ * carries its abort signal, and the body is awaited before the worker stops,
+ * so nothing it started outlives its test. Before the worker stops, each
+ * workflow the body named is stopped too — from a quiet history, never with an
+ * activity in flight, which stalls the test server's clock for every later
+ * test on it. A workflow that does not come quiet is terminated anyway, its
+ * server marked {@link stalled}, and the run fails saying so.
+ */
+async function onWorker<T>(
+  environment: TestWorkflowEnvironment,
+  worker: Worker,
+  what: string,
+  body: (deadline: Deadline, stops: Stops) => Promise<T>,
+): Promise<T> {
+  const always: WorkflowHandle[] = [];
+  const onFailure: WorkflowHandle[] = [];
+  return runBounded(
+    worker,
+    { what, ms: Math.max(budgetEndsAt - Date.now(), 0), connection: environment.connection },
+    async (deadline) => {
+      const stops = {
+        always: (handle: WorkflowHandle) => always.push(handle),
+        onFailure: (handle: WorkflowHandle) => onFailure.push(handle),
+      };
+      let result: T;
+      try {
+        result = await body(deadline, stops);
+      } catch (error) {
+        // Cut off at the deadline, an awaited result may have left the clock
+        // unlocked: its `finally` re-locks it with the call already aborted.
+        // Marked first: what follows must fit in the settle window.
+        if (deadline.signal.aborted) {
+          stalled.add(environment);
+          if (error instanceof Error) {
+            error.message += await historyTails(environment, [...always, ...onFailure]);
+          }
+        }
+        const loud = await stopQuietly(environment, [...always, ...onFailure]);
+        if (loud.length > 0) stalled.add(environment);
+        // The body's own failure says more than one about stopping.
+        throw error;
+      }
+      const loud = await stopQuietly(environment, always);
+      if (loud.length > 0) {
+        stalled.add(environment);
+        throw new Error(`${loud.join(', ')}: stopped with an activity in flight`);
+      }
+      return result;
+    },
+  );
+}
+
+/**
+ * The last events of each workflow, for the error of a run its deadline cut
+ * off: what the saga was doing, or waiting on, when the test gave up.
+ */
+async function historyTails(
+  environment: TestWorkflowEnvironment,
+  handles: WorkflowHandle[],
+): Promise<string> {
+  const tails = await Promise.all(
+    handles.map(async (handle) => {
+      const events = await cleanUp(
+        environment.connection,
+        async () => (await handle.fetchHistory()).events?.slice(-12),
+        QUIET_FLOOR_MS / 2,
+      ).catch((error: unknown) => [String(error)]);
+      const kinds = (events ?? []).map((e) =>
+        typeof e === 'string'
+          ? e
+          : `${String(e.eventId)} ${Object.keys(e).find((k) => k.endsWith('EventAttributes')) ?? '?'}`,
+      );
+      return `\n${handle.workflowId} history ends: ${kinds.join('; ')}`;
+    }),
+  );
+  return tails.join('');
+}
+
+/**
+ * Terminates each workflow still running, once its history is quiet: given
+ * what is left of the test's budget, and at least {@link QUIET_FLOOR_MS} once
+ * that has run out. Under a deadline and signal of its own, as the run's may
+ * have expired. Returns the ids of those that had to be terminated with an
+ * activity in flight, or could not be stopped.
+ */
+async function stopQuietly(
+  environment: TestWorkflowEnvironment,
+  handles: WorkflowHandle[],
+): Promise<string[]> {
+  const loud: string[] = [];
+  for (const handle of handles) {
+    const window = Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+    const why = await stopWhenQuiet(environment.connection, handle, window, QUIET_FLOOR_MS);
+    if (why !== undefined) loud.push(why);
   }
-  throw new Error(`Timed out waiting for ${what}`);
+  return loud;
+}
+
+/**
+ * `body`, for a workflow that more than one worker runs in turn: whatever in
+ * it fails — a worker that cannot be created, an assertion between two
+ * workers — the workflow is stopped quietly, and its server marked
+ * {@link stalled} when it could not be. Named by id, before it is started.
+ */
+async function stoppedOnFailure<T>(
+  environment: TestWorkflowEnvironment,
+  workflow: WorkflowHandle,
+  body: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await body();
+  } catch (error) {
+    if ((await stopQuietly(environment, [workflow])).length > 0) stalled.add(environment);
+    throw error;
+  }
+}
+
+/** A server some test stalled is replaced, so the tests after it start from a clean one. */
+async function freshIfStalled(
+  environment: TestWorkflowEnvironment,
+): Promise<TestWorkflowEnvironment> {
+  if (!stalled.has(environment)) return environment;
+  // The new one first: the variable never names a server already torn down.
+  const fresh = await createTemporalTestEnvironment();
+  await environment.teardown();
+  // Its start is not the next test's to pay for.
+  budgetEndsAt = Date.now() + TEST_BUDGET_MS;
+  return fresh;
 }
 
 describe('the order saga', () => {
@@ -374,6 +572,10 @@ describe('the order saga', () => {
   beforeAll(async () => {
     env = await createTemporalTestEnvironment();
   }, 300_000);
+  // The server a nested describe swapped in, when that is the one in use.
+  beforeEach(async () => {
+    env = await freshIfStalled(env);
+  }, 300_000);
 
   afterAll(async () => {
     await env?.teardown();
@@ -381,8 +583,9 @@ describe('the order saga', () => {
 
   /**
    * Starts the saga for `order`, lets `drive` act as the parties, and returns
-   * the saga's result. With `keepRunning`, the saga is terminated after
-   * `drive` instead of awaited — for the waits that never end on their own.
+   * the saga's result. With `keepRunning`, the saga is stopped after `drive`
+   * instead of awaited — for the waits that never end on their own. Either
+   * way, under {@link onWorker}: nothing of it outlives the test.
    */
   async function run(
     order: FakeOrder,
@@ -400,42 +603,30 @@ describe('the order saga', () => {
     const worker = await Worker.create({
       connection: env.nativeConnection,
       taskQueue,
-      workflowsPath: require.resolve('./workflows'),
+      workflowBundle,
       activities,
     });
 
-    return worker.runUntil(async () => {
-      const handle = await env.client.workflow.start(orderSaga, {
-        taskQueue,
-        workflowId: `test-${INPUT.orderId}-${Math.trunc(performance.now() * 1000)}`,
-        args: [{ ...INPUT, ...options.input }],
+    return onWorker(env, worker, 'the test to drive the saga', async (_deadline, stops) => {
+      const workflowId = `test-${INPUT.orderId}-${Math.trunc(performance.now() * 1000)}`;
+      // Known before it is started: a start cut off by the deadline may still
+      // have started it on the server.
+      stops.always(env.client.workflow.getHandle(workflowId));
+      const handle = signalling(
+        env,
+        await env.client.workflow.start(orderSaga, {
+          taskQueue,
+          workflowId,
+          args: [{ ...INPUT, ...options.input }],
+        }),
+      );
+      await drive({
+        party: new Party(order, handle),
+        handle,
+        held: () => until(() => order.status !== 'PENDING', 'the hold to be recorded'),
       });
-
-      let finished = false;
-      try {
-        await within(
-          STEP_DEADLINE_MS,
-          drive({
-            party: new Party(order, handle),
-            handle,
-            held: () => until(() => order.status !== 'PENDING', 'the hold to be recorded'),
-          }),
-          'the test to drive the saga',
-        );
-        if (options.keepRunning) return undefined;
-        const result = await within(STEP_DEADLINE_MS, handle.result(), 'the saga to finish');
-        finished = true;
-        return result;
-      } catch (error) {
-        // A saga that ended by failing is finished too; terminating it would
-        // only replace its own error with "already completed".
-        if (error instanceof WorkflowFailedError) finished = true;
-        throw error;
-      } finally {
-        // Whatever happened above, the saga is stopped before the worker is,
-        // so `runUntil` returns and the next test starts from nothing.
-        if (!finished) await handle.terminate('test finished').catch(() => undefined);
-      }
+      if (options.keepRunning) return undefined;
+      return handle.result();
     });
   }
 
@@ -481,6 +672,7 @@ describe('the order saga', () => {
         await held();
         // Skip well past the fulfilment window and several reminder intervals.
         await env.sleep('20 days');
+        await settled(handle);
         const status = await handle.query<SagaStatus, []>('status');
         expect(status.remindersRecorded).toBeGreaterThan(0);
       },
@@ -511,6 +703,7 @@ describe('the order saga', () => {
         await party.fulfil();
         // Past the receipt window many times over.
         await env.sleep('90 days');
+        await settled(handle);
         const status = await handle.query<SagaStatus, []>('status');
         expect(status.phase).toBe('AWAITING_RECEIPT_CONFIRMATION');
       },
@@ -545,7 +738,7 @@ describe('the order saga', () => {
     const result = await run(
       order,
       activities,
-      async ({ party, held }) => {
+      async ({ party, held, handle }) => {
         await held();
         await party.confirm();
         await party.fulfil();
@@ -553,6 +746,7 @@ describe('the order saga', () => {
         await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
         // Nothing else happens until an operator decides.
         await env.sleep('30 days');
+        await settled(handle);
         expect(calls).not.toContain('settle');
         await party.resolve('SETTLE', 'the supplier evidenced correct delivery');
         // Raised before receipt: SETTLE resumes the wait for it (D-083), and
@@ -679,6 +873,7 @@ describe('the order saga', () => {
           expect(order.dispute).toMatchObject({ id: 'DSP_1', reason: OBJECTION });
           // Nothing settles while it waits for an operator.
           await env.sleep('30 days');
+          await settled(handle);
           expect(calls).not.toContain('settle');
           await party.resolve('SETTLE', 'the supplier showed a signed delivery note');
         },
@@ -1018,6 +1213,7 @@ describe('the order saga', () => {
           await party.confirmReceipt();
           await atRest(handle);
           await env.sleep('3 hours');
+          await settled(handle);
           expect(rounds.length).toBeGreaterThanOrEqual(4);
           expect(rounds).toEqual(rounds.map((_, i) => i + 1));
           expect(others()).toEqual(HELD_PATH);
@@ -1039,7 +1235,7 @@ describe('the order saga', () => {
       const handle = replay as WorkflowHandle;
       expect(await patchIds(handle)).toContain('dispute-release-durable-wait-v1');
       await Worker.runReplayHistory(
-        { workflowsPath: require.resolve('./workflows') },
+        replayOptions(),
         await handle.fetchHistory(),
         handle.workflowId,
       );
@@ -1099,7 +1295,8 @@ describe('the order saga', () => {
       activities.resolveObligationDispute = async (...args) => {
         // Only the call the first signal asks for is held.
         if (rounds.length === 1 && !finish) {
-          await new Promise<void>((resolve) => {
+          // Held, until the test lets it go or its worker stops (FU-214).
+          await heldUntil((resolve) => {
             finish = resolve;
           });
         }
@@ -1297,7 +1494,8 @@ describe('the order saga', () => {
       let finish = (): void => undefined;
       activities.resolveObligationDispute = () => {
         calls.push('resolveObligationDispute');
-        return new Promise<void>((resolve) => {
+        // Held, until the test lets it go or its worker stops (FU-214).
+        return heldUntil((resolve) => {
           finish = resolve;
         });
       };
@@ -1423,6 +1621,7 @@ describe('the order saga', () => {
           // The activity's own three attempts, then the round is reported.
           expect(economic.sent.length).toBeGreaterThanOrEqual(3);
           await env.sleep('3 hours');
+          await settled(ctx.handle);
           expect(rounds.length).toBeGreaterThanOrEqual(4);
           expect(rounds).toEqual(rounds.map((_, i) => i + 1));
           expect(calls).not.toContain('markSettling');
@@ -1439,7 +1638,7 @@ describe('the order saga', () => {
       const handle = seen as WorkflowHandle;
       expect(await patchIds(handle)).toContain(MARKER);
       await Worker.runReplayHistory(
-        { workflowsPath: require.resolve('./workflows') },
+        replayOptions(),
         await handle.fetchHistory(),
         handle.workflowId,
       );
@@ -1539,6 +1738,7 @@ describe('the order saga', () => {
           await until(() => calls.includes('findObligation'), 'economic-service to be asked');
           await atRest(ctx.handle);
           await env.sleep('2 hours');
+          await settled(ctx.handle);
           // By order, not by count: a slow run can fit a round in before the dispute.
           expect(calls.lastIndexOf('authoriseSettlement')).toBeLessThan(
             calls.indexOf('findObligation'),
@@ -1588,6 +1788,9 @@ describe('the order saga', () => {
             onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
             whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
               fn({ status: order.status, receiptConfirmed: true }),
+            // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+            openSagaCall: async () => ({ generation: 1, started: true }),
+            confirmSagaCall: async () => undefined,
           } as unknown as OrderService,
           economic: {
             authoriseSettlement: async () => {
@@ -1626,13 +1829,7 @@ describe('the order saga', () => {
       const replay = (handle: WorkflowHandle): Promise<void> =>
         handle
           .fetchHistory()
-          .then((history) =>
-            Worker.runReplayHistory(
-              { workflowsPath: require.resolve('./workflows') },
-              history,
-              handle.workflowId,
-            ),
-          );
+          .then((history) => Worker.runReplayHistory(replayOptions(), history, handle.workflowId));
 
       const reachReceipt = async ({ party, held }: { party: Party; held: () => Promise<void> }) => {
         await held();
@@ -1662,6 +1859,7 @@ describe('the order saga', () => {
           // ("invalid history builder state for action"), the saga stalls, and
           // the terminated saga stops the server skipping for later cases.
           await env.sleep('84 hours');
+          await settled(ctx.handle);
           expect(owner.sentWhile).toEqual([]);
           await atRest(ctx.handle);
           await ctx.party.resolve('SETTLE', 'the supplier replaced it');
@@ -1992,6 +2190,9 @@ describe('the order saga', () => {
             onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
             whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
               fn({ status: 'RECEIPT_CONFIRMED', receiptConfirmed: true }),
+            // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+            openSagaCall: async () => ({ generation: 1, started: true }),
+            confirmSagaCall: async () => undefined,
           } as unknown as OrderService,
           economic: {
             authoriseSettlement: async () => {
@@ -2303,6 +2504,7 @@ describe('the order saga', () => {
               await until(() => rounds.length > 0, 'a round');
               await atRest(ctx.handle);
               await env.sleep('3 hours');
+              await settled(ctx.handle);
               expect(rounds.length).toBeGreaterThanOrEqual(3);
               expect(calls).not.toContain(after);
               expect((await ctx.handle.query<SagaStatus, []>('status')).phase).toBe(phase);
@@ -2332,7 +2534,7 @@ describe('the order saga', () => {
           expect(ids).toContain(SIBLING_MARKER);
           expect(ids).not.toContain(MARKER);
           await Worker.runReplayHistory(
-            { workflowsPath: require.resolve('./workflows') },
+            replayOptions(),
             await handle.fetchHistory(),
             handle.workflowId,
           );
@@ -2432,56 +2634,68 @@ describe('the order saga', () => {
         };
         activities.findObligation = async () => ({ transactionId: TRANSACTION });
         const taskQueue = `protocol-4-${(queues += 1)}`;
-        const handle = await env.client.workflow.start(orderSaga, {
-          taskQueue,
-          workflowId: taskQueue,
-          args: [{ ...INPUT, ...NO_RECHECK }],
-        });
-        const party = new Party(order, handle);
-        const before = await Worker.create({
-          connection: env.nativeConnection,
-          taskQueue,
-          workflowsPath: require.resolve('./workflows'),
-          activities,
-          maxCachedWorkflows: 0,
-          // What protocol 4 writes: every marker but this one.
-          patchActivationCallback: ({ patchId }) => patchId !== SIBLING_MARKER,
-        });
-        await before.runUntil(async () => {
-          await toWait(
-            {
-              party,
-              handle,
-              held: () => until(() => order.status !== 'PENDING', 'the hold'),
-            },
-            () => rounds.length,
+        const workflow = env.client.workflow.getHandle(taskQueue);
+        const outcome = await stoppedOnFailure(env, workflow, async () => {
+          const handle = signalling(
+            env,
+            await env.client.workflow.start(orderSaga, {
+              taskQueue,
+              workflowId: taskQueue,
+              args: [{ ...INPUT, ...NO_RECHECK }],
+            }),
           );
-        });
-        expect(await patchIds(handle)).toContain(MARKER);
-        expect(await patchIds(handle)).not.toContain(SIBLING_MARKER);
+          const party = new Party(order, handle);
+          const before = await Worker.create({
+            connection: env.nativeConnection,
+            taskQueue,
+            workflowBundle,
+            activities,
+            maxCachedWorkflows: 0,
+            // What protocol 4 writes: every marker but this one.
+            patchActivationCallback: ({ patchId }) => patchId !== SIBLING_MARKER,
+          });
+          await onWorker(env, before, 'protocol 4 to wait', async (deadline, stops) => {
+            stops.onFailure(handle);
+            // Stopped from a history with nothing in flight: the next worker's
+            // first wake-up must not depend on recovering a task (FU-147).
+            await handOff(handle, deadline, () =>
+              toWait(
+                {
+                  party,
+                  handle,
+                  held: () => until(() => order.status !== 'PENDING', 'the hold'),
+                },
+                () => rounds.length,
+              ),
+            );
+          });
+          expect(await patchIds(handle)).toContain(MARKER);
+          expect(await patchIds(handle)).not.toContain(SIBLING_MARKER);
 
-        const after = await Worker.create({
-          connection: env.nativeConnection,
-          taskQueue,
-          workflowsPath: require.resolve('./workflows'),
-          activities,
-        });
-        const outcome = await after.runUntil(async () => {
-          party.silently((o) => o.raiseDispute('it arrived broken'));
-          party.silently((o) => o.resolveDispute('REFUND', 'the supplier agreed'));
-          await handle.signal(retryDisputeRelease);
-          await phaseIs(handle, 'COMPENSATION_UNCONFIRMED');
-          await atRest(handle);
-          economic.recovered = true;
-          await handle.signal(retryDisputeRelease);
-          return within(STEP_DEADLINE_MS, handle.result(), 'the saga to finish');
+          const after = await Worker.create({
+            connection: env.nativeConnection,
+            taskQueue,
+            workflowBundle,
+            activities,
+          });
+          return onWorker(env, after, 'the deploy to refund', async (_d, stops) => {
+            stops.always(handle);
+            party.silently((o) => o.raiseDispute('it arrived broken'));
+            party.silently((o) => o.resolveDispute('REFUND', 'the supplier agreed'));
+            await handle.signal(retryDisputeRelease);
+            await phaseIs(handle, 'COMPENSATION_UNCONFIRMED');
+            await atRest(handle);
+            economic.recovered = true;
+            await handle.signal(retryDisputeRelease);
+            return handle.result();
+          });
         });
         expect(outcome).toBe('CANCELLED');
-        expect(await patchIds(handle)).toContain(SIBLING_MARKER);
+        expect(await patchIds(workflow)).toContain(SIBLING_MARKER);
         await Worker.runReplayHistory(
-          { workflowsPath: require.resolve('./workflows') },
-          await handle.fetchHistory(),
-          handle.workflowId,
+          replayOptions(),
+          await workflow.fetchHistory(),
+          workflow.workflowId,
         );
       });
 
@@ -2541,11 +2755,7 @@ describe('the order saga', () => {
           await atRest(handle);
         };
         const replay = async (handle: WorkflowHandle): Promise<void> =>
-          Worker.runReplayHistory(
-            { workflowsPath: require.resolve('./workflows') },
-            await handle.fetchHistory(),
-            handle.workflowId,
-          );
+          Worker.runReplayHistory(replayOptions(), await handle.fetchHistory(), handle.workflowId);
 
         it('a request that commits after the empty lookup: never FAILED, and the late hold is adopted', async () => {
           const order = new FakeOrder();
@@ -2759,51 +2969,60 @@ describe('the order saga', () => {
           const order = new FakeOrder();
           const { calls, rounds, activities, economic } = holdLost(order);
           const taskQueue = `protocol-5-${(queues += 1)}`;
-          const handle = await env.client.workflow.start(orderSaga, {
-            taskQueue,
-            workflowId: taskQueue,
-            args: [{ ...INPUT, ...NO_RECHECK }],
-          });
-          const before = await Worker.create({
-            connection: env.nativeConnection,
-            taskQueue,
-            workflowsPath: require.resolve('./workflows'),
-            activities,
-            maxCachedWorkflows: 0,
-            // What protocol 5 writes: every marker but this one.
-            patchActivationCallback: ({ patchId }) => patchId !== HOLD_MARKER,
-          });
-          await before.runUntil(until(() => economic.sent.length > 0, 'the first attempt'));
-          expect(await patchIds(handle)).not.toContain(HOLD_MARKER);
+          const workflow = env.client.workflow.getHandle(taskQueue);
+          await stoppedOnFailure(env, workflow, async () => {
+            const handle = signalling(
+              env,
+              await env.client.workflow.start(orderSaga, {
+                taskQueue,
+                workflowId: taskQueue,
+                args: [{ ...INPUT, ...NO_RECHECK }],
+              }),
+            );
+            const before = await Worker.create({
+              connection: env.nativeConnection,
+              taskQueue,
+              workflowBundle,
+              activities,
+              maxCachedWorkflows: 0,
+              // What protocol 5 writes: every marker but this one.
+              patchActivationCallback: ({ patchId }) => patchId !== HOLD_MARKER,
+            });
+            // Handed over with the send's retry pending, not from a quiet
+            // history: that comes only once protocol 5 has decided. No workflow
+            // task is in flight: the attempt ran, so the one that scheduled it
+            // was answered.
+            await onWorker(env, before, 'protocol 5 to send', async (_d, stops) => {
+              stops.onFailure(handle);
+              await until(() => economic.sent.length > 0, 'the first attempt');
+            });
+            expect(await patchIds(handle)).not.toContain(HOLD_MARKER);
 
-          const after = await Worker.create({
-            connection: env.nativeConnection,
-            taskQueue,
-            workflowsPath: require.resolve('./workflows'),
-            activities,
+            const after = await Worker.create({
+              connection: env.nativeConnection,
+              taskQueue,
+              workflowBundle,
+              activities,
+            });
+            await onWorker(env, after, 'this build to wait, then hold', async (_d, stops) => {
+              stops.always(handle);
+              await inHoldWait(handle, () => rounds.length);
+              expect(calls).not.toContain('markFailed');
+              economic.recovered = true;
+              await handle.signal(retryDisputeRelease);
+              await until(() => order.status === 'FUNDS_HELD', 'the hold');
+              await atRest(handle);
+            });
           });
-          await after.runUntil(async () => {
-            await inHoldWait(handle, () => rounds.length);
-            expect(calls).not.toContain('markFailed');
-            economic.recovered = true;
-            await handle.signal(retryDisputeRelease);
-            await until(() => order.status === 'FUNDS_HELD', 'the hold');
-            await atRest(handle);
-          });
-          expect(await patchIds(handle)).toContain(HOLD_MARKER);
-          await replay(handle);
-          await handle.terminate();
+          expect(await patchIds(workflow)).toContain(HOLD_MARKER);
+          await replay(workflow);
         });
 
         it('a saga past protocol 5’s decision keeps it on this build', async () => {
           const order = new FakeOrder();
           const { calls, activities } = holdLost(order);
           const taskQueue = `protocol-5-${(queues += 1)}`;
-          const handle = await env.client.workflow.start(orderSaga, {
-            taskQueue,
-            workflowId: taskQueue,
-            args: [{ ...INPUT, ...NO_RECHECK }],
-          });
+          const workflow = env.client.workflow.getHandle(taskQueue);
           const recordFailed = activities.markFailed;
           let tried = false;
           activities.markFailed = async (...args) => {
@@ -2813,53 +3032,72 @@ describe('the order saga', () => {
             }
             return recordFailed(...args);
           };
-          const before = await Worker.create({
-            connection: env.nativeConnection,
-            taskQueue,
-            workflowsPath: require.resolve('./workflows'),
-            activities,
-            maxCachedWorkflows: 0,
-            patchActivationCallback: ({ patchId }) => patchId !== HOLD_MARKER,
+          const outcome = await stoppedOnFailure(env, workflow, async () => {
+            const handle = signalling(
+              env,
+              await env.client.workflow.start(orderSaga, {
+                taskQueue,
+                workflowId: taskQueue,
+                args: [{ ...INPUT, ...NO_RECHECK }],
+              }),
+            );
+            const before = await Worker.create({
+              connection: env.nativeConnection,
+              taskQueue,
+              workflowBundle,
+              activities,
+              maxCachedWorkflows: 0,
+              patchActivationCallback: ({ patchId }) => patchId !== HOLD_MARKER,
+            });
+            // Handed over with the decision's activity pending, by design: as
+            // in the case above, no workflow task is in flight.
+            await onWorker(env, before, 'protocol 5 to decide', async (_d, stops) => {
+              stops.onFailure(handle);
+              await until(() => tried, 'protocol 5 to decide');
+            });
+            const after = await Worker.create({
+              connection: env.nativeConnection,
+              taskQueue,
+              workflowBundle,
+              activities,
+            });
+            return onWorker(env, after, 'the saga to finish', async (_d, stops) => {
+              stops.always(handle);
+              return handle.result();
+            });
           });
-          await before.runUntil(until(() => tried, 'protocol 5 to decide'));
-          const after = await Worker.create({
-            connection: env.nativeConnection,
-            taskQueue,
-            workflowsPath: require.resolve('./workflows'),
-            activities,
-          });
-          const outcome = await after.runUntil(
-            within(STEP_DEADLINE_MS, handle.result(), 'the saga to finish'),
-          );
           expect(outcome).toBe('FAILED');
           expect(calls).toContain('markFailed');
-          expect(await patchIds(handle)).not.toContain(HOLD_MARKER);
-          await replay(handle);
+          expect(await patchIds(workflow)).not.toContain(HOLD_MARKER);
+          await replay(workflow);
         });
 
         it('a build that withholds the marker still ends as protocol 5 did, and that replays', async () => {
           const order = new FakeOrder();
           const { calls, activities } = holdLost(order);
           const taskQueue = `protocol-5-${(queues += 1)}`;
-          const handle = await env.client.workflow.start(orderSaga, {
-            taskQueue,
-            workflowId: taskQueue,
-            args: [{ ...INPUT, ...NO_RECHECK }],
-          });
           const before = await Worker.create({
             connection: env.nativeConnection,
             taskQueue,
-            workflowsPath: require.resolve('./workflows'),
+            workflowBundle,
             activities,
             patchActivationCallback: ({ patchId }) => patchId !== HOLD_MARKER,
           });
-          const outcome = await before.runUntil(
-            within(STEP_DEADLINE_MS, handle.result(), 'the saga to finish'),
-          );
+          const workflow = env.client.workflow.getHandle(taskQueue);
+          const outcome = await onWorker(env, before, 'the saga to finish', async (_d, stops) => {
+            // Known before it is started: a start cut off may still have started it.
+            stops.always(workflow);
+            const handle = await env.client.workflow.start(orderSaga, {
+              taskQueue,
+              workflowId: taskQueue,
+              args: [{ ...INPUT, ...NO_RECHECK }],
+            });
+            return handle.result();
+          });
           expect(outcome).toBe('FAILED');
           expect(calls).toContain('markFailed');
-          expect(await patchIds(handle)).not.toContain(HOLD_MARKER);
-          await replay(handle);
+          expect(await patchIds(workflow)).not.toContain(HOLD_MARKER);
+          await replay(workflow);
         });
       });
     });
@@ -2926,7 +3164,9 @@ describe('the order saga', () => {
         await party.fulfil();
         await party.confirmReceipt();
       }),
-    ).rejects.toThrow();
+      // The saga's own failure: a test deadline is an error too, and passed
+      // here with two attempts made (FU-214).
+    ).rejects.toBeInstanceOf(WorkflowFailedError);
 
     expect(attempts).toBe(5);
     expect(calls.filter((c) => c === 'markSettlementFailed')).toHaveLength(5);
@@ -3363,6 +3603,7 @@ describe('the order saga', () => {
             );
             // Time passes, as for any order waiting there: nothing is authorised.
             await env.sleep('2 days');
+            await settled(handle);
             expect(calls).not.toContain('authoriseSettlement');
             expect(calls).not.toContain('settle');
             await REST[origin](party);
@@ -3486,13 +3727,14 @@ describe('the order saga', () => {
       const result = await run(
         order,
         activities,
-        async ({ party, held }) => {
+        async ({ party, held, handle }) => {
           await held();
           await env.sleep('1 day');
           await party.dispute('the supplier has not answered at all');
           await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
           // Ten days in dispute: no reminder there, ever.
           await env.sleep('10 days');
+          await settled(handle);
           expect(calls).not.toContain('recordReminder');
           await party.resolve('SETTLE', 'the supplier has answered since');
           // Due on day 7, so recorded at the first look after resuming.
@@ -3825,12 +4067,13 @@ describe('the order saga', () => {
  */
 describe('a saga the previous release started, replayed and then run live (#625 r1 R1)', () => {
   let env: TestWorkflowEnvironment;
-  let bundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
   let queues = 0;
 
   beforeAll(async () => {
     env = await createTemporalTestEnvironment();
-    bundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
+  }, 300_000);
+  beforeEach(async () => {
+    env = await freshIfStalled(env);
   }, 300_000);
 
   afterAll(async () => {
@@ -3847,54 +4090,47 @@ describe('a saga the previous release started, replayed and then run live (#625 
     current: Drive,
   ): Promise<string> {
     const taskQueue = `upgrade-order-${(queues += 1)}`;
-    const handle = await env.client.workflow.start(orderSaga, {
-      taskQueue,
-      workflowId: `upgrade-${INPUT.orderId}-${Math.trunc(performance.now() * 1000)}`,
-      args: [{ ...INPUT, ...NO_RECHECK }],
-    });
-    const party = new Party(order, handle);
-    let finished = false;
-    try {
+    const workflowId = `upgrade-${INPUT.orderId}-${Math.trunc(performance.now() * 1000)}`;
+    const workflow = env.client.workflow.getHandle(workflowId);
+    const result = await stoppedOnFailure(env, workflow, async () => {
+      const handle = signalling(
+        env,
+        await env.client.workflow.start(orderSaga, {
+          taskQueue,
+          workflowId,
+          args: [{ ...INPUT, ...NO_RECHECK }],
+        }),
+      );
+      const party = new Party(order, handle);
       const old = await Worker.create({
         connection: env.nativeConnection,
         taskQueue,
-        workflowBundle: bundle,
+        workflowBundle,
         activities,
         maxCachedWorkflows: 0,
         patchActivationCallback: () => false,
       });
       // Stopped from a history with nothing in flight, not from the phase the
       // saga reported: that is read off a workflow task still running (FU-147).
-      await runBounded(
-        old,
-        {
-          what: 'the previous release to drive',
-          ms: STEP_DEADLINE_MS,
-          connection: env.client.connection,
-        },
-        (deadline) => handOff(handle, deadline, () => previous({ party, handle })),
-      );
+      await onWorker(env, old, 'the previous release to drive', (deadline, stops) => {
+        stops.onFailure(handle);
+        return handOff(handle, deadline, () => previous({ party, handle }));
+      });
       const fresh = await Worker.create({
         connection: env.nativeConnection,
         taskQueue,
-        workflowBundle: bundle,
+        workflowBundle,
         activities,
       });
-      const result = await fresh.runUntil(async () => {
-        await within(STEP_DEADLINE_MS, current({ party, handle }), 'this release to drive');
-        return within(STEP_DEADLINE_MS, handle.result(), 'the saga to finish');
+      return onWorker(env, fresh, 'this release to drive', async (_d, stops) => {
+        stops.always(handle);
+        await current({ party, handle });
+        return handle.result();
       });
-      finished = true;
-      // The mixed history, replayed from the start by this release.
-      await Worker.runReplayHistory(
-        { workflowBundle: bundle },
-        await handle.fetchHistory(),
-        handle.workflowId,
-      );
-      return result;
-    } finally {
-      if (!finished) await handle.terminate('test finished').catch(() => undefined);
-    }
+    });
+    // The mixed history, replayed from the start by this release.
+    await Worker.runReplayHistory(replayOptions(), await workflow.fetchHistory(), workflowId);
+    return result;
   }
 
   type Origin = 'FUNDS_HELD' | 'CONFIRMED' | 'AWAITING_RECEIPT_CONFIRMATION';
@@ -3933,11 +4169,12 @@ describe('a saga the previous release started, replayed and then run live (#625 
    * the saga has nothing in flight, which takes one query, not a poll.
    */
   const phaseIs = async (handle: WorkflowHandle, phase: string): Promise<void> => {
-    await pollWithin(
-      STEP_DEADLINE_MS,
-      async (deadline) =>
-        (await queryQuiet<SagaStatus>(handle, deadline, 'status')).phase === phase,
-      `the saga to wait in ${phase}`,
+    const what = `the saga to wait in ${phase}`;
+    const deadline = currentDeadline(what);
+    await askUntil(
+      deadline,
+      async () => (await queryQuiet<SagaStatus>(handle, deadline, 'status')).phase === phase,
+      what,
     );
   };
 

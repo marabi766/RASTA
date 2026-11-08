@@ -339,6 +339,27 @@ const RETRY_AFTER_HEADER = {
  * by `api-wallet.int-spec.ts` with `schemaMismatches`, both ways.
  */
 const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
+  TransactionCapabilities: {
+    type: 'object',
+    required: ['heldProven', 'orderHoldDeadlineRequired'],
+    properties: {
+      heldProven: {
+        type: 'boolean',
+        description:
+          'Every transaction view says whether HELD is proven (`heldProven`). The order saga ' +
+          'starts no order until this is true (ADR-040). A release before it answers this ' +
+          'path with 404.',
+      },
+      orderHoldDeadlineRequired: {
+        type: 'boolean',
+        description:
+          'Whether an `ORDER` hold sent without `holdNotAfter` is refused (D-150), as this ' +
+          'release enforces it now. The order saga takes its order row as proof that no ' +
+          'hold can land only while this is true (FU-233). A release before the rule omits ' +
+          'it, which the saga reads as false next to `heldProven: true`.',
+      },
+    },
+  },
   PaymentDisclosure: {
     type: 'object',
     required: ['simulated'],
@@ -355,6 +376,7 @@ const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
 
 const OTHER_RESPONSES: Record<string, string> = {
   'GET /v1/wallets/provider/disclosure': 'PaymentDisclosure',
+  'GET /v1/transactions/capabilities': 'TransactionCapabilities',
 };
 
 const RESPONSES: Record<string, string> = { ...TRANSACTION_RESPONSES, ...OTHER_RESPONSES };
