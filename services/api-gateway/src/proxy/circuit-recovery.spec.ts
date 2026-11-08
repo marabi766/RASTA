@@ -18,6 +18,7 @@ import type { GatewayEnv } from '../config/env';
 import { SERVICE_NAMES, type ServiceUrls } from '../config/routes';
 import { GatewayController } from './gateway.controller';
 import { ProxyService, READINESS_PATH, type ProxyOptions } from './proxy.service';
+import { RevocationGate } from '../revocation/revocation-gate';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
 
 /**
@@ -199,7 +200,7 @@ async function startGateway(
     // These specs are about recovery. Who may open a circuit: circuit-organizations.spec.ts.
     proxyOptions,
   );
-  const controller = new GatewayController(proxy, limiter, PLATFORM_ENV);
+  const controller = new GatewayController(proxy, limiter, PLATFORM_ENV, RevocationGate.off());
   const filter = new AllExceptionsFilter(quietLogger as never);
 
   const app = new ExpressAdapter().getInstance();

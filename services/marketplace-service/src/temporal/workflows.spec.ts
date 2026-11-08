@@ -2106,6 +2106,9 @@ describe('the order saga', () => {
         'UNAUTHENTICATED',
         'TOKEN_EXPIRED',
         'TOKEN_INVALID',
+        // The gateway's refusal of a user token (#381); never what economic answers this
+        // service's internal token, so it proves nothing of the transaction.
+        'TOKEN_REVOKED',
         'CONFLICT',
         'IDEMPOTENCY_KEY_REUSED',
         'REPLAY_WINDOW_CLOSED',

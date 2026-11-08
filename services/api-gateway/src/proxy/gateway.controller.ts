@@ -1,6 +1,6 @@
 import { All, Controller, Inject, MethodNotAllowedException, Req, Res } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
-import { Public, RastaError, getContext } from '@rasta/nest-common';
+import { Public, RastaError, getContext, type AuthenticatedRequest } from '@rasta/nest-common';
 import { authorizationDenialsTotal, normalizeRoute } from '@rasta/observability';
 import type { Request, Response } from 'express';
 import {
@@ -14,6 +14,7 @@ import { isSafeMethod, rateLimitFor } from './rate-limit-rule';
 import { resolveRoute, type RouteRule } from '../config/routes';
 import { assertCanonicalPath, assertNoFragment } from '../http/canonical-path';
 import { SERVICE_NAME, type GatewayEnv } from '../config/env';
+import { RevocationGate } from '../revocation/revocation-gate';
 import { GATEWAY_ENV } from '../tokens';
 
 /**
@@ -24,15 +25,18 @@ import { GATEWAY_ENV } from '../tokens';
  *
  *   1. route lookup      unknown or non-canonical path never reaches a service
  *   2. authentication    handled by the global AuthGuard before this runs
- *   3. rate limit        before doing real work, so a flood is cheap to refuse
- *   4. idempotency key   before forwarding, so a missing key never charges
- *   5. coarse role check a cheap filter, NOT the authorization decision
- *   6. forward           prepared first: a request that cannot be sent is the
+ *   3. revocation list   a token for a revoked (user, organization) pair stops
+ *                        here, in memory, before anything is counted, keyed or
+ *                        sent — a retried payment included (ADR-060 addendum)
+ *   4. rate limit        before doing real work, so a flood is cheap to refuse
+ *   5. idempotency key   before forwarding, so a missing key never charges
+ *   6. coarse role check a cheap filter, NOT the authorization decision
+ *   7. forward           prepared first: a request that cannot be sent is the
  *                        caller's 4xx, never held against the service. Then
  *                        admitted by the service's circuit breaker; refused
  *                        here never takes its HALF_OPEN probe slot
  *
- * Step 5 deserves emphasis: the service re-checks authorization independently,
+ * Step 6 deserves emphasis: the service re-checks authorization independently,
  * including object-level ownership, because only it knows which record is
  * being touched. The gateway is a filter, not a trusted authority (ADR-020).
  */
@@ -43,6 +47,7 @@ export class GatewayController {
     private readonly proxy: ProxyService,
     private readonly rateLimiter: RateLimiter,
     @Inject(GATEWAY_ENV) private readonly env: GatewayEnv,
+    private readonly revocation: RevocationGate,
   ) {}
 
   @All('v1/*path')
@@ -67,6 +72,8 @@ export class GatewayController {
     if (!route.publicReason && context.authType === 'ANONYMOUS') {
       throw RastaError.unauthenticated('This endpoint requires authentication');
     }
+
+    this.revocation.check((request as AuthenticatedRequest).rastaAuth, response);
 
     await this.enforceRateLimit(request, route, path, response);
     this.enforceIdempotencyKey(request, route);

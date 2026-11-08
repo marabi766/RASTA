@@ -13,6 +13,7 @@ import {
 } from './circuit-breaker';
 import { clientCancellation } from './gateway.controller';
 import { ClientCancelledError, ProxyService, READINESS_PATH } from './proxy.service';
+import { RevocationGate } from '../revocation/revocation-gate';
 import type { RateLimiter } from './rate-limiter';
 
 /**
@@ -514,7 +515,9 @@ describe('readiness', () => {
     } as unknown as ProxyService;
     const limiter = { isHealthy: async () => true } as unknown as RateLimiter;
     const response = { status: jest.fn() };
-    const ready = await new GatewayHealthController(limiter, proxy).ready(response as never);
+    const ready = await new GatewayHealthController(limiter, proxy, RevocationGate.off()).ready(
+      response as never,
+    );
     expect(ready.circuits).toEqual({ identity: { failures: 1, open: false, state: 'HALF_OPEN' } });
     expect(response.status).toHaveBeenCalledWith(200);
   });
