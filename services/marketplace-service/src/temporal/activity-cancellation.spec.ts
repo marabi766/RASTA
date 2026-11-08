@@ -70,6 +70,9 @@ it('real Temporal cancellation reaches a financial fetch through heartbeats with
       _name: unknown,
       effect: () => Promise<unknown>,
     ) => effect(),
+    // The hold's intent is recorded before the call (#836 r1 R2a).
+    openSagaCall: async () => ({ generation: 1, started: true }),
+    confirmSagaCall: async () => undefined,
     claimHoldSend: async (_order: unknown, proposed?: string) => ({
       holdNotAfter: proposed ?? null,
       claims: 1,

@@ -124,6 +124,7 @@ describe('the economic-service prerequisite (#824 r1, F3)', () => {
       claim: jest.fn(async () => [claim]),
       finish: jest.fn(async () => 1),
       backlog: jest.fn(async () => ({ count: 1, age: 0 })),
+      unresolved: jest.fn(async () => []),
     }) as unknown as jest.Mocked<SagaStartStore>;
   const inContext = (act: () => Promise<void>) =>
     runWithContext(
@@ -560,6 +561,7 @@ describe('starter shutdown', () => {
       {
         claim,
         backlog,
+        unresolved: async () => [],
       } as unknown as SagaStartStore,
       economicReady,
     );

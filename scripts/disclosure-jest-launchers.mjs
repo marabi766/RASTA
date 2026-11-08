@@ -6,9 +6,9 @@ export const JEST_LAUNCHERS = {
       'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
     sha256: {
       'scripts/verify-migration-reversible-lib.test.mjs':
-        '1d4d60011bc80d5db5e780c0c1ad66bb50420899b1bf679f6069d5a0ac7b9f69',
+        'dc9985598eb7b2ecdfb748d798989ff11572dacda52121439ef846f5693eb00b',
       'scripts/verify-migration-reversible-lib.mjs':
-        'a0259dbf59b0ecfa0458622b287184067c4ce1a55eaae6d89673ecad0b464ec0',
+        '102de590805d43dde63ee9a99255fd56b201d79f7f4c3cced963ba4ea56f6eef',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },
@@ -167,7 +167,7 @@ export const JEST_LAUNCHERS = {
       'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed. Workspace manifests are listed through authoredFiles() (read-only git ls-files).',
     sha256: {
       'scripts/ci-shell-text-lib.mjs':
-        'db19f3f6803e260d87a53d9420bd09a779f775bd117c17978f848bcfd1fe1188',
+        'dba3e1b238617ba8e082efa309209e2330acc22215d25ab4831223a6c16f29ce',
       'scripts/ci-node-test-timeouts-lib.mjs':
         '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':

@@ -58,13 +58,16 @@ describe.each(cases)('FU-190 $name form hold', (c) => {
   it.each(['HELD', 'NOT_CHECKED', 'UNCONFIRMED'] as const)(
     'offers a separate accessible reconciliation form for %s',
     async (kind) => {
-      const state: RegisterAssetFormState & CreateDriverFormState = {
-        kind,
-        submissionId: 'original',
-        releaseToken: 'signed-record',
-        correlationId: 'lost',
-        values: c.values,
-      };
+      const state: RegisterAssetFormState & CreateDriverFormState =
+        kind === 'NOT_CHECKED'
+          ? { kind, reason: 'SNAPSHOT_UNREADABLE', releaseToken: 'signed-record' }
+          : {
+              kind,
+              submissionId: 'original',
+              releaseToken: 'signed-record',
+              correlationId: 'lost',
+              values: c.values,
+            };
       const { container, getByRole, getByLabelText } = render(c.form(state));
       const consent = getByLabelText(/می‌پذیرم/);
       expect(consent).toBeRequired();
@@ -88,7 +91,7 @@ describe.each(cases)('FU-190 $name form hold', (c) => {
     },
   );
   it('keeps unavailable stores locked without a forged exit, and resets on a fresh page key', () => {
-    const view = render(c.form({ kind: 'NOT_CHECKED' }));
+    const view = render(c.form({ kind: 'NOT_CHECKED', reason: 'STORE_UNAVAILABLE' }));
     expect(view.container.querySelector('[name="release"]')).toBeNull();
     expect(view.container.querySelector(`[name="${c.field}"]`)).toBeDisabled();
     view.rerender(c.form({ kind: 'IDLE' }, 'fresh'));
