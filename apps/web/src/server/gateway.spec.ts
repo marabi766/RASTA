@@ -369,7 +369,7 @@ describe('a success with no body', () => {
       return new Response(null, { status: 204 });
     }) as unknown as typeof fetch;
     try {
-      const error = await callGateway({
+      const error = await callGatewayWrite({
         baseUrl: GATEWAY,
         path: '/v1/memberships/MBR_1/revoke',
         method: 'POST',

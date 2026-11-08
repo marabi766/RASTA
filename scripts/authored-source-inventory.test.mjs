@@ -1834,6 +1834,7 @@ const CONVERTED = {
   'apps/web/src/app/procurement/demands/demands.spec.tsx': 0, // FU-112 r-sync: the screens' sources via authoredFiles()
   'scripts/check-dockerfile-pins.test.mjs': 0, // FU-112 r-sync 2 (#832): .bash libraries via authoredFiles()
   'scripts/cors-published-headers.test.mjs': 0, // FU-112 r-sync 2 (#860): OpenAPI documents and service entry points via authoredFiles()
+  'packages/nest-common/src/http/bounded-body.sweep.spec.ts': 0, // #722 sync: production sources via authoredFiles()
 };
 test('the allow-list refuses an unlisted file and a listed file that no longer lists', () => {
   const allowed = new Set(['old.mjs', 'gone.mjs']);

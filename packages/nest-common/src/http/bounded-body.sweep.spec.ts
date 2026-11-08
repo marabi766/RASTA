@@ -1,5 +1,11 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
+
+// git-ignored output (installs, build output, generated clients another task may be
+// regenerating) is never listed: the authored-source inventory (FU-102).
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 /**
  * FU-081: a byte collector that keeps every incoming chunk object until a
@@ -32,14 +38,28 @@ const SKIP_DIR = new Set([
 ]);
 const TEST_FILE = /\.(spec|test|int-spec|e2e-spec|pg\.test)\.[cm]?[jt]sx?$|\.fixture\.|-fake\./;
 
-function sources(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) {
-      if (!SKIP_DIR.has(name)) sources(path, out);
-    } else if (/\.(ts|tsx|mjs|cjs|js)$/.test(name) && !TEST_FILE.test(name)) out.push(path);
-  }
-  return out;
+/**
+ * Production sources: every authored file under a workspace's `src` (test files and test
+ * directories aside) and every top-level script, as repository-relative paths.
+ */
+function sources(): string[] {
+  const workspaces = ['services', 'packages', 'apps'].flatMap((top) =>
+    authoredFiles(join(ROOT, top))
+      .map((path) => relative(ROOT, path).split('\\').join('/'))
+      .filter((file) => {
+        const parts = file.split('/');
+        return (
+          parts[2] === 'src' &&
+          !parts.slice(3, -1).some((name) => SKIP_DIR.has(name)) &&
+          /\.(ts|tsx|mjs|cjs|js)$/.test(file) &&
+          !TEST_FILE.test(parts.at(-1)!)
+        );
+      }),
+  );
+  const scripts = authoredFiles(join(ROOT, 'scripts'))
+    .map((path) => relative(ROOT, path).split('\\').join('/'))
+    .filter((file) => /^scripts\/[^/]+\.m?js$/.test(file) && !TEST_FILE.test(file));
+  return [...workspaces, ...scripts];
 }
 
 /** Names bound to an incoming chunk in `text`. */
@@ -68,26 +88,7 @@ export function chunkCollectors(file: string, text: string): string[] {
 }
 
 function sweep(): string[] {
-  const roots = ['services', 'packages', 'apps'].flatMap((top) =>
-    readdirSync(join(ROOT, top))
-      .map((name) => join(ROOT, top, name, 'src'))
-      .filter((dir) => {
-        try {
-          return statSync(dir).isDirectory();
-        } catch {
-          return false;
-        }
-      }),
-  );
-  const files = [
-    ...roots.flatMap((dir) => sources(dir)),
-    ...readdirSync(join(ROOT, 'scripts'))
-      .filter((name) => /\.m?js$/.test(name) && !TEST_FILE.test(name))
-      .map((name) => join(ROOT, 'scripts', name)),
-  ];
-  return files.flatMap((path) =>
-    chunkCollectors(relative(ROOT, path).split('\\').join('/'), readFileSync(path, 'utf8')),
-  );
+  return sources().flatMap((file) => chunkCollectors(file, readFileSync(join(ROOT, file), 'utf8')));
 }
 
 /**
@@ -145,28 +146,12 @@ export function bodyReaders(file: string, text: string): { site: string; line: s
 }
 
 function sourceFiles(): string[] {
-  const roots = ['services', 'packages', 'apps'].flatMap((top) =>
-    readdirSync(join(ROOT, top))
-      .map((name) => join(ROOT, top, name, 'src'))
-      .filter((dir) => {
-        try {
-          return statSync(dir).isDirectory();
-        } catch {
-          return false;
-        }
-      }),
-  );
-  return [
-    ...roots.flatMap((dir) => sources(dir)),
-    ...readdirSync(join(ROOT, 'scripts'))
-      .filter((name) => /\.m?js$/.test(name) && !TEST_FILE.test(name))
-      .map((name) => join(ROOT, 'scripts', name)),
-  ].filter((path) => !/[\\/]generated[\\/]/.test(path));
+  return sources().filter((file) => !/\/generated\//.test(file));
 }
 
 describe('peer body readers (PR #722 r1 F1)', () => {
-  const found = sourceFiles().flatMap((path) =>
-    bodyReaders(relative(ROOT, path).split('\\').join('/'), readFileSync(path, 'utf8')),
+  const found = sourceFiles().flatMap((file) =>
+    bodyReaders(file, readFileSync(join(ROOT, file), 'utf8')),
   );
   const fileOf = (site: string) => site.slice(0, site.lastIndexOf(':'));
 
