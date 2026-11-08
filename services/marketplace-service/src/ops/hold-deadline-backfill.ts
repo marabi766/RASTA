@@ -111,8 +111,8 @@ export async function backfillLegacyHoldDeadlines(
   // may still land, and a deadline would let the row prove absence it cannot.
   if (!ruleLongEnough) {
     throw new BackfillRefused(
-      `economic-service must refuse every hold without a deadline since at least ` +
-        `${HOLD_FENCE.clockMarginMs / 60_000} min before now (database clock); --economic-rule-since ${since}`,
+      'economic-service must refuse every hold without a deadline since at least ' +
+        `${HOLD_FENCE.clockMarginMs / 60_000} min before now (database clock): --economic-rule-since is too recent`,
     );
   }
 
@@ -189,7 +189,7 @@ export function parseBackfillArgs(argv: readonly string[]): BackfillOptions {
         if (!(n >= min && n <= max)) throw new BackfillRefused(`${flag} must be ${min}..${max}`);
         options[flag === '--batch-size' ? 'batchSize' : 'maxBatches'] = n;
       }
-    } else throw new BackfillRefused(`unknown option ${flag}`);
+    } else throw new BackfillRefused('an option this command does not take was given');
   }
   if (dryRun && options.apply) throw new BackfillRefused('--dry-run contradicts --apply');
   if (!options.economicRuleSince) throw new BackfillRefused('--economic-rule-since is required');
