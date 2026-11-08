@@ -6,6 +6,8 @@ import { WorkflowFailedError } from '@temporalio/client';
 import type { WorkflowHandle, WorkflowHandleWithFirstExecutionRunId } from '@temporalio/client';
 import { RastaError } from '@rasta/nest-common';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import { eventually as askUntil, signalling, stopQuietly } from '../../test/legacy-handoff';
+import { currentDeadline, runBounded, SETTLE_MS } from '../../test/worker-deadline';
 import { economicCallsUnconfirmedTotal } from '../observability/metrics';
 import {
   disputeResolved,
@@ -27,7 +29,14 @@ import type { OrderService } from '../order/order.service';
  * the buyer or never held lets the refusal end the saga as before.
  */
 
-jest.setTimeout(120_000);
+/**
+ * What the worker runs of one test may take, all of them together (FU-214): every wait and
+ * SDK call in a test ends with it, inside jest's timeout, with room to stop what it started.
+ */
+const TEST_BUDGET_MS = 90_000;
+jest.setTimeout(TEST_BUDGET_MS + 60_000);
+/** How long, at least, a saga is given to come quiet before it is terminated. */
+const QUIET_FLOOR_MS = SETTLE_MS / 4;
 
 const INPUT: OrderSagaInput = {
   orderId: 'ORD_REFUSED',
@@ -87,10 +96,23 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
   let env: TestWorkflowEnvironment;
   let workflowBundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
   let queues = 0;
+  /** Set when a test may have stalled the server's clock: the next test gets a new one. */
+  let stalled = false;
+  let budgetEndsAt = 0;
 
   beforeAll(async () => {
     workflowBundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
     env = await createTemporalTestEnvironment();
+  }, 300_000);
+  beforeEach(async () => {
+    if (stalled) {
+      // The new one first: `env` never names a server already torn down.
+      const fresh = await createTemporalTestEnvironment();
+      await env.teardown();
+      env = fresh;
+      stalled = false;
+    }
+    budgetEndsAt = Date.now() + TEST_BUDGET_MS;
   }, 300_000);
   afterAll(async () => {
     await env?.teardown();
@@ -167,29 +189,61 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
       workflowBundle,
       activities: worker ? worker(activities) : activities,
     });
-    return running.runUntil(async () => {
-      const handle = await env.client.workflow.start(orderSaga, {
-        taskQueue,
-        workflowId: taskQueue,
-        args: [{ ...INPUT, ...input }],
-      });
-      const latest = env.client.workflow.getHandle(taskQueue);
-      try {
-        return await body(handle, taskQueue);
-      } finally {
-        await atRest(latest).catch(() => undefined);
-        await latest.terminate('test finished').catch(() => undefined);
-      }
-    });
+    // Under what is left of the test's budget (FU-214): every wait and SDK call in `body`
+    // ends with it, and `body` is awaited before the worker stops.
+    const ms = Math.max(budgetEndsAt - Date.now(), 0);
+    return runBounded(
+      running,
+      { what: 'the test to drive the saga', ms, connection: env.connection },
+      async (deadline) => {
+        // Follows the chain: what is stopped is the run the saga is in at the end.
+        const latest = env.client.workflow.getHandle(taskQueue);
+        let result: T;
+        try {
+          const handle = signalling(
+            env,
+            await env.client.workflow.start(orderSaga, {
+              taskQueue,
+              workflowId: taskQueue,
+              args: [{ ...INPUT, ...input }],
+            }),
+          );
+          result = await body(handle, taskQueue);
+        } catch (error) {
+          // Cut off, an awaited result may have left the clock unlocked, and what follows
+          // must fit in the settle window; otherwise the saga gets what is left of the
+          // budget to come quiet, as on success.
+          const cutOff = deadline.signal.aborted;
+          if (cutOff) stalled = true;
+          const window = cutOff
+            ? QUIET_FLOOR_MS
+            : Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+          if ((await stopQuietly(env.connection, latest, window, QUIET_FLOOR_MS)) !== undefined) {
+            stalled = true;
+          }
+          throw error;
+        }
+        // Not with an activity running: the test server would not skip time again.
+        const window = Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+        const loud = await stopQuietly(env.connection, latest, window, QUIET_FLOOR_MS);
+        if (loud !== undefined) {
+          stalled = true;
+          throw new Error(`${loud}: stopped with an activity in flight`);
+        }
+        return result;
+      },
+    );
   }
 
-  async function eventually(predicate: () => boolean | Promise<boolean>, what: string) {
-    for (let i = 0; i < 800; i += 1) {
-      if (await predicate()) return;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    throw new Error(`Timed out waiting for ${what}`);
-  }
+  /** Asks until `predicate` holds, under the run's deadline; refused outside a run (FU-214). */
+  const eventually = (predicate: () => boolean | Promise<boolean>, what: string): Promise<void> =>
+    askUntil(currentDeadline(what), async () => predicate(), what);
+  /**
+   * `handle.result()`, under the run's deadline: a saga that never ends fails the test, and
+   * the body is awaited before the worker stops (FU-214); outside a run it is refused.
+   */
+  const resultOf = <R>(handle: WorkflowHandle): Promise<R> =>
+    currentDeadline('the saga to end').call(() => handle.result() as Promise<R>);
   const phase = async (handle: WorkflowHandle) =>
     (await handle.query<SagaStatus, []>('status')).phase;
   const phaseIs = (handle: WorkflowHandle, expected: string) =>
@@ -219,7 +273,7 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
   };
   /** The refusal the run ended on, as the caller of the workflow sees it. */
   async function endsOn(handle: WorkflowHandle): Promise<string | undefined> {
-    const error: unknown = await handle.result().then(
+    const error: unknown = await resultOf(handle).then(
       () => undefined,
       (failure: unknown) => failure,
     );
@@ -276,7 +330,7 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
               await retry(handle, () => {
                 refusing = false;
               });
-              return handle.result();
+              return resultOf<string>(handle);
             },
             {},
             (stubs) => ({
@@ -354,7 +408,7 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
         await retry(handle, () => {
           answered = true;
         });
-        return handle.result();
+        return resultOf<string>(handle);
       });
       expect(result).toBe(expected);
       expect(s.calls.at(-1)).toBe('markCancelled');
@@ -393,11 +447,13 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
           s,
           async (handle, id) => {
             await stays(s, handle);
-            const latest = env.client.workflow.getHandle(id);
+            // Its signals, too, never land on a timer about to fire (FU-214).
+            const latest = signalling(env, env.client.workflow.getHandle(id));
+            const deadline = currentDeadline('the saga to roll over');
             for (let i = 0; i < 40; i += 1) {
               if ((await latest.describe()).runId !== handle.firstExecutionRunId) break;
               await retry(latest);
-              await new Promise((resolve) => setTimeout(resolve, 100));
+              await deadline.sleep(100);
             }
             expect((await latest.describe()).runId).not.toBe(handle.firstExecutionRunId);
             const rounds = s.rounds.length;
@@ -427,7 +483,7 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
 
       const answered = saga(cancelling);
       const unmarked = await drive(answered, async (handle) => {
-        await handle.result();
+        await resultOf(handle);
         return markersOf(await handle.fetchHistory());
       });
       expect(unmarked).not.toContain(REFUSAL_RECONCILES_PATCH);
@@ -474,7 +530,7 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
         await retry(handle, () => {
           refusing = false;
         });
-        return handle.result();
+        return resultOf<string>(handle);
       });
       expect(result).toBe('COMPLETED');
       expect(s.sent.authoriseSettlement?.at(-1)?.[2]).toBe(true);
@@ -495,7 +551,7 @@ describe('a first-attempt refusal with the money possibly held (D-127)', () => {
         s.state.status = 'CANCELLING';
         s.state.cancellationReason = 'decided for the buyer';
         await handle.signal(disputeResolved, 'REFUND');
-        return handle.result();
+        return resultOf<string>(handle);
       });
       expect(result).toBe('CANCELLED');
       expect(s.calls).not.toContain('settle');
