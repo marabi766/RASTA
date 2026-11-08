@@ -274,3 +274,44 @@ describe('parseOrganizationRoles / rolesForRequest', () => {
     ]);
   });
 });
+
+/**
+ * What the gateway's revocation list reads (ADR-060, gateway revocation list
+ * addendum): the token's own times, and only the roles `org_roles` grants in
+ * the resolved organization — a global `SYSTEM_ADMIN` is no membership's, so
+ * no membership's revocation can be compared with it.
+ */
+describe('AuthGuard — the token facts the revocation list compares', () => {
+  async function stateFor(token: UserClaims, header: string | undefined) {
+    const auth = new AuthGuard(reflectorFor(), {
+      serviceName: 'test-service',
+      tokenVerifier: { verifyUserToken: async () => token } as unknown as TokenVerifier,
+    });
+    const execution = executionFor({
+      authorization: 'Bearer user-token',
+      ...(header ? { 'x-organization-id': header } : {}),
+    });
+    await runWithContext(anonymous, () => auth.canActivate(execution));
+    return execution.switchToHttp().getRequest<{ rastaAuth?: AuthState }>().rastaAuth;
+  }
+
+  it('carries `iat`, `exp` and the tenant roles of the resolved organization only', async () => {
+    const issuedAt = Date.now() - 10_000;
+    const state = await stateFor(
+      claims({ issuedAt, roles: ['SYSTEM_ADMIN'], expiresAt: issuedAt + 900_000 }),
+      ORG_B,
+    );
+    expect(state?.roles.sort()).toEqual(['DRIVER', 'SYSTEM_ADMIN']);
+    expect(state?.token).toEqual({
+      issuedAt,
+      expiresAt: issuedAt + 900_000,
+      tenantRoles: ['DRIVER'],
+    });
+  });
+
+  it('leaves `issuedAt` out when the token had none, rather than inventing one', async () => {
+    const state = await stateFor(claims(), ORG_A);
+    expect(state?.token).not.toHaveProperty('issuedAt');
+    expect(state?.token?.tenantRoles).toEqual(['ORGANIZATION_ADMIN']);
+  });
+});

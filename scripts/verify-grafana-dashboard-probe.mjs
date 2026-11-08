@@ -47,10 +47,36 @@ async function waitFor(what, fn, timeoutMs = 120_000) {
   throw new Error(`timed out waiting for ${what}${last ? `: ${last.message}` : ''}`);
 }
 
+/** Byte ceiling of one Prometheus/Grafana answer, decoded (PR #722 r1 F1). */
+const MAX_ANSWER_BYTES = 8 * 1024 * 1024;
+
+/** The body as UTF-8, refused past {@link MAX_ANSWER_BYTES} instead of buffered. */
+async function boundedText(response) {
+  if (Number(response.headers.get('content-length')) > MAX_ANSWER_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`answer larger than ${MAX_ANSWER_BYTES} bytes`);
+  }
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    size += value.byteLength;
+    if (size > MAX_ANSWER_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`answer larger than ${MAX_ANSWER_BYTES} bytes`);
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+}
+
 async function getJson(url, headers = {}) {
   // Every Grafana call carries the admin's Basic credential: none follows a redirect (Q-155).
   const response = await credentialFetch(url, { headers });
-  const text = await response.text();
+  const text = await boundedText(response);
   let body;
   try {
     body = JSON.parse(text);
@@ -164,7 +190,7 @@ async function probe({ prometheus: prom, grafana, password }) {
     method: 'DELETE',
     headers: authed,
   });
-  const deletionBody = await deletion.text();
+  const deletionBody = await boundedText(deletion);
   const afterDelete = await getJson(`${grafana}/api/dashboards/uid/${EXPECTED.uid}`, authed);
   assert(
     deletion.status !== 200 && afterDelete.status === 200,
@@ -202,7 +228,7 @@ async function probe({ prometheus: prom, grafana, password }) {
         ],
       }),
     });
-    const grafanaBody = await viaGrafana.json();
+    const grafanaBody = JSON.parse(await boundedText(viaGrafana));
     const frame = grafanaBody.results?.[target.refId];
     assert(
       viaGrafana.status === 200 && frame && !frame.error,

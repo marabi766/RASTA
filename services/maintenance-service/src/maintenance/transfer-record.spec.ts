@@ -193,3 +193,39 @@ describe('settleExpiredFence', () => {
     expect(cleared).toEqual([]);
   });
 });
+
+/** `EF BB BF` before the JSON, as a peer that writes a UTF-8 BOM sends it. */
+const bomJson = (status: number, body: unknown) =>
+  new Response(
+    new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(JSON.stringify(body))]),
+    { status, headers: { 'content-type': 'application/json' } },
+  );
+
+/** A monotonic clock that jumps 60 s while `JSON.parse` runs. */
+function parsingCrossesTheDeadline(): void {
+  let now = 1_000;
+  jest.spyOn(performance, 'now').mockImplementation(() => now);
+  const parse = JSON.parse.bind(JSON);
+  jest.spyOn(JSON, 'parse').mockImplementation(((text: string) => {
+    now += 60_000;
+    return parse(text) as unknown;
+  }) as typeof JSON.parse);
+}
+
+describe('TransferRecordClient decoding and deadline (PR #722 r2 F2/F3)', () => {
+  afterEach(() => jest.restoreAllMocks());
+  const recorded = { assetId: ASSET, transferId: FENCE, recorded: true };
+
+  it('reads a BOM-prefixed answer as Fetch does', async () => {
+    const { instance } = client(() => bomJson(200, recorded));
+    await expect(instance.resolve(ORG, ASSET, FENCE)).resolves.toBe('RECORDED');
+  });
+
+  it('takes no answer whose parsing crossed the deadline', async () => {
+    const { instance } = client(() => json(200, recorded));
+    parsingCrossesTheDeadline();
+    await expect(instance.resolve(ORG, ASSET, FENCE)).rejects.toMatchObject({
+      code: 'UPSTREAM_TIMEOUT',
+    });
+  });
+});

@@ -11,7 +11,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { PassThrough, Transform, finished, pipeline, type Readable } from 'node:stream';
 import { serviceUrlSchema } from '@rasta/config';
-import { clientFailureCode } from '@rasta/nest-common';
+import { BoundedBodyCollector, clientFailureCode } from '@rasta/nest-common';
 import { ObjectChangedError, type ObjectMetadata, type ObjectStorage } from './storage.port';
 
 export interface S3StorageOptions {
@@ -198,9 +198,21 @@ export class S3ObjectStorage implements ObjectStorage {
       const body = response.Body;
       if (!body) return new Uint8Array();
 
-      // `transformToByteArray` is bounded by the range above, so this holds a
-      // few kilobytes at most — never the object.
-      return await body.transformToByteArray();
+      // The range is a request, not a limit (PR #722 r1 F1): storage that
+      // ignores it would send the whole object. At most `length` bytes are
+      // kept, and the stream is cancelled as soon as they are in.
+      const reader = body.transformToWebStream().getReader();
+      const prefix = new BoundedBodyCollector(length);
+      try {
+        while (prefix.byteLength < length) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          prefix.append(value.subarray(0, length - prefix.byteLength));
+        }
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
+      return new Uint8Array(prefix.toBuffer());
     });
   }
 

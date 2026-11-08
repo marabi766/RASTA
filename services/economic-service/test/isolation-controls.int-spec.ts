@@ -3,6 +3,7 @@ import { runUnscoped } from '@rasta/nest-common';
 import {
   asActor,
   cleanup,
+  coverByHand,
   fundWallet,
   newPrisma,
   ownerDatabaseUrl,
@@ -107,6 +108,8 @@ describe('the economic suite mutates only what it owns', () => {
     // is posted whole (`trg_ledger_entry_open_journal`), and
     // `trg_journal_balanced` is deferred to COMMIT, so it is checked and passes.
     const ownJournalId = `JRN_CONTROL_${ulid()}`;
+    // The wallet it debits never sums below zero at commit (FU-228); the cover is the tenant's too.
+    await coverByHand(accounts.debit, 5000n);
     await runUnscoped('the control seeds a journal owned entirely by one tenant', () =>
       prisma.client.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(

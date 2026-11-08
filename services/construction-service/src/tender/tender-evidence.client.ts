@@ -1,11 +1,10 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, readCappedText } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
-import { readCapped } from '../organization/organization-directory';
 import { trustedTenderReceiptsOf, type VerifiedReceipts } from './sealing/sealing';
 
 /** The service that holds the receipt chain outside this one's database. */
@@ -108,7 +107,7 @@ export class TenderEvidenceClient implements TenderEvidenceSource {
           this.logger.warn(`audit-service answered ${response.status} to the chain read`);
           throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
         }
-        const text = await readCapped(response, MAX_CHAIN_BYTES);
+        const text = await readCappedText(response, MAX_CHAIN_BYTES);
         if (text === null) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
 
         let body: unknown;

@@ -122,9 +122,12 @@ export function stripComments(sql) {
   while (i < sql.length) {
     const c = sql[i];
     if (c === "'" || c === '"') {
+      // In E'…' a backslash escapes the next character, a quote too (as `lex` reads it).
+      const escaped = c === "'" && /[eE]/.test(sql[i - 1] ?? '') && !/[\w$]/.test(sql[i - 2] ?? '');
       let j = i + 1;
       while (j < sql.length) {
-        if (sql[j] === c && sql[j + 1] === c) j += 2;
+        if (escaped && sql[j] === '\\') j += 2;
+        else if (sql[j] === c && sql[j + 1] === c) j += 2;
         else if (sql[j] === c) break;
         else j += 1;
       }
@@ -160,13 +163,23 @@ export function stripComments(sql) {
   return out;
 }
 
-/** Tokens: {type: word|quoted|string|number|op|param|placeholder, value, lower}. */
+/**
+ * Tokens: {type: word|quoted|string|number|op|param|placeholder, value, lower}. A string, quoted
+ * identifier, dollar quote or placeholder that runs off the end has `unterminated: true`: the
+ * text is not SQL this reader understands, and a fail-closed caller refuses it.
+ */
 export function lex(sql) {
   const tokens = [];
   const text = stripComments(sql);
   let i = 0;
-  const push = (type, value, start) =>
-    tokens.push({ type, value, lower: value.toLowerCase(), start });
+  const push = (type, value, start, unterminated = false) =>
+    tokens.push({
+      type,
+      value,
+      lower: value.toLowerCase(),
+      start,
+      ...(unterminated && { unterminated }),
+    });
   while (i < text.length) {
     const c = text[i];
     const rest = text.slice(i);
@@ -174,8 +187,8 @@ export function lex(sql) {
     if (/\s/.test(c)) i += 1;
     else if (c === '') {
       const end = text.indexOf('', i);
-      push('placeholder', text.slice(i + 1, end), i);
-      i = end + 1;
+      push('placeholder', text.slice(i + 1, end < 0 ? text.length : end), i, end < 0);
+      i = end < 0 ? text.length : end + 1;
     } else if (c === "'" || ((c === 'E' || c === 'e') && text[i + 1] === "'")) {
       let j = c === "'" ? i + 1 : i + 2;
       while (j < text.length) {
@@ -184,18 +197,18 @@ export function lex(sql) {
         else if (text[j] === "'") break;
         else j += 1;
       }
-      push('string', text.slice(i, j + 1), i);
+      push('string', text.slice(i, j + 1), i, j >= text.length);
       i = j + 1;
     } else if (c === '"') {
       let j = i + 1;
       while (j < text.length && !(text[j] === '"' && text[j + 1] !== '"'))
         j += text[j] === '"' ? 2 : 1;
-      push('quoted', text.slice(i + 1, j).replaceAll('""', '"'), i);
+      push('quoted', text.slice(i + 1, j).replaceAll('""', '"'), i, j >= text.length);
       i = j + 1;
     } else if ((m = /^\$(?:[A-Za-z_]\w*)?\$/.exec(rest))) {
       const end = text.indexOf(m[0], i + m[0].length);
       const stop = end < 0 ? text.length : end + m[0].length;
-      push('string', text.slice(i, stop), i);
+      push('string', text.slice(i, stop), i, end < 0);
       i = stop;
     } else if ((m = /^\$(\d+)/.exec(rest))) {
       push('param', m[1], i);

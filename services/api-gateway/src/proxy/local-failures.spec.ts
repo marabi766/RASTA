@@ -24,6 +24,7 @@ import {
 } from '@rasta/nest-common';
 import { SERVICE_NAMES, type ServiceUrls } from '../config/routes';
 import { GATEWAY_ENV } from '../tokens';
+import { RevocationGate } from '../revocation/revocation-gate';
 import { GatewayController } from './gateway.controller';
 import {
   FORWARDABLE_METHODS,
@@ -120,6 +121,8 @@ let proxy: ProxyService;
   controllers: [GatewayController],
   providers: [
     { provide: ProxyService, useFactory: () => proxy },
+    // The list is off, as in every build without the identity-topic reader (EXT-005 PR 2).
+    { provide: RevocationGate, useValue: RevocationGate.off() },
     {
       provide: RateLimiter,
       useValue: {

@@ -55,16 +55,17 @@ describe('release settlement (the real tree)', () => {
     });
     expect(found).toEqual([]);
   });
-  it('finds the six release actions behind settleRelease (a guard that sees nothing proves nothing)', () => {
+  it('finds the seven release actions behind settleRelease (a guard that sees nothing proves nothing)', () => {
     const calls = MODULES.map((name) => {
       const { text, file } = sourceOf(name);
       return { file, calls: settleReleaseCalls(text, file) };
     }).filter((entry) => entry.calls > 0);
-    expect(calls.reduce((sum, entry) => sum + entry.calls, 0)).toBe(6);
+    expect(calls.reduce((sum, entry) => sum + entry.calls, 0)).toBe(7);
     expect(calls.map((entry) => entry.file).sort()).toEqual([
       'app/assets/actions.ts',
       'app/drivers/actions.ts',
       'app/procurement/demands/demand-actions.ts',
+      'app/projects/[id]/need-add-actions.ts',
       'app/projects/actions.ts',
       'app/suppliers/supplier-actions.ts',
       'app/wallet/actions.ts',
