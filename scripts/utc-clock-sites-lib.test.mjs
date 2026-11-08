@@ -1222,6 +1222,149 @@ test('r2 F1.3: the scan reads every literal, a SET ROLE with no clock word inclu
   );
 });
 
+// FU-274: accepted on main d3aa0748d (probes recorded in task 1305's evidence).
+const R3_BASE = `CREATE TABLE task (id text, lease_until timestamp(3));
+  CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$UPDATE task SET lease_until = now()$$;
+  CREATE VIEW v AS SELECT lease_until < now() FROM task;`;
+const migrationRefused = (sql) => {
+  const r = replayMigrations([R3_BASE, sql]);
+  assert.ok(r.unmodelled.length + r.doBlocks.length > 0, sql);
+  return r;
+};
+for (const expression of [
+  `U&'UPDATE task SET lease_until = now()' UESCAPE '!'`,
+  `U&'opaque value' UESCAPE '!'`,
+]) {
+  for (const sql of [
+    `SELECT ${expression};`,
+    `SELECT cron.schedule('j', '* * * * *', ${expression});`,
+    `DO $d$ BEGIN PERFORM ${expression}; END $d$;`,
+    `DO $d$ BEGIN PERFORM cron.schedule('j', '* * * * *', ${expression}); END $d$;`,
+  ])
+    test(`FU-274 undecodable string: ${sql}`, () => migrationRefused(sql));
+}
+for (const sql of [
+  `DROP FUNCTION f.x();`,
+  `DROP FUNCTION IF EXISTS f.x;`,
+  `DROP ROUTINE f.x(int);`,
+  `DROP FUNCTION "f".x();`,
+  `DROP VIEW v.x;`,
+  `DROP MATERIALIZED VIEW IF EXISTS v.x;`,
+  `CREATE OR REPLACE VIEW v.x AS SELECT 1;`,
+  `CREATE TABLE p PARTITION OF task.x FOR VALUES IN (1);`,
+  `DROP FUNCTION public.f.x();`,
+  `DROP VIEW public.v.x;`,
+  `CREATE VIEW public.v.x AS SELECT 1;`,
+]) {
+  test(`FU-274 qualified name is never cut: ${sql}`, () => {
+    const r = migrationRefused(sql);
+    assert.equal(r.functions.size, 1, 'public f remains live');
+    assert.match(r.views.get('v').body, /now\(\)/, 'public v retains its clock body');
+    assert.equal(r.tables.has('p'), false);
+  });
+}
+for (const sql of [
+  `DROP FUNCTION public.f();`,
+  `DROP VIEW "public"."v";`,
+  `CREATE OR REPLACE VIEW public.v AS SELECT 1;`,
+  `CREATE TABLE p PARTITION OF public.task FOR VALUES IN (1);`,
+])
+  test(`FU-274 readable qualified name: ${sql}`, () => {
+    assert.deepEqual(replayMigrations([R3_BASE, sql]).unmodelled, []);
+  });
+for (const expression of [
+  `'INSERT' || chr(32) || 'INTO task (id) VALUES (1)'`,
+  `concat_ws(' ', 'INSERT', 'INTO task (id) VALUES (1)')`,
+  `format('%s INTO task (id) VALUES (1)', 'INSERT')`,
+  `'IN' || chr(83) || 'ERT INTO task (id) VALUES (1)'`,
+  `replace('XNSERT INTO task (id) VALUES (1)', 'X', 'I')`,
+  `opaque_builder('pieces', $1)`,
+]) {
+  for (const call of [
+    'dblink_exec',
+    'unknown_executor',
+    'shadow.format',
+    '"select"',
+    'shadow.select',
+    'rasta.pg_catalog.format',
+  ]) {
+    const sql = `SELECT ${call}('c', ${expression});`;
+    test(`FU-274 opaque SQL input: ${sql}`, () => {
+      assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+      migrationRefused(sql);
+      migrationRefused(`DO $$BEGIN PERFORM ${call}('c', ${expression}); END$$;`);
+      assert.match(definitionProblems({ body: sql, header: '' }, r2Scope).join(), /R0/);
+    });
+  }
+}
+for (const sql of [
+  `DISCARD ALL;`,
+  `DISCARD PLANS;`,
+  `DISCARD TEMP;`,
+  `DISCARD SEQUENCES;`,
+  `UPDATE pg_settings SET setting = 'shadow' WHERE name = 'search_path';`,
+  `WITH x AS (SELECT 1) UPDATE ONLY (pg_catalog.pg_settings) SET setting = $1;`,
+  `UPDATE "pg_catalog"."pg_settings" SET setting = $1;`,
+  `INSERT INTO pg_catalog.pg_settings (name, setting) VALUES ($1, $2);`,
+  `DELETE FROM ONLY pg_settings WHERE name = $1;`,
+  `MERGE INTO pg_settings USING task ON true WHEN MATCHED THEN UPDATE SET setting = $1;`,
+])
+  test(`FU-274 session change: ${sql}`, () => {
+    assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+    migrationRefused(sql);
+    migrationRefused(`DO $$BEGIN ${sql} END$$;`);
+  });
+for (const sql of [
+  `CREATE EXTENSION dblink;`,
+  `CREATE EXTENSION IF NOT EXISTS pg_cron;`,
+  `CREATE EXTENSION unreviewed_executor;`,
+  `CREATE EXTENSION pg_trgm WITH SCHEMA shadow;`,
+])
+  test(`FU-274 executor boundary: ${sql}`, () => {
+    migrationRefused(sql);
+    assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+  });
+for (const sql of [`CREATE EXTENSION IF NOT EXISTS btree_gist;`, `CREATE EXTENSION pg_trgm;`])
+  test(`FU-274 non-executing extension: ${sql}`, () => {
+    assert.deepEqual(replayMigrations([sql]).unmodelled, []);
+    assert.deepEqual(problemsIn(sql, r2Scope), []);
+  });
+for (const setting of [`role = 'shadow'`, `"role" = 'shadow'`, `unknown_setting = 'shadow'`]) {
+  test(`FU-274 routine header session change: ${setting}`, () => {
+    migrationRefused(`CREATE FUNCTION g() RETURNS int LANGUAGE sql SET ${setting} AS 'SELECT 1';`);
+    migrationRefused(`CREATE FUNCTION g() RETURNS int AS 'SELECT 1' LANGUAGE sql SET ${setting};`);
+  });
+}
+for (const modifier of ['TEMP', 'TEMPORARY', 'GLOBAL TEMPORARY', 'LOCAL TEMP']) {
+  test(`FU-274 production table shadow: ${modifier}`, () => {
+    assert.match(problemsIn(`CREATE ${modifier} TABLE task (id text);`, r2Scope).join(), /R0/);
+  });
+}
+test('FU-274 value calls and prose remain readable', () => {
+  for (const sql of [
+    `SELECT pg_catalog.format('%s', concat_ws(' ', 'one', 'two'));`,
+    `SELECT replace('opaque data', 'a', 'b');`,
+    `Discard version changes before retrying`,
+  ])
+    assert.deepEqual(problemsIn(sql, r2Scope), [], sql);
+  assert.deepEqual(
+    replayMigrations([
+      `CREATE FUNCTION g() RETURNS int LANGUAGE sql SET statement_timeout = '1s' AS 'SELECT 1';`,
+    ]).unmodelled,
+    [],
+  );
+});
+test('FU-274 scan reaches opaque input without clock words', () => {
+  assert.match(
+    scanOf(
+      'x-service',
+      R3_BASE,
+      `export const sql = "SELECT unknown_executor('pieces', $1)";`,
+    ).join(),
+    /R0/,
+  );
+});
+
 test('the repository passes', () => {
   assert.deepEqual(utcClockProblems(REPOSITORY), []);
 });
