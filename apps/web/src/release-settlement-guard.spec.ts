@@ -215,6 +215,44 @@ export async function releaseThing(form: FormData) {
       rulesOf("const K = 'rel' + 'ease'; export const v = (p) => p[K];", 'app/x/page.tsx'),
     ).toEqual([]);
   });
+  it.each([
+    // The name without an import: destructured from something loaded some other way, or a member of it.
+    [
+      'const { releaseUnresolved } = shared; export const w = (s, t) => releaseUnresolved(s, SCOPE, t);',
+    ],
+    ["export const w = (s, t) => shared['releaseUnresolved'](s, SCOPE, t);"],
+    ['export const w = (s, t) => shared.releaseUnresolved(s, SCOPE, t);'],
+  ])('R1: the primitive named without an import: %s', (source) => {
+    expect(rulesOf(source, 'server/wrapper.ts')).toContain('R1');
+  });
+  it.each([
+    ["export { readUnresolved } from '@/server/unresolved-request';", 'server/wrapper.ts'],
+    ["export { ReleaseScope } from './release-scope';", 'lib/wrapper.ts'],
+    [
+      "import * as made from '@/server/release-scope'; export const s = made['Release' + 'Scope'];",
+      'app/x/actions.ts',
+    ],
+    ["import '@/server/release-scope';", 'app/x/actions.ts'],
+  ])('R1: hiding the store or the scope behind a re-export or namespace: %s', (source, file) => {
+    expect(rulesOf(source, file)).toContain('R1');
+  });
+  it('R2: the withheld token reached by a member, not an import', () => {
+    expect(
+      rulesOf('export const t = (deps, params) => deps.releaseTokenOf(params);', 'app/x/page.tsx'),
+    ).toContain('R2');
+  });
+  it('F2: the release field and query names are declared once, in lib/release-messages', () => {
+    const declared = MODULES.flatMap((name) => {
+      const { text } = sourceOf(name);
+      return [...text.matchAll(/\bconst\s+(RELEASE_FIELD|RELEASE_QUERY)\b/g)].map(
+        (match) => `${name}:${match[1]}`,
+      );
+    });
+    expect(declared.sort()).toEqual([
+      'lib/release-messages:RELEASE_FIELD',
+      'lib/release-messages:RELEASE_QUERY',
+    ]);
+  });
   it('R1: app/ may not use import() or export * at all', () => {
     expect(rulesOf("export const a = () => import('./local');", 'app/x/page.tsx')).toContain('R1');
     expect(rulesOf("export * from './local';", 'app/x/page.tsx')).toContain('R1');
