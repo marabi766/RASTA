@@ -1,6 +1,8 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
+import { readReleaseFeedback } from '@/server/release-feedback';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 import { fetchAssets, type AssetListQuery } from '@/server/assets';
 import { canManageAssets } from '@/server/asset-commands';
 import { assetRegistrationRequest } from '@/server/create-request';
@@ -80,6 +82,14 @@ export default async function AssetsPage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
+      <ReleaseFeedback
+        outcome={readReleaseFeedback(
+          session,
+          '/assets',
+          one(params.release),
+          createState.kind === 'IDLE',
+        )}
+      />
       {!manage && 'releaseToken' in createState && createState.releaseToken ? (
         <UnresolvedRegistrationNotice
           csrfToken={session.csrfToken}

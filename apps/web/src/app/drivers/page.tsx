@@ -2,6 +2,8 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, EmptyState, PageHeader, Section, TopBar } from '@/ui';
 import type { DriverPicker } from '@/lib/driver-fields';
 import { currentSession } from '@/server/current-session';
+import { readReleaseFeedback } from '@/server/release-feedback';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
 import { loadDriverRoster, type DriverRoster } from '@/server/driver-roster';
 import { driverCreationRequest } from '@/server/create-request';
@@ -94,6 +96,14 @@ export default async function DriversPage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/drivers" />}
     >
+      <ReleaseFeedback
+        outcome={readReleaseFeedback(
+          session,
+          '/drivers',
+          one(params.release),
+          createState.kind === 'IDLE',
+        )}
+      />
       {!manage && 'releaseToken' in createState && createState.releaseToken ? (
         <UnresolvedRegistrationNotice
           csrfToken={session.csrfToken}

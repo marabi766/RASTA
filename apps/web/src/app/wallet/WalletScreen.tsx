@@ -35,7 +35,8 @@ import { demoModeOf } from '@/lib/demo-mode';
 import { providerNotice } from '@/lib/wallet-fields';
 import type { TopUpFormState } from './form-state';
 import { TopUpForm } from './TopUpForm';
-import { TopUpReleaseFeedback, UnresolvedTopUpNotice } from './UnresolvedTopUpNotice';
+import { UnresolvedTopUpNotice } from './UnresolvedTopUpNotice';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 import { withContext, type InContext } from '@/lib/page-context';
 import { ContextField } from '@/app/ContextField';
 
@@ -338,7 +339,7 @@ export function WalletScreen({
           </Section>
 
           <Section headingId="top-up" title="افزایش موجودی">
-            <TopUpReleaseFeedback outcome={releaseOutcome} />
+            <ReleaseFeedback outcome={releaseOutcome} />
             {provider.kind !== 'OK' && releaseKey ? (
               <UnresolvedTopUpNotice
                 walletId={wallet.data.id}
