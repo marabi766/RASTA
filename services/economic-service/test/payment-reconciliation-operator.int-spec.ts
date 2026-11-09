@@ -698,11 +698,9 @@ describe('the payment reconciliation operator path (real database)', () => {
         operator.propose(made.intentId, proposal('DECLINED')),
       );
       // The marker is gone, its hold still out: not a state this resolution applies to.
-      await runUnscoped('the suite clears the marker', () =>
-        prisma.client.paymentIntent.update({
-          where: { id: made.intentId },
-          data: { failureReason: null },
-        }),
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET failure_reason = NULL WHERE id = $1',
+        made.intentId,
       );
 
       await expect(

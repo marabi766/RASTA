@@ -986,7 +986,8 @@ export async function coverByHand(accountId: string, amountMinor: bigint): Promi
 /**
  * Writes a payment-intent state the database now refuses: a row from before a column existed, or
  * one forged to prove a reader refuses it (FU-230). As the owner, with
- * `trg_payment_intent_terms_fixed` lifted for this one write, in one transaction that restores it.
+ * `trg_payment_intent_terms_fixed` and `trg_payment_intent_evidenced` lifted for this one write,
+ * in one transaction that restores them.
  */
 export async function plantPaymentIntent(sql: string, ...params: unknown[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
@@ -996,7 +997,15 @@ export async function plantPaymentIntent(sql: string, ...params: unknown[]): Pro
       await tx.$executeRawUnsafe(
         'ALTER TABLE payment_intent DISABLE TRIGGER trg_payment_intent_terms_fixed',
       );
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE payment_intent DISABLE TRIGGER trg_payment_intent_evidenced',
+      );
       await tx.$executeRawUnsafe(sql, ...params);
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE payment_intent ENABLE TRIGGER trg_payment_intent_evidenced',
+      );
       // ISOLATION-ALLOW-UNBOUNDED: as above.
       await tx.$executeRawUnsafe(
         'ALTER TABLE payment_intent ENABLE TRIGGER trg_payment_intent_terms_fixed',

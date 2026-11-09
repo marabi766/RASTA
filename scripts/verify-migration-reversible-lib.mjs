@@ -2291,6 +2291,9 @@ export const ECONOMIC_DATA_ROLLBACK = {
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
+        // FU-230: its evidence trigger reads the task table 20260930200000's down drops, and
+        // refuses the marked intents planted below; rolled back first, re-applied with them.
+        '20261109130000_payment_intent_terms_fixed',
         // An index on the resolution table, which 20261001100000's down drops:
         // rolled back with it, or its ledger row stays and the re-apply below
         // never recreates the index — masked while it was the newest
@@ -3027,6 +3030,8 @@ export const EXPECTED = {
       // A payment intent's terms never change once written; it is never erased (FU-230).
       'trg_payment_intent_terms_fixed',
       'trg_payment_intent_no_truncate',
+      // ...its lifecycle moves only on the service's evidence (#1017 r1 F1).
+      'trg_payment_intent_evidenced',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -3091,6 +3096,7 @@ export const EXPECTED = {
       'wallet_account_debited_later',
       'commission_rule_scope_decided',
       'reject_payment_intent_rewrite',
+      'assert_payment_intent_evidenced',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',

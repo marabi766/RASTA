@@ -1023,6 +1023,41 @@ test('F3: a setting that moves no name replays', () => {
   assert.deepEqual(unmodelled, []);
 });
 
+// FU-266 (#1010 r2): a routine may pin its own path to the catalogue, temporary relations last.
+const PIN = `SET search_path = pg_catalog, pg_temp`;
+test('FU-266: a routine pinning search_path to pg_catalog, pg_temp replays', () => {
+  const { unmodelled } = replayMigrations([
+    BASE,
+    `CREATE FUNCTION g() RETURNS trigger LANGUAGE plpgsql ${PIN} AS $$BEGIN RETURN NEW; END$$;
+     CREATE OR REPLACE FUNCTION h() RETURNS trigger LANGUAGE plpgsql SET search_path TO pg_catalog, pg_temp
+       AS $$BEGIN RETURN NEW; END$$;`,
+  ]);
+  assert.deepEqual(unmodelled, []);
+});
+for (const [name, sql] of [
+  ['the pin as a session SET', `${PIN};`],
+  ['the pin on a database', `ALTER DATABASE d ${PIN};`],
+  ['the pin on a role', `ALTER ROLE r ${PIN};`],
+  ['the pin by ALTER FUNCTION', `ALTER FUNCTION g() ${PIN};`],
+  ['a third schema', `CREATE FUNCTION g() RETURNS void LANGUAGE sql ${PIN}, s AS 'SELECT 1';`],
+  [
+    'temporary first',
+    `CREATE FUNCTION g() RETURNS void LANGUAGE sql SET search_path = pg_temp, pg_catalog AS 'SELECT 1';`,
+  ],
+  [
+    'a quoted name',
+    `CREATE FUNCTION g() RETURNS void LANGUAGE sql SET search_path = "PG_CATALOG", pg_temp AS 'SELECT 1';`,
+  ],
+  [
+    'the catalogue alone',
+    `CREATE FUNCTION g() RETURNS void LANGUAGE sql SET search_path = pg_catalog AS 'SELECT 1';`,
+  ],
+]) {
+  test(`FU-266: a path that is not the pin is refused: ${name}`, () => {
+    assert.notEqual(replayMigrations([BASE, sql]).unmodelled.length, 0, sql);
+  });
+}
+
 test('F4: a DEFAULT is read to its end, past CASE … NULL … END and IS [NOT] NULL', () => {
   const at = (definition) => replaying(`CREATE TABLE t (${definition});`).tables.get('t').get('at');
   assert.deepEqual(

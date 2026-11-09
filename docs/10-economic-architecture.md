@@ -330,11 +330,22 @@ interface PaymentProvider {
 که چرخه `CREATED → AUTHORIZED → CAPTURED | FAILED | REFUNDED` را طی می‌کند. این تضمین
 می‌کند تعویض Provider، مدل دامنه را دست نمی‌زند.
 
-**شرایط یک PaymentIntent پس از نوشتن تغییر نمی‌کند (FU-230).** `trg_payment_intent_terms_fixed` پیش از هر
-UPDATE هر تغییری را رد می‌کند، جز چرخهٔ عمر: `status`، `failure_reason` و زمان‌های `*_at` هر گام. مبلغ، ارز، کیف پول،
-سازمان، Provider، کلید و Hash درخواست و سازنده ثابت‌اند؛ ستونی که بعدها افزوده شود هم ثابت است تا Migrationی خلافش را
-بگوید. `transaction_id` و `provider_reference` یک بار، از تهی، نوشته می‌شوند و دیگر نه تغییر می‌کنند نه پاک می‌شوند.
-DELETE و TRUNCATE هم رد می‌شوند: پرداخت هرگز پاک نمی‌شود.
+**شرایط یک PaymentIntent پس از نوشتن تغییر نمی‌کند و چرخهٔ عمرش فقط روی گام‌های سرویس، با شاهد، جلو می‌رود
+(FU-230، ‏#1017 r1).** `trg_payment_intent_terms_fixed` پیش از هر نوشتن:
+
+- INSERT فقط `CREATED` و خالی: بی‌نشانگر، بی‌زمان، بی‌تراکنش، بی‌مرجع Provider (INSERT و COPY حالت بعدی نمی‌کارند)؛
+- UPDATE جز `status`، `failure_reason`، چهار زمان `*_at`، `transaction_id` و `provider_reference` چیزی را تغییر نمی‌دهد
+  (ستون تازه هم ثابت است)، و (وضعیت، نشانگر) را فقط روی یکی از لبه‌های جدول `edges` در Migration جابه‌جا می‌کند: همان نُه
+  نوشتن `payment.service.ts` و `payment-reconciler.ts`. هر لبه ستون‌های خودش را از تهی به مقدار می‌نویسد و بقیه دست‌نخورده
+  می‌مانند: هیچ زمانی دوباره نوشته، پاک یا به عقب برده نمی‌شود؛ وضعیت هرگز به عقب برنمی‌گردد. کد خطا فقط روی `FAILED`؛
+- DELETE و TRUNCATE رد می‌شوند.
+
+`trg_payment_intent_evidenced` (موکول به COMMIT): `transaction_id` فقط WALLET_TOP_UP خود همین Intent است (همان سازمان،
+مبلغ و ارز، `source_reference` = شناسهٔ Intent). نشانگری که Task تطبیق دنبالش می‌کند (`CAPTURED_REFUND_UNKNOWN` و چهار
+`REFUND_*`) فقط وقتی Task باز از همان نوع هست گذاشته می‌شود، و فقط در تراکنشی برداشته می‌شود که همان Task را با نتیجهٔ همان
+حرکت DONE می‌کند. پس نشانگر به‌تنهایی شاهد مالی نیست. باقی‌مانده: لبه‌هایی که سرویس روی پاسخ هم‌زمان Provider می‌رود
+(`REFUND_REQUESTED → REFUND_DECLINED_RELEASE_PENDING | REFUNDED_NOT_REVERSED`، `AUTHORIZED → CAPTURED_NOT_CREDITED`) در
+پایگاه داده شاهدی ندارند، چون پاسخ Provider ذخیره نمی‌شود؛ ترتیب و آینده‌نبودن زمان‌ها هم هنوز بررسی نمی‌شود.
 
 ---
 

@@ -4,6 +4,7 @@ import { ulid } from 'ulid';
 import { getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
 import {
+  plantPaymentIntent,
   asActor,
   cleanup,
   newPrisma,
@@ -150,6 +151,30 @@ describe('the payment reconciler (real database)', () => {
         prisma,
         'paymentPendingDue',
         await fixtureTaskIds(paymentIntentId, true),
+      ),
+    );
+
+  /**
+   * The states a B0 instance (no task writes) leaves, planted after the service's own flow:
+   * the database now refuses B0's writes themselves (`trg_payment_intent_evidenced`, #1017 r1),
+   * so a still-running B0 fails closed, and only rows from before the trigger reach the heal.
+   */
+  const b0LeftNoTask = (paymentIntentId: string) =>
+    runUnscoped('the suite removes the task, as B0 never wrote it', () =>
+      prisma.client.$executeRawUnsafe(
+        `DELETE FROM payment_reconciliation_task WHERE payment_intent_id = $1`,
+        paymentIntentId,
+      ),
+    );
+  const b0ClosedNothing = (paymentIntentId: string, status: 'PENDING' | 'ESCALATED' = 'PENDING') =>
+    runUnscoped('the suite reopens the task, as B0 never closed it', () =>
+      prisma.client.$executeRawUnsafe(
+        `UPDATE payment_reconciliation_task
+            SET status = $2::"PaymentReconciliationStatus", done_at = NULL, resolution = NULL,
+                resolved_by = NULL
+          WHERE payment_intent_id = $1`,
+        paymentIntentId,
+        status,
       ),
     );
 
@@ -602,11 +627,9 @@ describe('the payment reconciler (real database)', () => {
     it('escalates a refund hold that outlived its marker instead of closing it', async () => {
       const organizationId = `${org.b}-ORPHAN`;
       const made = await unknownButRefunded(organizationId, 310n);
-      await runUnscoped('the suite corrupts the marker', () =>
-        prisma.client.paymentIntent.update({
-          where: { id: made.intentId },
-          data: { failureReason: null },
-        }),
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET failure_reason = NULL WHERE id = $1',
+        made.intentId,
       );
 
       await sweeperWith().runOnce();
@@ -770,14 +793,14 @@ describe('the payment reconciler (real database)', () => {
       const organizationId = `${org.b}-HEAL-OPEN`;
       const unknown = await topUp(`${organizationId}-U`, 330n);
       const known = await topUp(`${organizationId}-K`, 340n);
-      const b0 = jest.spyOn(wiring.paymentReconciliation, 'open').mockResolvedValue(undefined);
       loseRefundResponse();
       await expect(refundBy(`${organizationId}-U`, unknown.intentId)).rejects.toThrow('lost');
       jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
       await expect(refundBy(`${organizationId}-K`, known.intentId)).rejects.toThrow(
         'connection reset',
       );
-      b0.mockRestore();
+      await b0LeftNoTask(unknown.intentId);
+      await b0LeftNoTask(known.intentId);
       expect(await tasksOf(unknown.intentId)).toEqual([]);
       expect(await tasksOf(known.intentId)).toEqual([]);
 
@@ -827,10 +850,10 @@ describe('the payment reconciler (real database)', () => {
         ),
       );
       // B0 finishes both refunds and closes nothing.
-      const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
       await refundBy(pending.org, pending.intentId);
       await refundBy(escalated.org, escalated.intentId);
-      b0.mockRestore();
+      await b0ClosedNothing(pending.intentId);
+      await b0ClosedNothing(escalated.intentId, 'ESCALATED');
       expect((await tasksOf(pending.intentId))[0]?.status).toBe('PENDING');
       expect((await tasksOf(escalated.intentId))[0]?.status).toBe('ESCALATED');
       const ask = jest.spyOn(provider, 'getRefundStatus');
@@ -911,9 +934,8 @@ describe('the payment reconciler (real database)', () => {
       const made = await topUp(organizationId, 370n);
       jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
       await expect(refundBy(organizationId, made.intentId)).rejects.toThrow('connection reset');
-      const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
       await refundBy(organizationId, made.intentId);
-      b0.mockRestore();
+      await b0ClosedNothing(made.intentId);
       await plantRefundHold(`${org.c}-HEAL-FOREIGN`, made.walletId, made.intentId);
       // Pushed out, so only the healing pass can close it: the claim would close it too.
       await runUnscoped('the suite pushes the task out', () =>
@@ -959,10 +981,9 @@ describe('the payment reconciler (real database)', () => {
       for (const index of [0, 1]) {
         const tenant = `${organizationId}-M${index}`;
         const made = await topUp(tenant, 100n);
-        const b0 = jest.spyOn(wiring.paymentReconciliation, 'open').mockResolvedValue(undefined);
         loseRefundResponse();
         await expect(refundBy(tenant, made.intentId)).rejects.toThrow('lost');
-        b0.mockRestore();
+        await b0LeftNoTask(made.intentId);
         missing.push(made.intentId);
       }
       const start = { createdAt: from, id: '' };
@@ -995,9 +1016,8 @@ describe('the payment reconciler (real database)', () => {
         const made = await topUp(tenant, 100n);
         jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
         await expect(refundBy(tenant, made.intentId)).rejects.toThrow('connection reset');
-        const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
         await refundBy(tenant, made.intentId);
-        b0.mockRestore();
+        await b0ClosedNothing(made.intentId);
         settled.push(made.intentId);
       }
       const start = { createdAt: from, id: '' };
@@ -1019,11 +1039,11 @@ describe('the payment reconciler (real database)', () => {
     it('leaves a task alone whose refund hold outlived its marker: that is for a person', async () => {
       const organizationId = `${org.b}-HEAL-KEEP`;
       const made = await unknownButRefunded(organizationId, 370n);
-      await runUnscoped('the suite corrupts the marker and pushes the task out', async () => {
-        await prisma.client.paymentIntent.update({
-          where: { id: made.intentId },
-          data: { failureReason: null },
-        });
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET failure_reason = NULL WHERE id = $1',
+        made.intentId,
+      );
+      await runUnscoped('the suite pushes the task out', async () => {
         await prisma.client.$executeRawUnsafe(
           eligibilityClockSql`UPDATE payment_reconciliation_task SET next_attempt_at = now() + interval '1 hour'
             WHERE payment_intent_id = $1`,
@@ -1109,9 +1129,8 @@ describe('the payment reconciler (real database)', () => {
       const made = await topUp(organizationId, 440n);
       jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
       await expect(refundBy(organizationId, made.intentId)).rejects.toThrow('connection reset');
-      const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
       await refundBy(organizationId, made.intentId);
-      b0.mockRestore();
+      await b0ClosedNothing(made.intentId);
       jest
         .spyOn(wiring.paymentReconciliation, 'heal')
         .mockResolvedValue({ opened: 0, closed: 0, cursor: { missing: null, stale: null } });
