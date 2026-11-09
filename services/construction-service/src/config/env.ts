@@ -10,6 +10,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   serviceUrlSchema,
+  wholeNumberEnv,
 } from '@rasta/config';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
@@ -439,7 +440,11 @@ export const constructionEnvSchema = baseEnvSchema
       .max(300_000)
       .prefault(5000),
     CONSTRUCTION_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
-    CONSTRUCTION_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(120),
+    CONSTRUCTION_RECONCILE_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('120')
+      .pipe(wholeNumberEnv(10, 3600)),
     CONSTRUCTION_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).prefault(30),
     CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce
       .number()
@@ -464,7 +469,11 @@ export const constructionEnvSchema = baseEnvSchema
       .max(300_000)
       .prefault(5000),
     CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
-    CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(60),
+    CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('60')
+      .pipe(wholeNumberEnv(10, 3600)),
     /**
      * A tender whose close failed is not claimed again for
      * `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^failures)` — so a tender that
@@ -501,7 +510,11 @@ export const constructionEnvSchema = baseEnvSchema
       .max(300_000)
       .prefault(10_000),
     CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).prefault(10),
-    CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(120),
+    CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('120')
+      .pipe(wholeNumberEnv(10, 3600)),
     CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
@@ -521,7 +534,11 @@ export const constructionEnvSchema = baseEnvSchema
       .max(604_800)
       .prefault(600),
 
-    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).prefault(1),
+    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('1')
+      .pipe(wholeNumberEnv(0, 1000)),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
     CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),
     CONSTRUCTION_PROGRESS_ALLOW_DECREASE: booleanEnv(false),
@@ -626,7 +643,11 @@ export const constructionEnvSchema = baseEnvSchema
       .prefault(TENDER_OPEN_TIMEOUT_DEFAULT_MS),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
-    CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
+    CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('24')
+      .pipe(wholeNumberEnv(1, 168)),
 
     /**
      * The largest offset of any replica's clock from true time, in seconds (PM decision D-065).
@@ -638,7 +659,11 @@ export const constructionEnvSchema = baseEnvSchema
      * retention the TTL setting allows (1 hour), so a deadline can never be pushed before its claim
      * (`env.spec.ts` holds that arithmetic to the bounds).
      */
-    CONSTRUCTION_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).prefault(30),
+    CONSTRUCTION_CLOCK_SKEW_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('30')
+      .pipe(wholeNumberEnv(0, 300)),
 
     /**
      * How long one interactive transaction may stay open, BEGIN to COMMIT, before

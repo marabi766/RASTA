@@ -211,3 +211,34 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
     );
   });
 });
+
+// FU-304: an explicitly empty value must not silently replace the default with zero.
+describe('strict whole-number optional-zero settings', () => {
+  const name = 'MAINTENANCE_DEFAULT_LEAD_DAYS';
+  const loadSetting = (value?: string) => loadMaintenanceEnv({ ...BASE, [name]: value })[name];
+
+  it('preserves the unset default and both inclusive bounds', () => {
+    expect(loadSetting()).toBe(7);
+    expect(loadSetting('0')).toBe(0);
+    expect(loadSetting('365')).toBe(365);
+  });
+
+  it.each([
+    '',
+    ' ',
+    '\t',
+    ' 7 ',
+    '+7',
+    '-1',
+    '7.0',
+    '7e0',
+    '0x7',
+    '۰',
+    '٠',
+    '7\n',
+    '366',
+    '0'.repeat(3) + '7',
+  ])('refuses malformed or out-of-range input %j', (value) => {
+    expect(() => loadSetting(value)).toThrow(name);
+  });
+});

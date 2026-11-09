@@ -271,20 +271,21 @@ function scheduledNow(): Date {
 }
 
 /**
- * Removes the return requests the named organizations wrote (RUN-005), and the record of the
- * hold-deadline backfill (FU-234). The service never deletes one — each table's trigger refuses
+ * Removes the return requests the named organizations wrote (RUN-005), the record of the
+ * hold-deadline backfill (FU-234), and their order lines and offer price history (D-156, #1010
+ * r1). The service never deletes one — each table's trigger refuses
  * it — so the suite's own removal goes through the **owner**
  * connection and lifts each guard for one transaction, never through the runtime client under
  * test, or the suites would teach the code to do it. Without the owner URL there is nothing it can
  * do, and a suite that wrote a return fails at the order delete that follows, saying why.
  */
-async function purgeReturns(orgs: readonly string[]): Promise<void> {
+async function purgeGuarded(orgs: readonly string[]): Promise<void> {
   const url = process.env.DATABASE_URL_MARKETPLACE_MIGRATOR;
   if (!url) return;
   const owner = new PrismaClient({ datasources: { db: { url: withUtcSession(url) } } });
   try {
     await owner.$transaction(async (tx) => {
-      for (const [table, trigger] of [
+      for (const [table, trigger, also = ''] of [
         // FU-234: the hold-deadline backfill's record, append-only, restricting its orders.
         ['order_hold_deadline_revocation', 'tg_order_hold_deadline_revocation_guard'],
         ['order_hold_deadline_backfill', 'tg_order_hold_deadline_backfill_guard'],
@@ -292,10 +293,18 @@ async function purgeReturns(orgs: readonly string[]): Promise<void> {
         ['return_status_history', 'tg_return_status_history_guard'],
         ['return_line', 'tg_return_line_guard'],
         ['return_request', 'tg_return_request_guard'],
+        // D-156: lines also of other buyers' orders to a named supplier, which that order's
+        // delete below would cascade into; then the prices they named.
+        [
+          'order_line',
+          'tg_order_line_price_guard',
+          `OR "order_id" IN (SELECT "id" FROM "order" WHERE "supplier_organization_id" = ANY($1::text[]))`,
+        ],
+        ['offer_price_history', 'tg_offer_price_history_guard'],
       ] as const) {
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
         await tx.$executeRawUnsafe(
-          `DELETE FROM "${table}" WHERE "organization_id" = ANY($1::text[])`,
+          `DELETE FROM "${table}" WHERE "organization_id" = ANY($1::text[]) ${also}`,
           [...orgs],
         );
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
@@ -321,7 +330,7 @@ export async function cleanup(
   const orgs = [...organizationIds];
   const client = prisma.client;
 
-  await purgeReturns(orgs);
+  await purgeGuarded(orgs);
 
   await runUnscoped('the integration suite removes what it wrote, across tenants', async () => {
     await client.$executeRawUnsafe(
@@ -345,16 +354,8 @@ export async function cleanup(
       orgs,
     );
     await client.$executeRawUnsafe(
-      `DELETE FROM order_line WHERE organization_id = ANY($1::text[])`,
-      orgs,
-    );
-    await client.$executeRawUnsafe(
       `DELETE FROM "order" WHERE organization_id = ANY($1::text[])
          OR supplier_organization_id = ANY($1::text[])`,
-      orgs,
-    );
-    await client.$executeRawUnsafe(
-      `DELETE FROM offer_price_history WHERE organization_id = ANY($1::text[])`,
       orgs,
     );
     await client.$executeRawUnsafe(
