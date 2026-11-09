@@ -321,8 +321,9 @@ describe('lock-then-read guards hold under every isolation level (real database)
     it('(i) a decision is never changed or removed', async () => {
       const KEPT = /a commission scope decision is never changed or removed/;
       for (const change of [
-        `UPDATE commission_rule_scope_decision SET decided_at = '2020-01-01'`,
-        'DELETE FROM commission_rule_scope_decision',
+        `UPDATE commission_rule_scope_decision SET decided_at = '2020-01-01'
+          WHERE transaction_id = pg_current_xact_id()`,
+        'DELETE FROM commission_rule_scope_decision WHERE transaction_id = pg_current_xact_id()',
       ]) {
         await expect(
           runtime.$transaction(async (tx) => {
@@ -330,10 +331,7 @@ describe('lock-then-read guards hold under every isolation level (real database)
               `SELECT commission_rule_scope_change($1, 'LOGISTICS', NULL)::text AS r`,
               ruleOrg(),
             );
-            await tx.$executeRawUnsafe(
-              // ISOLATION-ALLOW-UNBOUNDED: refused before any row changes; rolled back.
-              `${change} WHERE transaction_id = pg_current_xact_id()`,
-            );
+            await tx.$executeRawUnsafe(change);
           }),
         ).rejects.toThrow(KEPT);
       }
