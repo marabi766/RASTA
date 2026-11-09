@@ -15,6 +15,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   serviceUrlSchema,
+  wholeNumberEnv,
 } from '@rasta/config';
 import { procurementOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-provider';
@@ -389,12 +390,11 @@ export const procurementEnvSchema = baseEnvSchema
       .max(300_000)
       .prefault(5000),
     PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
-    PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(10)
-      .max(3600)
-      .prefault(60),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('60')
+      .pipe(wholeNumberEnv(10, 3600)),
     PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
@@ -426,13 +426,16 @@ export const procurementEnvSchema = baseEnvSchema
       .max(MAX_LIVE_DEMANDS_LIMIT)
       .prefault(DEFAULT_MAX_LIVE_DEMANDS),
 
-    PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
-    PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(10)
-      .max(900)
-      .prefault(120),
+    PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('24')
+      .pipe(wholeNumberEnv(1, 168)),
+    PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('120')
+      .pipe(wholeNumberEnv(10, 900)),
 
     /**
      * The largest offset of any replica's clock (and the database's) from true time, in seconds
@@ -443,7 +446,11 @@ export const procurementEnvSchema = baseEnvSchema
      * response is kept at least `B` past it. Beyond this offset the guarantee is void — alarm on a
      * clock offset above half of it. At its largest (300) B is 607 s.
      */
-    PROCUREMENT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).prefault(30),
+    PROCUREMENT_CLOCK_SKEW_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('30')
+      .pipe(wholeNumberEnv(0, 300)),
 
     /**
      * The sweeper that ends windows past `closes_at` (ADR-070 § 2, plan PR 2; the shape of
@@ -462,7 +469,11 @@ export const procurementEnvSchema = baseEnvSchema
       .max(300_000)
       .prefault(5000),
     PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
-    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(60),
+    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('60')
+      .pipe(wholeNumberEnv(10, 3600)),
     PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
