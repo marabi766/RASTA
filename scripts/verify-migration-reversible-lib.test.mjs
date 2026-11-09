@@ -1047,10 +1047,18 @@ test('advisoryLockGateScript binds each gate to its signature, attributes and bo
   for (const { signature, md5: hash } of ADVISORY_LOCK_GATES) {
     assert.ok(sql.includes(`('${signature}', '${hash}')`), signature);
   }
-  // In the schema checked, with the attributes reviewed; a name alone or a text in the body is not.
-  assert.match(sql, /n\.nspname = 'migration_check' AND p\.prokind = 'f' AND NOT p\.prosecdef/);
-  assert.match(sql, /p\.proconfig IS NULL AND p\.provolatile = 'v'/);
+  // By the attributes and body reviewed, in any schema (the deployed `public` holds the same
+  // gate); a name alone or a text in the body is not one, and a gate's name on anything else is
+  // refused.
+  assert.match(
+    sql,
+    /p\.prokind = 'f' AND NOT p\.prosecdef AND NOT p\.proretset AND p\.proconfig IS NULL/,
+  );
   assert.match(sql, /pg_catalog\.md5\(p\.prosrc\)\) IN \(/);
+  assert.match(
+    sql,
+    /WHEN p\.proname IN \('read_committed_xact_lock', 'read_committed_xact_lock_shared'\)/,
+  );
   assert.doesNotMatch(sql, /position\(/);
   // Every schema but the catalogues, every routine's whole definition (a SQL-standard body too),
   // and every other stored expression.
@@ -1315,7 +1323,13 @@ const GATE_PROBES = [
     CREATE FUNCTION elsewhere.f(lock_key BIGINT) RETURNS VOID AS $$
     BEGIN PERFORM pg_advisory_xact_lock(lock_key); END; $$ LANGUAGE plpgsql;`,
   ],
-  ['a gate copied, byte for byte, into another schema', 'refused', 'GATE_ELSEWHERE'],
+  [
+    "a function with a gate's name that takes no lock, in another schema",
+    'refused',
+    String.raw`
+    CREATE FUNCTION elsewhere.read_committed_xact_lock(lock_key BIGINT) RETURNS VOID AS $$
+    BEGIN END; $$ LANGUAGE plpgsql VOLATILE;`,
+  ],
   [
     'a gate with another attribute (SECURITY DEFINER)',
     'refused',
@@ -1333,6 +1347,7 @@ const GATE_PROBES = [
     'refused',
     'CREATE VIEW target.v AS SELECT pg_catalog.pg_advisory_xact_lock(1)::text AS locked;',
   ],
+  ['control: the same gate in another schema (the deployed public)', 'accepted', 'GATE_ELSEWHERE'],
   [
     'control: a guard that locks through the gate',
     'accepted',

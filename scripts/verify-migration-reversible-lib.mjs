@@ -722,6 +722,24 @@ VALUES ('${id}', 'ORG-MIGCHECK-PAYEE', '${transactionId}', ${ruleId ? `'${ruleId
 const COMMISSION_TRIGGER_HERE = `SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
    WHERE t.tgname = 'trg_commission_append_only' AND c.relnamespace = current_schema()::regnamespace`;
 
+/**
+ * `sql`, probe rules written in the past, with `trg_commission_rule_effective_dated` (where it
+ * exists) lifted for this one statement: since 20261109120000 no rule starts in the past and no rule
+ * that has started is deleted (#1016 r1 F1), so the probes plant their history around it.
+ */
+const AROUND_COMMISSION_HISTORY = (sql) => `DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+              WHERE t.tgname = 'trg_commission_rule_effective_dated'
+                AND c.relnamespace = current_schema()::regnamespace) THEN
+    EXECUTE 'ALTER TABLE "commission_rule" DISABLE TRIGGER "trg_commission_rule_effective_dated"';
+    ${sql}
+    EXECUTE 'ALTER TABLE "commission_rule" ENABLE TRIGGER "trg_commission_rule_effective_dated"';
+  ELSE
+    ${sql}
+  END IF;
+END $$;`;
+
 /** `sql`, a probe commission row, with the proof of a settlement's creation (FU-097) out of its way. */
 const WITHOUT_COMMISSION_PROOF = (sql) => {
   const toggle = (action) => `DO $$
@@ -763,7 +781,7 @@ BEGIN
     EXECUTE 'ALTER TABLE "commission" ENABLE TRIGGER "trg_commission_append_only"';
   END IF;
 END $$;
-DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_%';
+${AROUND_COMMISSION_HISTORY(`DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_%';`)}
 ${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_%'`)}`;
 
 /**
@@ -842,21 +860,21 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   },
   {
     label: 'commission: a rule that has been in force keeps its status (D-057)',
-    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+    sql: `${AROUND_COMMISSION_HISTORY(`INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
             "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
           VALUES ('CMR_MIGCHECK_PAST', 'ORG-MIGCHECK-OTHER', 'LOGISTICS', 100,
-            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');
+            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`)}
           UPDATE "commission_rule" SET "status" = 'INACTIVE' WHERE id = 'CMR_MIGCHECK_PAST';`,
     mustFail: 'keeps its status',
   },
   {
     label: 'commission: two active rules of one scope never overlap (D-057)',
-    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+    sql: AROUND_COMMISSION_HISTORY(`INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
             "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
           VALUES ('CMR_MIGCHECK_EARLIER', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 100,
             '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK'),
                  ('CMR_MIGCHECK_OVERLAP', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 500,
-            '2020-01-15', NULL, 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+            '2020-01-15', NULL, 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`),
     mustFail: 'ex_commission_rule_type_only_no_overlap',
   },
   {
@@ -908,7 +926,8 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
     sql: [
       `INSERT INTO "commission_rule" ("id", "organization_id", "business_line", "rate_basis_points",
          "valid_from", "status", "created_by", "updated_at", "updated_by")
-       VALUES ('CMR_MIGCHECK_LINE', 'ORG-MIGCHECK-PAYEE', 'PARTS', 100, now(), 'ACTIVE',
+       VALUES ('CMR_MIGCHECK_LINE', 'ORG-MIGCHECK-PAYEE', 'PARTS', 100,
+         commission_rule_scope_change('ORG-MIGCHECK-PAYEE', 'PARTS', NULL), 'ACTIVE',
          'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
       TRANSACTION_MIGCHECK('TXN_MIGCHECK_LINE', 'PARTS'),
       WITHOUT_COMMISSION_PROOF(
@@ -4685,9 +4704,11 @@ export function assertionScript(expected, present, schema) {
 // whose spelling is not the name PostgreSQL reads, and SQL text a routine
 // executes (EXECUTE, query_to_xml, ts_stat, dblink, pg_background, cron), whose
 // names it cannot see. A comment counts as text, so it can only refuse. A gate
-// is one only as reviewed: in the schema checked, by signature, attributes and
-// the md5 of its body; there is no other exemption. Extension members are the
-// extension's.
+// is one only as reviewed: by signature, attributes and the md5 of its body, in
+// whichever schema holds it (the deployed `public` beside `migration_check` is
+// the same gate). A routine with a gate's name that is not that gate is refused
+// even if it locks nothing: a guard calling the name would get no lock and no
+// check. There is no other exemption. Extension members are the extension's.
 // -----------------------------------------------------------------------------
 
 /** The reviewed gates: what each review read (economic and inventory 20261109120000). */
@@ -4714,6 +4735,9 @@ export function advisoryLockGateScript(schema) {
   const gates = ADVISORY_LOCK_GATES.map(({ signature, md5 }) => `('${signature}', '${md5}')`).join(
     ', ',
   );
+  const names = [...new Set(ADVISORY_LOCK_GATES.map(({ signature }) => signature.split('(')[0]))]
+    .map((name) => `'${name}'`)
+    .join(', ');
   // Not the catalogues', not an extension's.
   const own = (classid, objid) =>
     `NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend e WHERE e.classid = '${classid}'::regclass
@@ -4721,20 +4745,25 @@ export function advisoryLockGateScript(schema) {
   return `DO $$
 DECLARE offenders TEXT;
 BEGIN
-  WITH rel AS (
+  WITH gate AS (
+    SELECT p.oid, (p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',
+                   pg_catalog.md5(p.prosrc)) IN (${gates})
+             AND p.prokind = 'f' AND NOT p.prosecdef AND NOT p.proretset AND p.proconfig IS NULL
+             AND p.provolatile = 'v' AND p.prorettype = 'pg_catalog.void'::regtype
+             AND p.prolang = (SELECT l.oid FROM pg_catalog.pg_language l WHERE l.lanname = 'plpgsql') AS reviewed
+      FROM pg_catalog.pg_proc p
+  ), rel AS (
     SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
        AND ${own('pg_catalog.pg_class', 'c.oid')}
   ), stored(what, def, routine) AS (
-    SELECT 'function ' || p.oid::regprocedure::text, pg_catalog.pg_get_functiondef(p.oid), true
+    SELECT 'function ' || p.oid::regprocedure::text,
+           CASE WHEN p.proname IN (${names}) THEN 'pg_advisory_ (a gate''s name, not the reviewed gate)'
+                ELSE pg_catalog.pg_get_functiondef(p.oid) END, true
       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+      JOIN gate g ON g.oid = p.oid
      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prokind <> 'a'
-       AND ${own('pg_catalog.pg_proc', 'p.oid')}
-       AND NOT (n.nspname = '${schema}' AND p.prokind = 'f' AND NOT p.prosecdef AND NOT p.proretset
-                AND p.proconfig IS NULL AND p.provolatile = 'v' AND p.prorettype = 'pg_catalog.void'::regtype
-                AND p.prolang = (SELECT l.oid FROM pg_catalog.pg_language l WHERE l.lanname = 'plpgsql')
-                AND (p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',
-                     pg_catalog.md5(p.prosrc)) IN (${gates}))
+       AND ${own('pg_catalog.pg_proc', 'p.oid')} AND NOT g.reviewed
     UNION ALL
     SELECT 'rule ' || r.rulename || ' on ' || r.ev_class::regclass::text, pg_catalog.pg_get_ruledef(r.oid), false
       FROM pg_catalog.pg_rewrite r WHERE r.ev_class IN (SELECT oid FROM rel)
