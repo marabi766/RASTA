@@ -17,6 +17,7 @@ import {
   type ParticipationRuleView,
 } from './participation';
 import type { CreateParticipationRuleDto } from './dto';
+import { lockReadCommitted } from '../prisma/read-committed-lock';
 
 /**
  * The participation score: its rule versions and the caller's breakdown
@@ -158,7 +159,7 @@ export class ParticipationService {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${PARTICIPATION_RULE_LOCK_KEY})`;
+      await lockReadCommitted(tx, PARTICIPATION_RULE_LOCK_KEY);
       const previous = await this.ruleInForce(tx);
       assertReplacing(previous?.version ?? 0, dto.expectedCurrentVersion);
 

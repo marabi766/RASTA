@@ -17,6 +17,7 @@ import {
   type RecognitionRuleView,
 } from './recognition';
 import type { CreateRecognitionRuleDto } from './dto';
+import { lockReadCommitted } from '../prisma/read-committed-lock';
 
 /**
  * Levels and badges: their versions and what the caller holds (COM-012
@@ -96,7 +97,7 @@ export class RecognitionService {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${RECOGNITION_RULE_LOCK_KEY})`;
+      await lockReadCommitted(tx, RECOGNITION_RULE_LOCK_KEY);
       const previous = await this.ruleInForce(tx);
       assertReplacing(previous?.version ?? 0, dto.expectedCurrentVersion);
 

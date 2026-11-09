@@ -8,7 +8,7 @@ import { PrismaClient } from '../src/generated/prisma';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { CONSUMED_EVENTS } from '../src/events/consumed';
 import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id, ownerDatabaseUrl, wire } from './helpers';
+import { aroundCommissionHistory, cleanup, id, ownerDatabaseUrl, wire } from './helpers';
 import { FakeSourceFacts } from './source-facts.fake';
 
 /**
@@ -261,8 +261,9 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
   afterAll(async () => {
     await cleanup(harness.prisma, [payer, payee, workshop, clock, closing, opening, platformed]);
     if (platformRules.length > 0) {
-      await runUnscoped('the suite removes the platform-wide rules it wrote', () =>
-        harness.prisma.client.commissionRule.deleteMany({ where: { id: { in: platformRules } } }),
+      // Started rules are history at the database (#1016 r1 F1): removed around that guard.
+      await aroundCommissionHistory((tx) =>
+        tx.commissionRule.deleteMany({ where: { id: { in: platformRules } } }),
       );
     }
     await owner.$disconnect();
@@ -375,7 +376,7 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
           `INSERT INTO commission_rule
              (id, organization_id, business_line, rate_basis_points, valid_from, status,
               created_by, updated_by, updated_at)
-           VALUES ($1, $2, 'PARTS', 900, now() AT TIME ZONE 'UTC', 'ACTIVE',
+           VALUES ($1, $2, 'PARTS', 900, commission_rule_scope_change($2, 'PARTS', NULL), 'ACTIVE',
                    'itest-owner', 'itest-owner', now())`,
           `CMR_${ulid()}`,
           payee,
@@ -464,16 +465,20 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
         businessLine: 'CONSTRUCTION',
       });
 
-      // Narrower, so it would win a selection made now — and backdated a day.
-      await owner.$executeRawUnsafe(
-        `INSERT INTO commission_rule
+      // Narrower, so it would win a selection made now — and backdated a day. The database refuses
+      // that INSERT now (guards-read-committed.int-spec.ts, #1016 r1 F1); planted around it, the
+      // recorded pricing still holds.
+      await aroundCommissionHistory((tx) =>
+        tx.$executeRawUnsafe(
+          `INSERT INTO commission_rule
            (id, organization_id, business_line, transaction_type, rate_basis_points, valid_from,
             status, created_by, updated_by, updated_at)
          VALUES ($1, $2, 'CONSTRUCTION', 'CONSTRUCTION_STATEMENT', 5000,
                  (now() AT TIME ZONE 'UTC') - interval '1 day', 'ACTIVE',
                  'itest-owner', 'itest-owner', now())`,
-        `CMR_${ulid()}`,
-        payee,
+          `CMR_${ulid()}`,
+          payee,
+        ),
       );
 
       await settle('construction', payer, recorded);
@@ -567,17 +572,20 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
       );
       expect(cutover?.at).toBeInstanceOf(Date);
 
-      // In force before the deployment: the workshop's type-only rule.
+      // In force before the deployment: the workshop's type-only rule, planted in the past around
+      // the database's refusal (#1016 r1 F1).
       const legacyId = `CMR_${ulid()}`;
-      await owner.$executeRawUnsafe(
-        `INSERT INTO commission_rule
+      await aroundCommissionHistory((tx) =>
+        tx.$executeRawUnsafe(
+          `INSERT INTO commission_rule
            (id, organization_id, business_line, transaction_type, rate_basis_points, valid_from,
             status, created_by, updated_by, updated_at)
          VALUES ($1, $2, NULL, 'MAINTENANCE_SERVICE', 300,
                  (SELECT line_pricing_from FROM commission_pricing_cutover) - interval '30 days',
                  'ACTIVE', 'itest-owner', 'itest-owner', now())`,
-        legacyId,
-        workshop,
+          legacyId,
+          workshop,
+        ),
       );
       // Written since: the workshop's line rule.
       const line = await createRule({
