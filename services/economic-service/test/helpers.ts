@@ -739,6 +739,9 @@ export async function cleanup(
         for (const [table, trigger] of [
           ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
           ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
+          // The payment evidence (#1017 r3): append-only, and it holds tasks and intents.
+          ['payment_provider_outcome', 'trg_payment_provider_outcome_kept'],
+          ['payment_reconciliation_decision', 'trg_payment_reconciliation_decision_kept'],
         ]) {
           // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
           await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
@@ -1010,6 +1013,35 @@ export async function plantPaymentIntent(sql: string, ...params: unknown[]): Pro
       await tx.$executeRawUnsafe(
         'ALTER TABLE payment_intent ENABLE TRIGGER trg_payment_intent_terms_fixed',
       );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+/**
+ * Rewrites a reconciliation task's history the way a build without task writes (B0) left it
+ * (#1017 r3): the runtime role may no longer finish, reopen or remove a decided task. As the
+ * owner, with the append-only evidence triggers lifted for these statements only, in one
+ * transaction that restores them. Each statement is `[sql, ...params]`.
+ */
+export async function plantPaymentTask(...statements: [string, ...unknown[]][]): Promise<void> {
+  const lifted = [
+    ['payment_reconciliation_decision', 'trg_payment_reconciliation_decision_kept'],
+    ['payment_provider_outcome', 'trg_payment_provider_outcome_kept'],
+  ];
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      for (const [table, trigger] of lifted) {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+        await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+      }
+      for (const [sql, ...params] of statements) await tx.$executeRawUnsafe(sql, ...params);
+      for (const [table, trigger] of lifted) {
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
+      }
     });
   } finally {
     await owner.$disconnect();

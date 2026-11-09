@@ -76,8 +76,9 @@ export class PaymentReconciliationRepository {
   }
 
   /**
-   * Marks the intent's open task DONE with how and by whom. Returns the rows
-   * closed: 0 when the intent had none, which is not an error — a refund
+   * Marks the intent's open task DONE with how and by whom, by recording its
+   * decision (`payment_reconciliation_decision`, whose trigger alone may finish
+   * a task; #1017 r3). Returns the rows closed: 0 when the intent had none, which is not an error — a refund
    * recorded by the request path within its own attempt may find the task
    * the same attempt opened, or (for an intent refunded before the queue
    * existed) none.
@@ -85,15 +86,37 @@ export class PaymentReconciliationRepository {
   async close(tx: ExtendedPrismaClient, done: CloseTask): Promise<number> {
     return runUnscoped('a reconciliation task is closed for its intent, in its tenant', () =>
       tx.$executeRawUnsafe(
-        `UPDATE payment_reconciliation_task
-            SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
-                resolution = $3, resolved_by = $4,
-                lease_until = NULL, lease_token = NULL
+        `INSERT INTO payment_reconciliation_decision
+              (organization_id, task_id, payment_intent_id, resolution, decided_by)
+         SELECT organization_id, id, payment_intent_id, $3, $4 FROM payment_reconciliation_task
           WHERE organization_id = $1 AND payment_intent_id = $2 AND status <> 'DONE'`,
         done.organizationId,
         done.paymentIntentId,
         done.resolution,
         done.resolvedBy,
+      ),
+    );
+  }
+
+  /**
+   * Keeps what the provider answered to one refund attempt (#1017 r3): the
+   * append-only record a marker's way out rests on (`payment_provider_outcome`).
+   * The database binds it to the intent's open task of that kind and stamps
+   * its own clock; the same answer recorded twice is one row.
+   */
+  async recordOutcome(tx: ExtendedPrismaClient, answer: ProviderOutcome): Promise<void> {
+    await runUnscoped('a provider answer is recorded for its intent, in its tenant', () =>
+      tx.$executeRawUnsafe(
+        `INSERT INTO payment_provider_outcome
+              (organization_id, payment_intent_id, kind, attempt_key, outcome, provider_reference)
+         VALUES ($1, $2, $3::"PaymentReconciliationKind", $4, $5, $6)
+         ON CONFLICT DO NOTHING`,
+        answer.organizationId,
+        answer.paymentIntentId,
+        answer.kind,
+        answer.attemptKey,
+        answer.outcome,
+        answer.providerReference,
       ),
     );
   }
@@ -166,10 +189,9 @@ export class PaymentReconciliationRepository {
       finish: (tx, resolution, resolvedBy) =>
         runUnscoped('a fenced write names the task and its tenant', () =>
           tx.$executeRawUnsafe(
-            `UPDATE payment_reconciliation_task
-                SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
-                    resolution = $4, resolved_by = $5,
-                    lease_until = NULL, lease_token = NULL
+            `INSERT INTO payment_reconciliation_decision
+                  (organization_id, task_id, payment_intent_id, resolution, decided_by)
+             SELECT organization_id, id, payment_intent_id, $4, $5 FROM payment_reconciliation_task
               WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
             task.organizationId,
             task.id,
@@ -256,10 +278,9 @@ export class PaymentReconciliationRepository {
       finish: (tx, resolution, resolvedBy) =>
         runUnscoped('a guarded write names the task and its tenant', () =>
           tx.$executeRawUnsafe(
-            `UPDATE payment_reconciliation_task
-                SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
-                    resolution = $3, resolved_by = $4,
-                    lease_until = NULL, lease_token = NULL
+            `INSERT INTO payment_reconciliation_decision
+                  (organization_id, task_id, payment_intent_id, resolution, decided_by)
+             SELECT organization_id, id, payment_intent_id, $3, $4 FROM payment_reconciliation_task
               WHERE organization_id = $1 AND id = $2 AND status IN ('PENDING', 'ESCALATED')
                 AND (lease_until IS NULL OR lease_until <= (now() AT TIME ZONE 'UTC'))`,
             task.organizationId,
@@ -419,12 +440,9 @@ export class PaymentReconciliationRepository {
                  ORDER BY created_at, id
                  LIMIT $1),
                 closed AS (
-                UPDATE payment_reconciliation_task
-                   SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
-                       resolution = 'NOTHING_TO_RECONCILE', resolved_by = $4,
-                       last_outcome = 'MARKER_GONE', lease_until = NULL, lease_token = NULL
-                 WHERE id IN (
-                       SELECT t.id
+                INSERT INTO payment_reconciliation_decision
+                       (organization_id, task_id, payment_intent_id, resolution, decided_by, last_outcome)
+                       SELECT t.organization_id, t.id, t.payment_intent_id, 'NOTHING_TO_RECONCILE', $4, 'MARKER_GONE'
                          FROM payment_reconciliation_task t
                          JOIN win w ON w.id = t.id
                          JOIN payment_intent pi
@@ -442,8 +460,8 @@ export class PaymentReconciliationRepository {
                                              AND h.organization_id = pi.organization_id
                                              AND h.reference_type = 'PAYMENT_REFUND'
                                              AND h.status = 'ACTIVE')
-                          FOR UPDATE OF t SKIP LOCKED)
-                RETURNING id)
+                          FOR UPDATE OF t SKIP LOCKED
+                RETURNING task_id)
            SELECT (SELECT count(*) FROM win)::int AS examined,
                   (SELECT count(*) FROM closed)::int AS closed,
                   (SELECT created_at FROM win ORDER BY created_at DESC, id DESC LIMIT 1) AS "lastCreatedAt",
@@ -570,6 +588,17 @@ export interface OpenTask {
   /** What was just observed, as a closed code. */
   outcome: string;
   due: 'NOW' | 'GRACE';
+}
+
+/** A provider's answer to one refund attempt, as `payment_provider_outcome` keeps it. */
+export interface ProviderOutcome {
+  organizationId: string;
+  paymentIntentId: string;
+  kind: PaymentReconciliationKind;
+  /** The key the provider was asked with: `<intent key>:refund` or `<intent key>:uncredited`. */
+  attemptKey: string;
+  outcome: 'REFUNDED' | 'DECLINED' | 'NOT_REACHED';
+  providerReference: string | null;
 }
 
 export interface CloseTask {

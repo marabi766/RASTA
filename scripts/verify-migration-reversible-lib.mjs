@@ -2925,6 +2925,9 @@ export const EXPECTED = {
       'payment_reconciliation_resolution',
       'payment_reconciliation_requeue',
       'payment_refund_decline',
+      // What the provider answered, and how each task was decided (#1017 r3).
+      'payment_provider_outcome',
+      'payment_reconciliation_decision',
       // The instant line rules began to price (docs/23 D-057).
       'commission_pricing_cutover',
       // The instant each rule change was decided at, which no session sets (#1016 r1 F1).
@@ -3030,8 +3033,14 @@ export const EXPECTED = {
       // A payment intent's terms never change once written; it is never erased (FU-230).
       'trg_payment_intent_terms_fixed',
       'trg_payment_intent_no_truncate',
-      // ...its lifecycle moves only on the service's evidence (#1017 r1 F1).
+      // ...its lifecycle moves only on the service's evidence (#1017 r1 F1), which is kept for good
+      // and finishes a task only through its decision (#1017 r3).
       'trg_payment_intent_evidenced',
+      'trg_payment_provider_outcome_kept',
+      'trg_payment_provider_outcome_no_truncate',
+      'trg_payment_reconciliation_decision_kept',
+      'trg_payment_reconciliation_decision_no_truncate',
+      'trg_payment_reconciliation_task_decided',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -3097,6 +3106,9 @@ export const EXPECTED = {
       'commission_rule_scope_decided',
       'reject_payment_intent_rewrite',
       'assert_payment_intent_evidenced',
+      'record_payment_provider_outcome',
+      'finish_payment_reconciliation_task',
+      'guard_payment_reconciliation_task',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',

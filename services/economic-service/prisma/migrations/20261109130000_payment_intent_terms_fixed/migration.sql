@@ -20,22 +20,38 @@
 --   other one stays as it was: nothing is written twice, cleared, or moved back;
 -- - DELETE and TRUNCATE: a payment is never erased.
 --
--- `trg_payment_intent_evidenced` (deferred to COMMIT, row by row, INSERT and UPDATE):
--- - a `transaction_id` names the capture's own transaction: the WALLET_TOP_UP this intent is the
---   source of (`source_type` PAYMENT_INTENT, `source_reference` its id), in its organization, for
---   its amount and currency;
--- - a marker a reconciliation task tracks (`CAPTURED_REFUND_UNKNOWN` for an AUTHORIZED intent, the
---   four `REFUND_*` for a CAPTURED one) is entered only while the intent has an open task of that
---   kind, and left only by the transaction that finishes that task with a resolution meaning where
---   the intent went (REFUNDED; REFUND_DECLINED or REFUND_NOT_REACHED back to CAPTURED;
---   UNCREDITED_REFUNDED to FAILED; UNCREDITED_DECLINED or UNCREDITED_NOT_REACHED to creditable).
---   Every writer that leaves one closes or finishes the task in the same transaction already.
+-- `trg_payment_intent_evidenced` (deferred to COMMIT, row by row, INSERT and UPDATE) — a
+-- financial outcome rests on a record nobody can take back (#1017 r2 F1):
+-- - a `transaction_id` names the capture's own transaction (the WALLET_TOP_UP this intent is
+--   the source of, in its organization, for its amount and currency), checked on every write;
+-- - a marker a reconciliation task tracks (`CAPTURED_REFUND_UNKNOWN`, the four `REFUND_*`) is
+--   entered only while the intent has an open task of that kind; `REFUNDED_NOT_REVERSED` and
+--   `REFUND_DECLINED_RELEASE_PENDING` only on the provider's answer recorded for that task, and
+--   `CAPTURED_NOT_CREDITED` straight from AUTHORIZED only on its recorded decline;
+-- - a tracked marker is left only by the transaction that decided its task (a
+--   `payment_reconciliation_decision` of this transaction), with a resolution meaning where the
+--   intent went, resting on the provider's answer recorded for that task or on an APPROVED
+--   operator resolution of it (`payment_reconciliation_resolution`, four-eyes, append-only).
 --
--- Search path (FU-266): the row rule reads no relation and pins its path to the catalogue,
--- temporary relations last (the form `check:utc-clock-sites` admits). The evidence reads two
--- tables of this schema, which the verifier replays in another one, so it cannot name its schema:
--- it names every built-in function and operator by `pg_catalog` instead, and compares no value
--- through an operator it does not name (no `IS DISTINCT FROM`). The runtime role has no TEMP.
+-- The records (PM ruling #1017 r3): the database cannot tell a provider's answer from one the
+-- runtime role invents, as that role writes whatever the service writes. So nothing that moves
+-- money is a state it can set and later unset: each rests on an append-only row, kept with the
+-- database's clock, that names the intent, the attempt and the outcome. Forging one leaves it.
+-- - `payment_provider_outcome`: what the provider answered (REFUNDED, DECLINED, NOT_REACHED
+--   for an absence it vouches for) to one refund attempt (`<key>:refund`, `<key>:uncredited`).
+--   Its task (the intent's open one of that kind) and its instant are the database's.
+-- - `payment_reconciliation_decision`: how a task finished, and by whom. Inserting it is the only
+--   way a task becomes DONE: its trigger runs as the migrator, which alone may write DONE
+--   (`trg_payment_reconciliation_task_decided`), and a DONE task never changes after. The runtime
+--   role executes no definer function (runtime-forbidden.sql), so the definer is the trigger.
+-- Neither is ever updated, deleted or truncated. Still open (follow-up): a runtime-role writer
+-- can insert a false answer; only a provider-signed callback closes that.
+--
+-- Search path (FU-266, #1017 r2 F2): every function here pins its path to the catalogue,
+-- temporary relations last (the form `check:utc-clock-sites` admits). One that reads a relation
+-- then sets a path local to itself, `pg_catalog, <its trigger table's schema>, pg_temp`
+-- (`TG_TABLE_SCHEMA`; restored at its exit by the pin): never the caller's path, no dynamic SQL
+-- (the verifier reads no EXECUTE), and the verifier's replay in another schema reads its own.
 SET LOCAL lock_timeout = '3s';
 
 CREATE FUNCTION reject_payment_intent_rewrite() RETURNS TRIGGER
@@ -137,67 +153,221 @@ CREATE TRIGGER "trg_payment_intent_no_truncate"
   BEFORE TRUNCATE ON "payment_intent"
   FOR EACH STATEMENT EXECUTE FUNCTION reject_payment_intent_rewrite();
 
-CREATE FUNCTION assert_payment_intent_evidenced() RETURNS TRIGGER AS $$
-DECLARE
-  tracked CONSTANT pg_catalog.text[] := ARRAY['CAPTURED_REFUND_UNKNOWN', 'REFUND_REQUESTED',
-    'REFUND_UNKNOWN', 'REFUNDED_NOT_REVERSED', 'REFUND_DECLINED_RELEASE_PENDING']::pg_catalog.text[];
-  was pg_catalog.text := OLD."failure_reason";
-  task_kind pg_catalog.text;
-  resolved pg_catalog.text[];
+
+-- What the provider answered to one refund attempt. Never changed: a later answer is a new row.
+CREATE TABLE "payment_provider_outcome" (
+    "organization_id" TEXT NOT NULL,
+    "payment_intent_id" TEXT NOT NULL,
+    "kind" "PaymentReconciliationKind" NOT NULL,
+    "attempt_key" TEXT NOT NULL,
+    "outcome" TEXT NOT NULL,
+    "provider_reference" TEXT,
+    "task_id" TEXT,
+    "recorded_at" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "payment_provider_outcome_intent_fkey" FOREIGN KEY ("organization_id", "payment_intent_id")
+        REFERENCES "payment_intent"("organization_id", "id") ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CONSTRAINT "payment_provider_outcome_task_fkey" FOREIGN KEY ("organization_id", "task_id")
+        REFERENCES "payment_reconciliation_task"("organization_id", "id") ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CONSTRAINT "ck_payment_provider_outcome" CHECK ("outcome" IN ('REFUNDED', 'DECLINED', 'NOT_REACHED'))
+);
+
+-- The same answer twice (a retried question) is one row; the first instant stands.
+CREATE UNIQUE INDEX "ux_payment_provider_outcome" ON "payment_provider_outcome"
+    ("organization_id", "payment_intent_id", "attempt_key", "outcome", "task_id") NULLS NOT DISTINCT;
+
+CREATE FUNCTION record_payment_provider_outcome() RETURNS TRIGGER
+SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-  IF NEW."transaction_id" IS NOT NULL
-     AND (TG_OP OPERATOR(pg_catalog.=) 'INSERT' OR OLD."transaction_id" IS NULL
-          OR OLD."transaction_id" OPERATOR(pg_catalog.<>) NEW."transaction_id")
-     AND NOT EXISTS (
-       SELECT FROM "transaction" t
-        WHERE t."id" OPERATOR(pg_catalog.=) NEW."transaction_id"
-          AND t."organization_id" OPERATOR(pg_catalog.=) NEW."organization_id"
-          AND t."transaction_type"::pg_catalog.text OPERATOR(pg_catalog.=) 'WALLET_TOP_UP'
-          AND t."source_type" OPERATOR(pg_catalog.=) 'PAYMENT_INTENT'
-          AND t."source_reference" OPERATOR(pg_catalog.=) NEW."id"
-          AND t."gross_amount_minor" OPERATOR(pg_catalog.=) NEW."amount_minor"
-          AND t."currency" OPERATOR(pg_catalog.=) NEW."currency") THEN
-    RAISE EXCEPTION 'A payment intent names only the transaction its own capture recorded'
-      USING ERRCODE = 'foreign_key_violation', CONSTRAINT = 'trg_payment_intent_evidenced';
+  IF TG_OP <> 'INSERT' THEN
+    RAISE EXCEPTION 'A provider''s answer is kept as it was recorded (% refused)', TG_OP
+      USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_payment_provider_outcome_kept';
   END IF;
-  IF TG_OP OPERATOR(pg_catalog.=) 'INSERT'
-     OR pg_catalog.jsonb_build_array(was)
-        OPERATOR(pg_catalog.=) pg_catalog.jsonb_build_array(NEW."failure_reason") THEN
+  -- Its relations are its trigger table's schema's, whatever the caller's path (#1017 r2 F2): a
+  -- function-local path (restored at exit, by the pin above), with the catalogue first.
+  PERFORM set_config('search_path', format('pg_catalog, %I, pg_temp', TG_TABLE_SCHEMA), true);
+  -- The episode it answers (the intent's open task of that kind, if any) and the instant are the
+  -- database's, whatever the writer said.
+  NEW."task_id" := (SELECT t.id FROM payment_reconciliation_task t
+                     WHERE t.organization_id = NEW."organization_id"
+                       AND t.payment_intent_id = NEW."payment_intent_id"
+                       AND t.kind = NEW."kind" AND t.status <> 'DONE');
+  NEW."recorded_at" := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_payment_provider_outcome_kept"
+  BEFORE INSERT OR UPDATE OR DELETE ON "payment_provider_outcome"
+  FOR EACH ROW EXECUTE FUNCTION record_payment_provider_outcome();
+
+CREATE TRIGGER "trg_payment_provider_outcome_no_truncate"
+  BEFORE TRUNCATE ON "payment_provider_outcome"
+  FOR EACH STATEMENT EXECUTE FUNCTION record_payment_provider_outcome();
+
+-- How a task finished, and by whom: inserting it finishes the task. Never changed.
+CREATE TABLE "payment_reconciliation_decision" (
+    "organization_id" TEXT NOT NULL,
+    "task_id" TEXT NOT NULL,
+    "payment_intent_id" TEXT NOT NULL,
+    "resolution" TEXT NOT NULL,
+    "decided_by" TEXT NOT NULL,
+    "last_outcome" TEXT,
+    "decided_at" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "payment_reconciliation_decision_pkey" PRIMARY KEY ("organization_id", "task_id"),
+    CONSTRAINT "payment_reconciliation_decision_task_fkey" FOREIGN KEY ("organization_id", "task_id")
+        REFERENCES "payment_reconciliation_task"("organization_id", "id") ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CONSTRAINT "payment_reconciliation_decision_intent_fkey" FOREIGN KEY ("organization_id", "payment_intent_id")
+        REFERENCES "payment_intent"("organization_id", "id") ON DELETE RESTRICT ON UPDATE RESTRICT
+);
+
+-- The definer: runs as the migrator, the one role `trg_payment_reconciliation_task_decided`
+-- lets finish a task. A task already finished is not decided again: nothing is inserted.
+CREATE FUNCTION finish_payment_reconciliation_task() RETURNS TRIGGER
+SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  finished INTEGER;
+BEGIN
+  IF TG_OP <> 'INSERT' THEN
+    RAISE EXCEPTION 'A reconciliation decision is kept as it was made (% refused)', TG_OP
+      USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_payment_reconciliation_decision_kept';
+  END IF;
+  -- Its relations are its trigger table's schema's, whatever the caller's path (#1017 r2 F2): a
+  -- function-local path (restored at exit, by the pin above), with the catalogue first.
+  PERFORM set_config('search_path', format('pg_catalog, %I, pg_temp', TG_TABLE_SCHEMA), true);
+  NEW."decided_at" := (now() AT TIME ZONE 'UTC')::timestamp(3);
+  UPDATE payment_reconciliation_task t
+     SET status = 'DONE', done_at = NEW."decided_at", updated_at = NEW."decided_at",
+         resolution = NEW."resolution", resolved_by = NEW."decided_by",
+         last_outcome = coalesce(NEW."last_outcome", t.last_outcome),
+         lease_until = NULL, lease_token = NULL
+   WHERE t.organization_id = NEW."organization_id" AND t.id = NEW."task_id"
+     AND t.payment_intent_id = NEW."payment_intent_id" AND t.status <> 'DONE';
+  GET DIAGNOSTICS finished = ROW_COUNT;
+  IF finished = 0 THEN
     RETURN NULL;
   END IF;
-  IF NEW."failure_reason" OPERATOR(pg_catalog.=) ANY (tracked) THEN
-    -- Entered: a task of its kind is open on the intent.
-    task_kind := CASE WHEN NEW."status"::pg_catalog.text OPERATOR(pg_catalog.=) 'AUTHORIZED'
-                 THEN 'UNCREDITED_REFUND' ELSE 'REFUND' END;
-    IF NOT EXISTS (
-      SELECT FROM payment_reconciliation_task t
-       WHERE t."organization_id" OPERATOR(pg_catalog.=) NEW."organization_id"
-         AND t."payment_intent_id" OPERATOR(pg_catalog.=) NEW."id"
-         AND t."kind"::pg_catalog.text OPERATOR(pg_catalog.=) task_kind
-         AND t."status"::pg_catalog.text OPERATOR(pg_catalog.<>) 'DONE') THEN
-      RAISE EXCEPTION 'A payment intent is marked % only while a reconciliation task is open on it', NEW."failure_reason"
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+REVOKE ALL ON FUNCTION finish_payment_reconciliation_task() FROM PUBLIC;
+
+CREATE TRIGGER "trg_payment_reconciliation_decision_kept"
+  BEFORE INSERT OR UPDATE OR DELETE ON "payment_reconciliation_decision"
+  FOR EACH ROW EXECUTE FUNCTION finish_payment_reconciliation_task();
+
+CREATE TRIGGER "trg_payment_reconciliation_decision_no_truncate"
+  BEFORE TRUNCATE ON "payment_reconciliation_decision"
+  FOR EACH STATEMENT EXECUTE FUNCTION finish_payment_reconciliation_task();
+
+-- DONE is written by the table's owner only (the definer above), and a DONE task never changes:
+-- its resolution is no longer the runtime role's to set, or to reset.
+CREATE FUNCTION guard_payment_reconciliation_task() RETURNS TRIGGER
+SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF (NEW."status" = 'DONE' OR (TG_OP = 'UPDATE' AND OLD."status" = 'DONE'))
+     AND current_user <> (SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = TG_RELID) THEN
+    RAISE EXCEPTION 'A reconciliation task is finished only by its decision (payment_reconciliation_decision), and never changes after'
+      USING ERRCODE = 'insufficient_privilege', CONSTRAINT = 'trg_payment_reconciliation_task_decided';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_payment_reconciliation_task_decided"
+  BEFORE INSERT OR UPDATE ON "payment_reconciliation_task"
+  FOR EACH ROW EXECUTE FUNCTION guard_payment_reconciliation_task();
+
+CREATE FUNCTION assert_payment_intent_evidenced() RETURNS TRIGGER
+SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  tracked CONSTANT text[] := ARRAY['CAPTURED_REFUND_UNKNOWN', 'REFUND_REQUESTED', 'REFUND_UNKNOWN',
+                                   'REFUNDED_NOT_REVERSED', 'REFUND_DECLINED_RELEASE_PENDING'];
+  was text;
+  task_kind text;
+  attempt text;
+  answered text;
+  resolved text[];
+  evidenced boolean;
+BEGIN
+  -- Its relations are its trigger table's schema's, whatever the caller's path (#1017 r2 F2): a
+  -- function-local path (restored at exit, by the pin above), with the catalogue first.
+  PERFORM set_config('search_path', format('pg_catalog, %I, pg_temp', TG_TABLE_SCHEMA), true);
+  IF NEW."transaction_id" IS NOT NULL THEN
+    evidenced := EXISTS (SELECT FROM "transaction" t
+                          WHERE t.id = NEW."transaction_id" AND t.organization_id = NEW."organization_id"
+                            AND t.transaction_type::text = 'WALLET_TOP_UP'
+                            AND t.source_type = 'PAYMENT_INTENT' AND t.source_reference = NEW."id"
+                            AND t.gross_amount_minor = NEW."amount_minor" AND t.currency = NEW."currency");
+    IF NOT evidenced THEN
+      RAISE EXCEPTION 'A payment intent names only the transaction its own capture recorded'
+        USING ERRCODE = 'foreign_key_violation', CONSTRAINT = 'trg_payment_intent_evidenced';
+    END IF;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    RETURN NULL;
+  END IF;
+  was := OLD."failure_reason";
+  IF jsonb_build_array(was) = jsonb_build_array(NEW."failure_reason") THEN
+    RETURN NULL;
+  END IF;
+  -- The task kind and refund attempt of the marker entered or left.
+  task_kind := CASE WHEN coalesce(was, NEW."failure_reason") IN ('CAPTURED_REFUND_UNKNOWN', 'CAPTURED_NOT_CREDITED')
+               THEN 'UNCREDITED_REFUND' ELSE 'REFUND' END;
+  attempt := concat(NEW."idempotency_key", CASE WHEN task_kind = 'REFUND' THEN ':refund' ELSE ':uncredited' END);
+
+  IF NEW."failure_reason" = ANY (tracked) THEN
+    -- Entered: a task of its kind is open; a known outcome also rests on that task's answer.
+    answered := CASE NEW."failure_reason" WHEN 'REFUNDED_NOT_REVERSED' THEN 'REFUNDED'
+                WHEN 'REFUND_DECLINED_RELEASE_PENDING' THEN 'DECLINED' END;
+    evidenced := EXISTS (SELECT FROM payment_reconciliation_task t
+                          WHERE t.organization_id = NEW."organization_id" AND t.payment_intent_id = NEW."id"
+                            AND t.kind::text = task_kind AND t.status <> 'DONE'
+                            AND (answered IS NULL OR EXISTS (
+                              SELECT FROM payment_provider_outcome o
+                               WHERE o.organization_id = t.organization_id
+                                 AND o.payment_intent_id = t.payment_intent_id AND o.task_id = t.id
+                                 AND o.attempt_key = attempt AND o.outcome = answered)));
+    IF NOT evidenced THEN
+      RAISE EXCEPTION 'A payment intent is marked % only while a reconciliation task is open on it, on the provider''s recorded answer', NEW."failure_reason"
         USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_payment_intent_evidenced';
     END IF;
-  ELSIF was OPERATOR(pg_catalog.=) ANY (tracked) THEN
-    -- Left: by the transaction that finished its task, with the outcome the intent moved to.
-    task_kind := CASE WHEN OLD."status"::pg_catalog.text OPERATOR(pg_catalog.=) 'AUTHORIZED'
-                 THEN 'UNCREDITED_REFUND' ELSE 'REFUND' END;
-    resolved := CASE
-      WHEN NEW."status"::pg_catalog.text OPERATOR(pg_catalog.=) 'REFUNDED' THEN ARRAY['REFUNDED']
-      WHEN NEW."status"::pg_catalog.text OPERATOR(pg_catalog.=) 'CAPTURED'
-        THEN ARRAY['REFUND_DECLINED', 'REFUND_NOT_REACHED']
-      WHEN NEW."status"::pg_catalog.text OPERATOR(pg_catalog.=) 'FAILED' THEN ARRAY['UNCREDITED_REFUNDED']
-      WHEN NEW."status"::pg_catalog.text OPERATOR(pg_catalog.=) 'AUTHORIZED'
-        THEN ARRAY['UNCREDITED_DECLINED', 'UNCREDITED_NOT_REACHED'] END::pg_catalog.text[];
-    IF NOT EXISTS (
-      SELECT FROM payment_reconciliation_task t
-       WHERE t."organization_id" OPERATOR(pg_catalog.=) NEW."organization_id"
-         AND t."payment_intent_id" OPERATOR(pg_catalog.=) NEW."id"
-         AND t."kind"::pg_catalog.text OPERATOR(pg_catalog.=) task_kind
-         AND t."status"::pg_catalog.text OPERATOR(pg_catalog.=) 'DONE'
-         AND t."resolution" OPERATOR(pg_catalog.=) ANY (resolved)
-         AND t."xmin" OPERATOR(pg_catalog.=) pg_catalog.xid(pg_catalog.pg_current_xact_id())) THEN
-      RAISE EXCEPTION 'A payment intent leaves % only as its reconciliation task is finished with that outcome', was
+  ELSIF was IS NULL AND NEW."failure_reason" = 'CAPTURED_NOT_CREDITED' THEN
+    -- Creditable straight from AUTHORIZED: the provider declined returning the capture.
+    evidenced := EXISTS (SELECT FROM payment_provider_outcome o
+                          WHERE o.organization_id = NEW."organization_id" AND o.payment_intent_id = NEW."id"
+                            AND o.attempt_key = attempt AND o.outcome = 'DECLINED');
+    IF NOT evidenced THEN
+      RAISE EXCEPTION 'A payment intent is CAPTURED_NOT_CREDITED only on the provider''s recorded decline of returning it'
+        USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_payment_intent_evidenced';
+    END IF;
+  ELSIF was = ANY (tracked) THEN
+    -- Left: by the transaction that decided its task (xmin, and the instant it began: an id
+    -- reused after a restore or a wraparound does not share it), on that task's recorded answer
+    -- or its approved operator resolution, which says where the intent went.
+    resolved := CASE NEW."status"::text
+      WHEN 'REFUNDED' THEN ARRAY['REFUNDED']
+      WHEN 'CAPTURED' THEN ARRAY['REFUND_DECLINED', 'REFUND_NOT_REACHED']
+      WHEN 'FAILED' THEN ARRAY['UNCREDITED_REFUNDED']
+      WHEN 'AUTHORIZED' THEN ARRAY['UNCREDITED_DECLINED', 'UNCREDITED_NOT_REACHED'] END;
+    evidenced := EXISTS (
+      SELECT FROM payment_reconciliation_decision d
+        JOIN payment_reconciliation_task t ON t.organization_id = d.organization_id AND t.id = d.task_id
+       WHERE d.organization_id = NEW."organization_id" AND d.payment_intent_id = NEW."id"
+         AND t.kind::text = task_kind AND d.resolution = ANY (resolved)
+         AND d.xmin = xid(pg_current_xact_id())
+         AND d.decided_at = (now() AT TIME ZONE 'UTC')::timestamp(3)
+         AND (EXISTS (SELECT FROM payment_provider_outcome o
+                       WHERE o.organization_id = d.organization_id
+                         AND o.payment_intent_id = d.payment_intent_id
+                         AND o.task_id = d.task_id AND o.attempt_key = attempt
+                         AND o.outcome = regexp_replace(d.resolution, '^(UNCREDITED|REFUND)_', ''))
+           OR EXISTS (SELECT FROM payment_reconciliation_resolution r
+                       WHERE r.organization_id = d.organization_id AND r.task_id = d.task_id
+                         AND r.payment_intent_id = d.payment_intent_id
+                         AND r.status::text = 'APPROVED'
+                         AND r.provider_outcome::text = regexp_replace(d.resolution, '^(UNCREDITED|REFUND)_', ''))));
+    IF NOT evidenced THEN
+      RAISE EXCEPTION 'A payment intent leaves % only as its reconciliation task is decided on the provider''s recorded answer or an approved resolution', was
         USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_payment_intent_evidenced';
     END IF;
   END IF;

@@ -331,7 +331,7 @@ interface PaymentProvider {
 می‌کند تعویض Provider، مدل دامنه را دست نمی‌زند.
 
 **شرایط یک PaymentIntent پس از نوشتن تغییر نمی‌کند و چرخهٔ عمرش فقط روی گام‌های سرویس، با شاهد، جلو می‌رود
-(FU-230، ‏#1017 r1).** `trg_payment_intent_terms_fixed` پیش از هر نوشتن:
+(FU-230، ‏#1017 r1، r3).** `trg_payment_intent_terms_fixed` پیش از هر نوشتن:
 
 - INSERT فقط `CREATED` و خالی: بی‌نشانگر، بی‌زمان، بی‌تراکنش، بی‌مرجع Provider (INSERT و COPY حالت بعدی نمی‌کارند)؛
 - UPDATE جز `status`، `failure_reason`، چهار زمان `*_at`، `transaction_id` و `provider_reference` چیزی را تغییر نمی‌دهد
@@ -341,11 +341,30 @@ interface PaymentProvider {
 - DELETE و TRUNCATE رد می‌شوند.
 
 `trg_payment_intent_evidenced` (موکول به COMMIT): `transaction_id` فقط WALLET_TOP_UP خود همین Intent است (همان سازمان،
-مبلغ و ارز، `source_reference` = شناسهٔ Intent). نشانگری که Task تطبیق دنبالش می‌کند (`CAPTURED_REFUND_UNKNOWN` و چهار
-`REFUND_*`) فقط وقتی Task باز از همان نوع هست گذاشته می‌شود، و فقط در تراکنشی برداشته می‌شود که همان Task را با نتیجهٔ همان
-حرکت DONE می‌کند. پس نشانگر به‌تنهایی شاهد مالی نیست. باقی‌مانده: لبه‌هایی که سرویس روی پاسخ هم‌زمان Provider می‌رود
-(`REFUND_REQUESTED → REFUND_DECLINED_RELEASE_PENDING | REFUNDED_NOT_REVERSED`، `AUTHORIZED → CAPTURED_NOT_CREDITED`) در
-پایگاه داده شاهدی ندارند، چون پاسخ Provider ذخیره نمی‌شود؛ ترتیب و آینده‌نبودن زمان‌ها هم هنوز بررسی نمی‌شود.
+مبلغ و ارز، `source_reference` = شناسهٔ Intent) و این در هر نوشتن دوباره سنجیده می‌شود، نه فقط هنگام گذاشتن. هر حرکت مالی
+روی سابقه‌ای تکیه می‌کند که پس‌گرفتنی نیست (#1017 r3):
+
+- `payment_provider_outcome`: پاسخ Provider به یک تلاش بازپرداخت (`<key>:refund` یا `<key>:uncredited`): `REFUNDED`،
+  `DECLINED` یا `NOT_REACHED` (فقط غیابی که Provider ضمانتش می‌کند). Task باز همان نوع و زمان ثبت را پایگاه داده می‌گذارد.
+- `payment_reconciliation_decision`: Task چگونه و به دست چه کسی تمام شد. فقط درج این ردیف Task را DONE می‌کند: Trigger آن
+  با نقش Migrator اجرا می‌شود (SECURITY DEFINER)، تنها نقشی که `trg_payment_reconciliation_task_decided` اجازهٔ نوشتن DONE
+  به آن می‌دهد؛ Task تمام‌شده دیگر تغییر نمی‌کند. نقش Runtime هیچ تابع Definer را اجرا نمی‌کند (`runtime-forbidden.sql`)،
+  پس Definer همان Trigger است.
+- هیچ‌کدام UPDATE، DELETE یا TRUNCATE نمی‌شوند؛ هر تابع مسیرش را سنجاق می‌کند و هر جدول را در Schema جدول Trigger خودش
+  (`TG_TABLE_SCHEMA`) می‌خواند، نه از مسیر نشست.
+
+نشانگر تحت تطبیق (`CAPTURED_REFUND_UNKNOWN` و چهار `REFUND_*`) فقط با Task باز از همان نوع گذاشته می‌شود؛
+`REFUNDED_NOT_REVERSED` و `REFUND_DECLINED_RELEASE_PENDING` فقط روی پاسخ ثبت‌شدهٔ Provider برای همان Task؛ و
+`AUTHORIZED → CAPTURED_NOT_CREDITED` فقط روی ردِ ثبت‌شدهٔ بازگرداندن Capture. نشانگر تحت تطبیق فقط در تراکنشی برداشته
+می‌شود که تصمیم Task آن را درج کرده، با نتیجه‌ای که مقصد Intent را می‌گوید، و فقط روی پاسخ ثبت‌شدهٔ Provider برای همان Task
+یا Resolution تأییدشدهٔ اپراتور (`payment_reconciliation_resolution`، چهارچشمی و فقط‌افزودنی) با همان نتیجه.
+
+**مرز (تصمیم PM، ‏#1017 r3):** پایگاه داده نمی‌تواند پاسخ Provider را در برابر نقشی که خودش هر چیزی را می‌نویسد احراز کند.
+پس جعل بدون به‌جاگذاشتن سابقهٔ دائمی و قابل‌انتساب ناممکن است، و هیچ لبهٔ مالی بی‌سابقه نیست. باقی‌مانده (پیگیری): نویسندهٔ
+SQL با نقش Runtime هنوز می‌تواند پاسخ نادرست درج کند؛ بستنش Callback امضاشدهٔ Provider می‌خواهد (مدل پرداخت مالک 11-04،
+PSP دارای مجوز). ترتیب زمان‌های `*_at` و آینده‌نبودنشان هنوز بررسی نمی‌شود (FU-230b). Intentی که پیش از این نسخه
+`REFUNDED_NOT_REVERSED` یا `REFUND_DECLINED_RELEASE_PENDING` گرفته پاسخ ثبت‌شده ندارد و خودکار حل نمی‌شود: Reconciler
+دوباره تلاش می‌کند و سپس به یک نفر می‌سپارد.
 
 ---
 

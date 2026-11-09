@@ -5,6 +5,7 @@ import { getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
 import {
   plantPaymentIntent,
+  plantPaymentTask,
   asActor,
   cleanup,
   newPrisma,
@@ -160,22 +161,24 @@ describe('the payment reconciler (real database)', () => {
    * so a still-running B0 fails closed, and only rows from before the trigger reach the heal.
    */
   const b0LeftNoTask = (paymentIntentId: string) =>
-    runUnscoped('the suite removes the task, as B0 never wrote it', () =>
-      prisma.client.$executeRawUnsafe(
-        `DELETE FROM payment_reconciliation_task WHERE payment_intent_id = $1`,
-        paymentIntentId,
-      ),
+    // The suite removes the task, as B0 never wrote it: with its decision and recorded answers.
+    plantPaymentTask(
+      [`DELETE FROM payment_reconciliation_decision WHERE payment_intent_id = $1`, paymentIntentId],
+      [`DELETE FROM payment_provider_outcome WHERE payment_intent_id = $1`, paymentIntentId],
+      [`DELETE FROM payment_reconciliation_task WHERE payment_intent_id = $1`, paymentIntentId],
     );
   const b0ClosedNothing = (paymentIntentId: string, status: 'PENDING' | 'ESCALATED' = 'PENDING') =>
-    runUnscoped('the suite reopens the task, as B0 never closed it', () =>
-      prisma.client.$executeRawUnsafe(
+    // The suite reopens the task, as B0 never closed it: its decision goes with the close.
+    plantPaymentTask(
+      [`DELETE FROM payment_reconciliation_decision WHERE payment_intent_id = $1`, paymentIntentId],
+      [
         `UPDATE payment_reconciliation_task
             SET status = $2::"PaymentReconciliationStatus", done_at = NULL, resolution = NULL,
                 resolved_by = NULL
           WHERE payment_intent_id = $1`,
         paymentIntentId,
         status,
-      ),
+      ],
     );
 
   const intentOf = (paymentIntentId: string) =>
@@ -789,7 +792,7 @@ describe('the payment reconciler (real database)', () => {
    * writes switched off — exactly what the old build does.
    */
   describe('healing a mixed-version deploy', () => {
-    it('opens a task for a marker a B0 instance left without one, and then resolves it', async () => {
+    it('opens a task for a marker a B0 instance left without one, and resolves it on a recorded answer only', async () => {
       const organizationId = `${org.b}-HEAL-OPEN`;
       const unknown = await topUp(`${organizationId}-U`, 330n);
       const known = await topUp(`${organizationId}-K`, 340n);
@@ -815,10 +818,16 @@ describe('the payment reconciler (real database)', () => {
       expect((await tasksOf(unknown.intentId))[0]!.dueIn).toBeGreaterThan(
         env.ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS - 30,
       );
-      // Known: due at once, and claimed in the same cycle.
-      await expectRecordedRefund(known);
+      // Known: due at once and claimed in the same cycle, but a B0 build never recorded the
+      // provider's answer it rests on (#1017 r3), so nothing is reversed on the marker alone:
+      // the hold stays, and the task is tried again, then a person's.
+      expect(await intentOf(known.intentId)).toMatchObject({
+        status: 'CAPTURED',
+        failureReason: 'REFUNDED_NOT_REVERSED',
+      });
+      expect(await reversalsOf(known.intentId)).toBe(0);
       expect(await tasksOf(known.intentId)).toEqual([
-        expect.objectContaining({ status: 'DONE', resolution: 'REFUNDED' }),
+        expect.objectContaining({ status: 'PENDING', lastOutcome: 'APPLY_FAILED' }),
       ]);
 
       await makeDue(unknown.intentId);
