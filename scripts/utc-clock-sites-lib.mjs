@@ -1205,7 +1205,7 @@ const startsStatement = (tokens, i) =>
 
 // A statement begins with one of these at a start the reader recognises.
 const STATEMENT_HEADS = new Set(
-  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare begin start explain declare perform discard'.split(
+  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare begin start explain declare perform discard import'.split(
     ' ',
   ),
 );
@@ -1247,7 +1247,7 @@ function unmodelledExtension(tokens, i = 0) {
 // Calls proven to consume values, never execute them as SQL. An unlisted call receiving a
 // string may execute an opaque expression built from it: do not try to evaluate fragments.
 const VALUE_CALLS = new Set(
-  'timezone date_trunc to_char lower upper coalesce nullif concat concat_ws format chr length octet_length convert_to encode decode substring replace hashtextextended pg_advisory_xact_lock set_config current_setting nextval has_table_privilege extract date_bin min max sum bool_and strpos jsonb_build_object jsonb_populate_record hashtext translate string_agg int4send digest regexp_replace trim btrim count array_agg json_build_object json_agg pg_has_role has_database_privilege has_schema_privilege pg_try_advisory_xact_lock sha256 unnest tsrange greatest least'.split(
+  'timezone date_trunc to_char lower upper coalesce nullif concat concat_ws format chr length octet_length convert_to encode decode substring replace hashtextextended pg_advisory_xact_lock set_config current_setting nextval has_table_privilege has_sequence_privilege extract date_bin min max sum bool_and strpos jsonb_build_object jsonb_populate_record hashtext translate string_agg int4send digest regexp_replace trim btrim count array_agg json_build_object json_agg pg_has_role has_database_privilege has_schema_privilege pg_try_advisory_xact_lock sha256 unnest tsrange greatest least'.split(
     ' ',
   ),
 );
@@ -1316,6 +1316,44 @@ function holdsSql(tokens, i) {
   });
 }
 
+/** The start of the statement/query containing tokens[i], skipping completed parentheses. */
+function statementStart(tokens, i) {
+  let at = i;
+  for (let k = i - 1, depth = 0; k >= 0; k -= 1) {
+    if (isOp(tokens[k], ')')) depth += 1;
+    else if (isOp(tokens[k], '(') && depth-- === 0) break;
+    // BEGIN/LOOP can be SQL column names, so PL/pgSQL start heuristics are not proof here.
+    if (depth === 0 && isOp(tokens[k], ';')) break;
+    at = k;
+  }
+  return at;
+}
+
+/** Prove INSERT/MERGE heads this query; a label `AS insert INTO` is no exception. */
+function writeInto(tokens, i) {
+  if (!isWord(tokens[i - 1], 'insert', 'merge')) return false;
+  let at = statementStart(tokens, i - 1);
+  if (isWord(tokens[at], 'explain')) {
+    at += 1;
+    if (isOp(tokens[at], '(')) at = closing(tokens, at) + 1;
+    else while (isWord(tokens[at], 'analyze', 'verbose')) at += 1;
+  }
+  if (isWord(tokens[at], 'with')) {
+    at += isWord(tokens[at + 1], 'recursive') ? 2 : 1;
+    for (;;) {
+      if (nameOf(tokens[at]) === null) return false;
+      at = isOp(tokens[at + 1], '(') ? closing(tokens, at + 1) + 1 : at + 1;
+      if (!isWord(tokens[at], 'as')) return false;
+      at += isWord(tokens[at + 1], 'not') ? 3 : isWord(tokens[at + 1], 'materialized') ? 2 : 1;
+      if (!isOp(tokens[at], '(')) return false;
+      at = closing(tokens, at) + 1;
+      if (!isOp(tokens[at], ',')) break;
+      at += 1;
+    }
+  }
+  return at === i - 1;
+}
+
 /**
  * Session-local definitions are never replayed. Inspect tokens, not SQL-looking data, and
  * refuse the whole CREATE statement if any temporary schema occurs: its object grammar need
@@ -1323,18 +1361,17 @@ function holdsSql(tokens, i) {
  * Only an explicit LANGUAGE plpgsql routine (or a PL/pgSQL DO) can assign INTO variables.
  */
 function relationCreationProblem(tokens, plpgsql = false) {
-  let depth = 0;
-  const queries = new Map();
+  // Production inventory also includes prose ("signed into its token"). Every SQL creation
+  // INTO has SELECT/IMPORT; other recognised SQL statements still default to refusal.
+  const sql = tokens.some(
+    (t, i) =>
+      (headsStatement(tokens, i) && !isWord(t, 'with')) ||
+      isWord(t, 'select', 'insert', 'merge', 'update', 'delete', 'import'),
+  );
   for (const [i, t] of tokens.entries()) {
-    if (isOp(t, '(')) depth += 1;
-    if (isOp(t, ')')) {
-      queries.delete(depth);
-      depth -= 1;
-    }
-    if (isOp(t, ';')) queries.clear();
-    if (!isOp(tokens[i - 1], '.') && isWord(t, 'select', 'insert', 'merge', 'update', 'delete'))
-      queries.set(depth, t.lower);
     if (isWord(t, 'create')) {
+      // CREATE in a privilege list names no target. No other unrecognised prefix exempts it.
+      const privilege = isWord(tokens[i + 1], 'on') || isOp(tokens[i + 1], ',');
       let at = i + 1;
       // Modifiers precede the object kind; never inspect column names as modifiers. Unknown
       // object kinds after TEMP are refused too, rather than enumerating table/view/sequence.
@@ -1358,19 +1395,20 @@ function relationCreationProblem(tokens, plpgsql = false) {
       let header = true;
       for (let k = at; k < tokens.length && !isOp(tokens[k], ';'); k += 1) {
         if (isOp(tokens[k], '(') || isWord(tokens[k], 'as')) header = false;
-        if (header && headsStatement(tokens, i) && spliced(tokens[k]))
+        if (header && !privilege && spliced(tokens[k]))
           return 'a CREATE target the guard cannot classify';
         if (/^pg_temp(?:_[0-9]+)?$/.test(nameOf(tokens[k]) ?? '') && isOp(tokens[k + 1], '.'))
           return 'a CREATE using a temporary schema that may shadow a replayed relation';
       }
     }
-    if (isWord(t, 'into') && queries.get(depth) === 'select') {
+    // INTO is reserved: outside proven writes or PL/pgSQL variables, unknown means refuse.
+    if (sql && isWord(t, 'into') && !writeInto(tokens, i)) {
       if (
         !plpgsql ||
         isWord(tokens[i + 1], 'temp', 'temporary', 'unlogged', 'table') ||
         (/^pg_temp(?:_[0-9]+)?$/.test(nameOf(tokens[i + 1]) ?? '') && isOp(tokens[i + 2], '.'))
       )
-        return 'a SELECT INTO whose created relation is not replayed';
+        return 'an INTO whose created relation is not replayed';
     }
   }
   return null;
