@@ -2,12 +2,14 @@ import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import {
+  asActor,
   cleanup,
   databaseUrl,
   newPrisma,
   ownerDatabaseUrl,
   plantPaymentIntent,
   tenants,
+  wire,
 } from './helpers';
 
 /**
@@ -86,23 +88,29 @@ describe('a payment intent’s terms are fixed and its lifecycle evidenced (real
     return id;
   };
 
-  /** An open reconciliation task on the intent, as `reconciliation.open` writes one; its id. */
-  const task = async (
-    intentId: string,
-    kind: 'REFUND' | 'UNCREDITED_REFUND',
-    sql: Sql = runtime,
-  ) => {
-    const id = `PRT_${ulid()}`;
-    await sql.$executeRawUnsafe(
-      `INSERT INTO payment_reconciliation_task (id, organization_id, payment_intent_id, kind,
-         next_attempt_at, correlation_id, created_at, updated_at)
-       SELECT $1, organization_id, id, $3::"PaymentReconciliationKind", now(), 'itest', now(), now()
-         FROM payment_intent WHERE id = $2`,
-      id,
+  /** An open reconciliation task on the intent, written by the service's own `open`; its id. */
+  const task = async (intentId: string, kind: 'REFUND' | 'UNCREDITED_REFUND') => {
+    const [intent] = await owner.$queryRawUnsafe<{ organizationId: string }[]>(
+      'SELECT organization_id AS "organizationId" FROM payment_intent WHERE id = $1',
       intentId,
-      kind,
     );
-    return id;
+    const { organizationId } = intent!;
+    await asActor({ organizationId }, () =>
+      prisma.transaction((tx) =>
+        wire(prisma).paymentReconciliation.open(tx, {
+          organizationId,
+          paymentIntentId: intentId,
+          kind,
+          outcome: 'ITEST',
+          due: 'NOW',
+        }),
+      ),
+    );
+    const [row] = await owner.$queryRawUnsafe<{ id: string }[]>(
+      `SELECT id FROM payment_reconciliation_task WHERE payment_intent_id = $1 AND status <> 'DONE'`,
+      intentId,
+    );
+    return row!.id;
   };
 
   /** The task finished, as `close` / `finish` write it. */
@@ -274,9 +282,10 @@ describe('a payment intent’s terms are fixed and its lifecycle evidenced (real
       const { id, taskId } = await refundUnknown();
       // One open task per intent: its own goes first, earlier, as in the case above.
       await finish(runtime, taskId, 'UNCREDITED_DECLINED');
+      const other = await task(id, 'REFUND');
       await expect(
         runtime.$transaction(async (tx) => {
-          await finish(tx, await task(id, 'REFUND', tx), 'UNCREDITED_DECLINED');
+          await finish(tx, other, 'UNCREDITED_DECLINED');
           await tx.$executeRawUnsafe(
             `UPDATE payment_intent SET failure_reason = 'CAPTURED_NOT_CREDITED' WHERE id = $1`,
             id,
