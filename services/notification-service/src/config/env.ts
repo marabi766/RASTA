@@ -8,6 +8,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   serviceUrlSchema,
+  wholeNumberEnv,
 } from '@rasta/config';
 import { notificationOperationBudgets } from './operation-budgets';
 
@@ -118,12 +119,11 @@ export const notificationEnvSchema = baseEnvSchema
       .prefault(500),
 
     /** Short cache per `(organization, role)` so a burst is not N identical calls. */
-    NOTIFICATION_RECIPIENT_CACHE_TTL_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(0)
-      .max(3_600)
-      .prefault(60),
+    NOTIFICATION_RECIPIENT_CACHE_TTL_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('60')
+      .pipe(wholeNumberEnv(0, 3600)),
 
     /**
      * How long `notification_dedupe` rows are kept (ADR-054 § 3). Longer than
