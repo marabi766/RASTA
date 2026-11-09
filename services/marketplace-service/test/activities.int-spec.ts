@@ -135,7 +135,7 @@ describe('order saga activities (real database)', () => {
 
     const order = await asActor(
       { organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-ACT-BUYER' },
-      () => wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('ACT')),
+      () => wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('ACT')),
     );
 
     const row = await runUnscoped('the suite reads the order it just placed', () =>

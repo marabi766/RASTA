@@ -88,7 +88,7 @@ describe('return request: conditional cancellation and reconciliation of a dispa
       .post('/v1/orders')
       .set(as(buyer(buyerOrg)))
       .set('idempotency-key', apiKey('rrc-order'))
-      .send({ lines: [{ offerId: offer.body.id, quantity }] })
+      .send({ lines: [{ offerId: offer.body.id, offerVersion: 1, quantity }] })
       .expect(201);
     const orderId = order.body.id as string;
     await runUnscoped('the suite completes the order the saga would', () =>

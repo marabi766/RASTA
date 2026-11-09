@@ -32,7 +32,7 @@ describe('separate review quality answer (real PostgreSQL)', () => {
   async function completedOrder(): Promise<string> {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('quality')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('quality')),
     );
     await runUnscoped(
       'the suite supplies a completed order satisfying the existing CHECKs',

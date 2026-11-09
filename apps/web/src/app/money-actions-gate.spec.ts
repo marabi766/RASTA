@@ -25,6 +25,7 @@ import { CSRF_FIELD } from '@/server/csrf';
 import { sealRepairOrderBaseline } from '@/server/repair-order-commands';
 import type { WebSession } from '@/server/session';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
+import { stampOffer } from '@/server/offer-stamp';
 import { actingAccessToken } from '@/test/session-token';
 import { useUnresolvedStore } from '@/server/unresolved-request';
 import { memoryUnresolvedStore } from '@/server/unresolved-request-store';
@@ -227,7 +228,16 @@ const GATED: readonly GatedAction[] = [
     read: DISCLOSURE,
     known: disclosed,
     malformed: { provider: 'mock' },
-    draw: () => drawnForm({ offerId: 'OFR_SEED_AGGREGATE_D2', quantity: '3' }),
+    draw: () =>
+      drawnForm({
+        offerId: 'OFR_SEED_AGGREGATE_D2',
+        quantity: '3',
+        // The page draws a stamp per offer (D-156); without it nothing would be sent anyway.
+        'offerStamp:OFR_SEED_AGGREGATE_D2': stampOffer(SESSION, {
+          id: 'OFR_SEED_AGGREGATE_D2',
+          version: 1,
+        }),
+      }),
     submit: (form) => submitPlaceOrder(IDLE_PLACE_ORDER_FORM, form),
     write: '/v1/orders',
   },
@@ -306,7 +316,11 @@ describe('a retry of an unconfirmed order is the same hold, and is gated too', (
       kind: 'UNCONFIRMED',
       correlationId: 'COR_1',
       submissionId,
-      values: { offerId: 'OFR_SEED_AGGREGATE_D2', quantity: '3' },
+      values: {
+        offerId: 'OFR_SEED_AGGREGATE_D2',
+        quantity: '3',
+        offerStamp: 'stamp-OFR_SEED_AGGREGATE_D2',
+      },
     } as const;
 
     answers[DISCLOSURE] = { status: 503 };

@@ -7,8 +7,9 @@ import {
   parsePlaceOrderForm,
   placeOrder,
   placeOrderFormValues,
+  placeOrderRequest,
 } from './place-order';
-import { EMPTY_PLACE_ORDER_FORM } from '@/lib/place-order-fields';
+import { EMPTY_PLACE_ORDER_FORM, OFFER_CHANGED_MESSAGE } from '@/lib/place-order-fields';
 import type { WebSession } from './session';
 import { actingAccessToken } from '@/test/session-token';
 
@@ -79,10 +80,26 @@ describe('reading the form', () => {
 describe('parsing the form', () => {
   it('builds the one-line body and nothing else — no price, no organization', () => {
     const parsed = parsePlaceOrderForm(values({ offerId: 'OFR_1', quantity: '3' }));
-    expect(parsed).toEqual({
-      ok: true,
-      request: { lines: [{ offerId: 'OFR_1', quantity: 3 }] },
+    expect(parsed).toEqual({ ok: true, line: { offerId: 'OFR_1', quantity: 3 } });
+    if (!parsed.ok) throw new Error('expected a parsed form');
+    // The version is the drawn stamp's, handed in by the action; nothing posted becomes it.
+    expect(placeOrderRequest(parsed.line, 7)).toEqual({
+      lines: [{ offerId: 'OFR_1', offerVersion: 7, quantity: 3 }],
     });
+  });
+
+  it('reads the stamp the page drew for the chosen offer, and only that one', () => {
+    const read = placeOrderFormValues(
+      form({
+        offerId: 'OFR_2',
+        quantity: '1',
+        'offerStamp:OFR_1': 'stamp-of-1',
+        'offerStamp:OFR_2': 'stamp-of-2',
+        offerStamp: 'a-bare-field-is-not-read',
+        offerVersion: '99',
+      }),
+    );
+    expect(read).toEqual({ offerId: 'OFR_2', quantity: '1', offerStamp: 'stamp-of-2' });
   });
 
   it('never sends an order note: marketplace-service refuses any non-empty one (Q-110)', () => {
@@ -90,10 +107,7 @@ describe('parsing the form', () => {
       ...values({ offerId: 'OFR_1', quantity: '3' }),
       note: 'x',
     } as never);
-    expect(parsed).toEqual({
-      ok: true,
-      request: { lines: [{ offerId: 'OFR_1', quantity: 3 }] },
-    });
+    expect(parsed).toEqual({ ok: true, line: { offerId: 'OFR_1', quantity: 3 } });
     expect(JSON.stringify(parsed)).not.toContain('note');
   });
 
@@ -135,7 +149,7 @@ function jsonResponse(status: number, body: unknown, headers: Record<string, str
   });
 }
 
-const REQUEST = { lines: [{ offerId: 'OFR_1', quantity: 3 }] };
+const REQUEST = { lines: [{ offerId: 'OFR_1', offerVersion: 2, quantity: 3 }] };
 
 function send(fetchImpl: jest.Mock) {
   return placeOrder(SESSION, REQUEST, SUBMISSION, fetchImpl as unknown as typeof fetch);
@@ -219,6 +233,32 @@ describe('what the service can answer', () => {
       message: PLACE_ORDER_FIELD_MAPPING.byCode?.IDEMPOTENCY_KEY_REUSED,
     });
     expect(JSON.stringify(result)).not.toContain('Idempotency');
+  });
+
+  it('reads a stale offer version (409 OFFER_VERSION_CHANGED) as a definite "the offer changed" (D-156)', async () => {
+    const stale = 'The offer has changed since it was read; read it again before ordering';
+    const fetchImpl = jest.fn(async () =>
+      problem(409, 'OPTIMISTIC_LOCK_FAILED', stale, [
+        { path: 'lines[0].offerVersion', code: 'OFFER_VERSION_CHANGED', message: stale },
+      ]),
+    );
+    const result = await send(fetchImpl);
+    expect(result).toEqual({ kind: 'OFFER_CHANGED', correlationId: expect.any(String) });
+    // Sent once, never retried on its own: a new attempt needs a fresh read.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the offer changed in Persian for a lock refusal with no detail, and never the English', async () => {
+    const result = await send(
+      jest.fn(async () => problem(409, 'OPTIMISTIC_LOCK_FAILED', 'English sentence')),
+    );
+    expect(result).toMatchObject({ kind: 'INVALID', message: OFFER_CHANGED_MESSAGE });
+    expect(JSON.stringify(result)).not.toContain('English');
+  });
+
+  it('still reads a 5xx after a version refusal was possible as unknown, never as "the offer changed"', async () => {
+    const result = await send(jest.fn(async () => problem(503, 'SERVICE_UNAVAILABLE', 'down')));
+    expect(result.kind).toBe('UNKNOWN_OUTCOME');
   });
 
   it('uses a fixed Persian fallback for a documented code it has no sentence for', async () => {

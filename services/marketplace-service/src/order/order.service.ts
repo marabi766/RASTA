@@ -144,7 +144,13 @@ export class OrderService {
   // =========================================================================
 
   /**
-   * Places an order at the price the catalogue holds right now.
+   * Places an order at the price the buyer read — and only that one.
+   *
+   * Each line names the offer version the buyer read; `priceOrder` refuses
+   * the order when the locked row is at any other (D-156). `updateOffer`
+   * reprices under the same row lock, so the two serialise: an order that
+   * locks first commits at the old price and the reprice follows it; a reprice
+   * that commits first makes this order a `409` that writes nothing.
    *
    * The offers are locked before they are priced, so the price a buyer is
    * charged and the availability they consume come from the same read. Without

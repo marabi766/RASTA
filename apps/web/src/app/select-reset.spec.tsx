@@ -138,6 +138,7 @@ const PLACE_ORDER_OFFERS = ['OFR_1', 'OFR_2', 'OFR_3'].map((id) => ({
   availableQuantity: 15,
   leadTimeDays: 5,
   minimumQuantity: 1,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 }));
 
@@ -225,6 +226,7 @@ const CASES = [
     mount: () => (
       <PlaceOrderForm
         offers={PLACE_ORDER_OFFERS}
+        offerStamps={Object.fromEntries(PLACE_ORDER_OFFERS.map((o) => [o.id, `stamp-${o.id}`]))}
         csrfToken={CSRF}
         submissionId={SUBMISSION}
         newOrderHref="/marketplace/PRD_1"

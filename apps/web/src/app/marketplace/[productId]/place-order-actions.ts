@@ -6,10 +6,12 @@ import { MONEY_EFFECTS } from '@/lib/demo-mode';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { mayDispatch } from '@/server/money-gate';
+import { drawnOfferVersion } from '@/server/offer-stamp';
 import {
   placeOrder,
   parsePlaceOrderForm,
   placeOrderFormValues,
+  placeOrderRequest,
   type PlaceOrderRequest,
 } from '@/server/place-order';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
@@ -27,7 +29,9 @@ import { ORDER_PLACED } from '@/lib/order-fields';
  * gateway — each gate returning before the next runs. A retry is gated the same
  * way: it is the same hold. An order is placed against an *offer*, which the form posts; the
  * service — not the portal — decides whether that offer is published, large
- * enough, and from another organization.
+ * enough, and from another organization. The offer's version comes from the stamp
+ * the page drew for that offer (`server/offer-stamp.ts`), never from the form: an
+ * offer the page did not draw, or a stamp that does not verify, sends nothing.
  *
  * On success the redirect goes to the order the service answered with, never
  * back to the form, so a refresh cannot place a second one.
@@ -82,11 +86,16 @@ async function attempt(form: FormData): Promise<PlaceOrderFormState> {
     };
   }
 
+  // The price the person agrees to is the version this page drew (D-156).
+  const offerVersion = drawnOfferVersion(session, values.offerStamp, parsed.line.offerId);
+  if (offerVersion === null) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  const request = placeOrderRequest(parsed.line, offerVersion);
+
   if (!(await mayDispatch(session, MONEY_EFFECTS.placeOrder))) {
     return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
   }
 
-  const result = await placeOrder(session, parsed.request, submissionId);
+  const result = await placeOrder(session, request, submissionId);
 
   switch (result.kind) {
     case 'CREATED':
@@ -111,6 +120,9 @@ async function attempt(form: FormData): Promise<PlaceOrderFormState> {
       return { kind: 'FORBIDDEN', correlationId: result.correlationId };
     case 'NOT_FOUND':
       return { kind: 'NOT_FOUND', submissionId, values };
+    case 'OFFER_CHANGED':
+      // A definite refusal: nothing was placed, and the offers must be read again.
+      return { kind: 'OFFER_CHANGED', correlationId: result.correlationId };
     case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was ordered". In
@@ -124,8 +136,10 @@ async function attempt(form: FormData): Promise<PlaceOrderFormState> {
         correlationId: result.correlationId,
         submissionId,
         values: {
-          offerId: parsed.request.lines[0].offerId,
-          quantity: sentQuantity(parsed.request),
+          offerId: request.lines[0].offerId,
+          quantity: sentQuantity(request),
+          // The stamp that was sent, so a retry is the same body at the same version.
+          offerStamp: values.offerStamp,
         },
       };
   }

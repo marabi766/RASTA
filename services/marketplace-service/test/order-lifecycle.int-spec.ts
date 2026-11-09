@@ -63,7 +63,9 @@ describe('order lifecycle (real database)', () => {
     );
 
   async function placeOrder(offerId: string, quantity = 2) {
-    return asBuyer(() => wiring.orders.place({ lines: [{ offerId, quantity }] }, key('ord')));
+    return asBuyer(() =>
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity }] }, key('ord')),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -537,8 +539,8 @@ describe('order lifecycle (real database)', () => {
       wiring.orders.place(
         {
           lines: [
-            { offerId: fast.offerId, quantity: 1 },
-            { offerId: slow.offerId, quantity: 1 },
+            { offerId: fast.offerId, offerVersion: 1, quantity: 1 },
+            { offerId: slow.offerId, offerVersion: 1, quantity: 1 },
           ],
         },
         key('ord-lead'),

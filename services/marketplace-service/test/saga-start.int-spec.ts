@@ -29,7 +29,7 @@ describe('durable saga start delivery (PostgreSQL)', () => {
   async function place(buyer = org.buyer) {
     const { offerId } = await publishOffer(wiring, org.supplier);
     return asActor({ organizationId: buyer }, () =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 2 }] }, key('start')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 2 }] }, key('start')),
     );
   }
   const stored = (id: string) =>
@@ -66,9 +66,13 @@ describe('durable saga start delivery (PostgreSQL)', () => {
     const stamp = key('rollback');
     await expect(
       asActor({ organizationId: org.buyer }, () =>
-        wiring.orders.place({ lines: [{ offerId, quantity: 2 }] }, stamp, async () => {
-          throw new Error('simulated pre-commit crash');
-        }),
+        wiring.orders.place(
+          { lines: [{ offerId, offerVersion: 1, quantity: 2 }] },
+          stamp,
+          async () => {
+            throw new Error('simulated pre-commit crash');
+          },
+        ),
       ),
     ).rejects.toThrow('simulated pre-commit crash');
     const rows = await asActor({ organizationId: org.buyer }, async () =>

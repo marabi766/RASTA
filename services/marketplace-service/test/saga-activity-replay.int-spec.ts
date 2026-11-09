@@ -341,7 +341,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
   async function placeOrder(): Promise<string> {
     const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '500000' });
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('RPL')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('RPL')),
     );
     return order.id;
   }

@@ -36,7 +36,7 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
   async function place(buyer: string, supplier: string) {
     const { offerId } = await publishOffer(wiring, supplier);
     const placed = await asActor({ organizationId: buyer }, () =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 2 }] }, key('call')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 2 }] }, key('call')),
     );
     return { id: placed.id, organizationId: buyer };
   }

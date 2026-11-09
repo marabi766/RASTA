@@ -109,7 +109,7 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
   async function disputedAtConfirmed(): Promise<string> {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('origin')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('origin')),
     );
     await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
@@ -192,7 +192,10 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
     // finds a status outside the four; the CHECK refuses the row.
     const { offerId } = await publishOffer(wiring, org.supplier);
     const pending = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('origin-pending')),
+      wiring.orders.place(
+        { lines: [{ offerId, offerVersion: 1, quantity: 1 }] },
+        key('origin-pending'),
+      ),
     );
     await expect(
       owner.$executeRawUnsafe(
@@ -282,7 +285,10 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
   async function confirmedOrder(): Promise<{ id: string; organizationId: string }> {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('origin-legacy')),
+      wiring.orders.place(
+        { lines: [{ offerId, offerVersion: 1, quantity: 1 }] },
+        key('origin-legacy'),
+      ),
     );
     await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
@@ -461,7 +467,7 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
   it('an order the old SETTLE left RECEIPT_CONFIRMED with no receipt: found, refused SETTLE, REFUND still possible', async () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('evidence')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('evidence')),
     );
     await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));

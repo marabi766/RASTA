@@ -372,16 +372,22 @@ it('the fingerprint is the SHA-256 of the exact text, with its length: two texts
 describe('an answer keeps the first send’s body (addendum E)', () => {
   it('order: the values sent first, whatever a later answer carries', () => {
     const order = jest.requireActual<typeof import('./unresolved-order')>('./unresolved-order');
-    const first = { submissionId: K1, values: { offerId: 'OFR_1', quantity: '3' } };
+    const first = {
+      submissionId: K1,
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
+    };
     const saved = order.saveUnresolvedOrder('PRD_1', { ...first, correlationId: null }, inA);
     if (saved.outcome !== 'SAVED') throw new Error(saved.outcome);
-    const late = { submissionId: K1, values: { offerId: 'OFR_2', quantity: '9' } };
+    const late = {
+      submissionId: K1,
+      values: { offerId: 'OFR_2', quantity: '9', offerStamp: 'stamp-OFR_2' },
+    };
     expect(
       order.answerUnresolvedOrder('PRD_1', { ...late, correlationId: 'COR' }, inA, saved.attempt),
     ).toBe('SAVED');
     expect(order.restoreUnresolvedOrder('PRD_1', inA, 3600)?.order).toMatchObject({
       submissionId: K1,
-      values: { offerId: 'OFR_1', quantity: '3' },
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
       correlationId: 'COR',
     });
   });

@@ -270,6 +270,7 @@ const OPTED_IN = {
     'ix_order_supplier_status',
     'ix_return_request_supplier',
     'uq_offer_price_version',
+    'uq_offer_price_history_price',
     'uq_order_line_offer',
   ],
 };

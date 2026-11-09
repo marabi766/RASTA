@@ -177,11 +177,13 @@ describe('place order (parser → action → rendered)', () => {
       availableQuantity: 15,
       leadTimeDays: 5,
       minimumQuantity: 2,
+      version: 1,
       supplierQualification: 'UNAVAILABLE',
     };
     const { container } = render(
       <PlaceOrderForm
         offers={[offer]}
+        offerStamps={Object.fromEntries([offer].map((o) => [o.id, `stamp-${o.id}`]))}
         csrfToken={SESSION.csrfToken}
         submissionId={SUBMISSION}
         newOrderHref="/marketplace/PRD_1"

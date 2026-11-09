@@ -10,6 +10,9 @@ import { formatMoney, toPersianDigits } from '@/lib/format';
 import {
   canonicalQuantity,
   EMPTY_PLACE_ORDER_FORM,
+  OFFER_CHANGED_MESSAGE,
+  offerStampField,
+  PLACE_ORDER_LIMITS,
   type PlaceOrderFormValues,
 } from '@/lib/place-order-fields';
 import {
@@ -28,6 +31,7 @@ import type { Offer } from '@/server/marketplace';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import { setAsideOnOpen } from '@/lib/set-aside-link';
+import { ownText } from '@/lib/own-key';
 
 import { submitPlaceOrder } from './place-order-actions';
 import {
@@ -48,9 +52,11 @@ import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
  * order is confirmed either: placing it asks the supplier to accept, and the
  * order page shows where it is.
  *
- * The price is not a field. The service prices the order from the offer as it
- * is when the order is placed (and refuses a body that carries a price), so the
- * figure in the option text is what this page last read, not a quote.
+ * The price is not a field. The service prices the order from its own offer
+ * (and refuses a body that carries a price) — but only at the offer version this
+ * page drew (D-156): each offer's signed stamp is posted with the choice, so the
+ * figure in the option text is the price charged, or the order is refused and
+ * nothing is placed.
  *
  * The offers it is given are the ones this organization may order from —
  * `OffersScreen` leaves out its own. That is a convenience; the service refuses
@@ -59,6 +65,8 @@ import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 export interface PlaceOrderFormProps {
   readonly offers: readonly Offer[];
+  /** The signed stamp of each drawn offer's version, by offer id (`server/offer-stamp.ts`). */
+  readonly offerStamps: Readonly<Record<string, string>>;
   readonly csrfToken: string;
   readonly submissionId: string;
   /** This page's own address: following it is a full navigation that mints a new submission id. */
@@ -120,11 +128,20 @@ function pendingFrom(form: FormData): Omit<UnresolvedOrder, 'savedAt'> | null {
   const canonical = canonicalQuantity(quantity);
   const offer = offerId.trim();
   if (canonical === null || offer === '' || offer.length > 64) return null;
-  return { submissionId, values: { offerId: offer, quantity: canonical }, correlationId: null };
+  // The action refuses an offer without its stamp before sending anything.
+  const offerStamp = form.get(offerStampField(offer));
+  if (typeof offerStamp !== 'string' || offerStamp === '') return null;
+  if (offerStamp.length > PLACE_ORDER_LIMITS.offerStamp.max) return null;
+  return {
+    submissionId,
+    values: { offerId: offer, quantity: canonical, offerStamp },
+    correlationId: null,
+  };
 }
 
 function OrderForm({
   offers,
+  offerStamps,
   csrfToken,
   submissionId,
   newOrderHref,
@@ -202,6 +219,10 @@ function OrderForm({
     );
   }
 
+  if (state.kind === 'OFFER_CHANGED') {
+    return <OfferChanged state={state} newOrderHref={newOrderHref} />;
+  }
+
   const kept = state.kind === 'INVALID' || state.kind === 'NOT_FOUND';
   const values: PlaceOrderFormValues = kept ? state.values : EMPTY_PLACE_ORDER_FORM;
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
@@ -211,14 +232,23 @@ function OrderForm({
     <form action={action} aria-labelledby="place-order-heading" className="flex flex-col gap-4">
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
+      {/* What the page drew, per offer: the action sends the chosen offer's version from it. */}
+      {offers.map((offer) => (
+        <input
+          key={offer.id}
+          type="hidden"
+          name={offerStampField(offer.id)}
+          value={ownText(offerStamps, offer.id) ?? ''}
+        />
+      ))}
 
       <h3 id="place-order-heading" className="text-base font-medium">
         ثبت سفارش
       </h3>
       <p className="text-sm text-content-muted">
-        قیمت هنگام ثبت سفارش از پیشنهاد کنونی تأمین‌کننده محاسبه می‌شود و ممکن است با آنچه در این
-        صفحه خوانده‌اید فرق کند؛ مجموع نهایی را در صفحهٔ سفارش می‌بینید. پلتفرم به بانک واقعی وصل
-        نیست: وجه سفارش از موجودی کیف پول شبیه‌سازی‌شدهٔ سازمان شما نگه داشته می‌شود و سفارش تا
+        سفارش فقط با همان قیمتی ثبت می‌شود که در این صفحه می‌بینید؛ اگر تأمین‌کننده پس از باز شدن
+        صفحه قیمت را تغییر دهد، سفارش ثبت نمی‌شود و پیشنهاد را دوباره می‌بینید. پلتفرم به بانک واقعی
+        وصل نیست: وجه سفارش از موجودی کیف پول شبیه‌سازی‌شدهٔ سازمان شما نگه داشته می‌شود و سفارش تا
         پذیرش تأمین‌کننده قطعی نیست.
       </p>
 
@@ -322,6 +352,34 @@ function FormBanner({ state }: { state: PlaceOrderFormState }) {
 }
 
 /**
+ * The offer was repriced after this page drew it (D-156). A definite refusal —
+ * nothing was placed — so it says so; and no form is offered on the old stamps:
+ * the one way on is a fresh read of the offers (a full navigation, which also
+ * mints a new submission id).
+ */
+function OfferChanged({
+  state,
+  newOrderHref,
+}: {
+  state: Extract<PlaceOrderFormState, { kind: 'OFFER_CHANGED' }>;
+  newOrderHref: string;
+}) {
+  return (
+    <section aria-labelledby="place-order-heading" className="flex flex-col gap-4">
+      <h3 id="place-order-heading" className="text-base font-medium">
+        ثبت سفارش
+      </h3>
+      <Alert tone="warning">
+        {OFFER_CHANGED_MESSAGE} کد پیگیری: {state.correlationId}
+      </Alert>
+      <a href={newOrderHref} className="underline self-start text-sm">
+        دیدن دوبارهٔ پیشنهادها
+      </a>
+    </section>
+  );
+}
+
+/**
  * Sent, maybe placed, not confirmed. The service stores its idempotency answer
  * after the order's transaction, so even a 5xx can follow a committed order —
  * this never says "not placed". The retry re-sends the kept values under the kept
@@ -357,6 +415,12 @@ function UnconfirmedOrder({
       <input type="hidden" name={SUBMISSION_FIELD} value={state.submissionId} />
       <input type="hidden" name="offerId" value={state.values.offerId} />
       <input type="hidden" name="quantity" value={state.values.quantity} />
+      {/* The stamp the first send carried: the retry is the same body, at the same version. */}
+      <input
+        type="hidden"
+        name={offerStampField(state.values.offerId)}
+        value={state.values.offerStamp}
+      />
 
       <h3 id="place-order-heading" className="text-base font-medium">
         ثبت سفارش

@@ -79,7 +79,7 @@ describe('return request: internal dispatch routes and the cancellation boundary
       .post('/v1/orders')
       .set(as(buyer(buyerOrg)))
       .set('idempotency-key', apiKey('rds-order'))
-      .send({ lines: [{ offerId: offer.body.id, quantity }] })
+      .send({ lines: [{ offerId: offer.body.id, offerVersion: 1, quantity }] })
       .expect(201);
     const orderId = order.body.id as string;
     await runUnscoped('the suite completes the order the saga would', () =>

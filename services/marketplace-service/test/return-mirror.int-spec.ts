@@ -186,7 +186,7 @@ describe('return mirror (RUN-005 PR 3)', () => {
 
     const order = await asBuyer(() =>
       wiring.orders.place(
-        { lines: [{ offerId, quantity: options.quantity ?? 2 }] },
+        { lines: [{ offerId, offerVersion: 1, quantity: options.quantity ?? 2 }] },
         key('mir-ord'),
       ),
     );
@@ -685,7 +685,11 @@ describeWithKafka('return mirror over Kafka', () => {
     const { offerId } = await publishOffer(wiring, parties.supplier);
     const order = await asActor(
       { organizationId: parties.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-B' },
-      () => wiring.orders.place({ lines: [{ offerId, quantity: 2 }] }, key('mirk-ord')),
+      () =>
+        wiring.orders.place(
+          { lines: [{ offerId, offerVersion: 1, quantity: 2 }] },
+          key('mirk-ord'),
+        ),
     );
     await runUnscoped('the suite completes the order the saga would', () =>
       prisma.client.$executeRawUnsafe(

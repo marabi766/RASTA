@@ -19,6 +19,14 @@ import { RESPONSIBILITY_ATTRIBUTION } from '../events/events';
  *
  * Ignoring is quiet. Refusing tells a client that thinks it is setting the
  * price that it is not.
+ *
+ * What a line carries instead is `offerVersion` — **required** — the `version`
+ * of the offer the buyer read (`OfferView.version`). It names the price the
+ * buyer agreed to without stating one: the server still prices from the locked
+ * offer row, and refuses with `409 OPTIMISTIC_LOCK_FAILED` (`details[].code`
+ * `OFFER_VERSION_CHANGED`) when that row is at any other version (D-156,
+ * `pricing.ts`). There is no default: a line that names no version agreed to
+ * nothing, and "the current one" is exactly the price nobody saw.
  */
 
 export const ORDER_STATUSES = [
@@ -46,6 +54,8 @@ export const createOrderSchema = z
         z
           .object({
             offerId: z.string().trim().min(1).max(64),
+            // `offer.version` is an INT column; a larger number names no version.
+            offerVersion: z.number().int().min(1).max(2_147_483_647),
             quantity: z.number().int().positive().max(1_000_000),
           })
           .strict(),

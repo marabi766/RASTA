@@ -37,6 +37,7 @@ const OFFER: Offer = {
   availableQuantity: 15,
   leadTimeDays: 5,
   minimumQuantity: 2,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 };
 
@@ -51,6 +52,12 @@ function renderForm(state: PlaceOrderFormState = { kind: 'IDLE' }, isPending = f
   return render(
     <PlaceOrderForm
       offers={[OFFER, { ...OFFER, id: 'OFR_2', supplierOrganizationId: 'ORG-DEH-0003' }]}
+      offerStamps={Object.fromEntries(
+        [OFFER, { ...OFFER, id: 'OFR_2', supplierOrganizationId: 'ORG-DEH-0003' }].map((o) => [
+          o.id,
+          `stamp-${o.id}`,
+        ]),
+      )}
       csrfToken={CSRF}
       submissionId={SUBMISSION}
       newOrderHref="/marketplace/PRD_1"
@@ -91,9 +98,10 @@ describe('PlaceOrderForm', () => {
     expect(container.querySelector('select[name="offerId"]')).toHaveValue('');
   });
 
-  it('says the price is read when the order is placed, and that no bank is connected', () => {
+  it('says the order is placed only at the price shown, and that no bank is connected', () => {
     const { container } = renderForm();
-    expect(container.textContent).toMatch(/هنگام ثبت سفارش.*محاسبه/);
+    expect(container.textContent).toMatch(/فقط با همان قیمتی ثبت می‌شود که در این صفحه می‌بینید/);
+    expect(container.textContent).not.toMatch(/ممکن است با آنچه در این\s*صفحه خوانده‌اید فرق کند/);
     expect(container.textContent).toMatch(/به بانک واقعی وصل\s*نیست/);
     expect(container.textContent).toMatch(/شبیه‌سازی/);
     // Not a payment box, and not a promise that it is done.
@@ -105,7 +113,7 @@ describe('PlaceOrderForm', () => {
     const { getByText, container } = renderForm({
       kind: 'INVALID',
       submissionId: SUBMISSION,
-      values: { offerId: 'OFR_1', quantity: '0' },
+      values: { offerId: 'OFR_1', quantity: '0', offerStamp: 'stamp-OFR_1' },
       fieldErrors: { quantity: 'تعداد باید دست‌کم ۱ باشد' },
       message: null,
     });
@@ -117,7 +125,7 @@ describe('PlaceOrderForm', () => {
     const { container } = renderForm({
       kind: 'INVALID',
       submissionId: SUBMISSION,
-      values: { offerId: 'OFR_2', quantity: '5' },
+      values: { offerId: 'OFR_2', quantity: '5', offerStamp: 'stamp-OFR_2' },
       fieldErrors: {},
       message: 'سفارش با شرایط کنونی این پیشنهاد جور نیست',
     });
@@ -129,7 +137,7 @@ describe('PlaceOrderForm', () => {
     const { container } = renderForm({
       kind: 'INVALID',
       submissionId: 'sub_BBBBBBBBBBBBBBBBBBBB',
-      values: { offerId: 'OFR_1', quantity: '0' },
+      values: { offerId: 'OFR_1', quantity: '0', offerStamp: 'stamp-OFR_1' },
       fieldErrors: {},
       message: null,
     });
@@ -140,7 +148,7 @@ describe('PlaceOrderForm', () => {
     const { getByText } = renderForm({
       kind: 'INVALID',
       submissionId: SUBMISSION,
-      values: { offerId: 'OFR_1', quantity: '1' },
+      values: { offerId: 'OFR_1', quantity: '1', offerStamp: 'stamp-OFR_1' },
       fieldErrors: {},
       message: 'سازمان شما نمی‌تواند از پیشنهاد خودش سفارش بدهد.',
     });
@@ -151,7 +159,7 @@ describe('PlaceOrderForm', () => {
     const { getByText } = renderForm({
       kind: 'NOT_FOUND',
       submissionId: SUBMISSION,
-      values: { offerId: 'OFR_1', quantity: '1' },
+      values: { offerId: 'OFR_1', quantity: '1', offerStamp: 'stamp-OFR_1' },
     });
     expect(getByText(/این پیشنهاد دیگر در دسترس نیست و سفارشی ثبت نشد/)).toBeInTheDocument();
   });
@@ -193,7 +201,7 @@ describe('PlaceOrderForm', () => {
       kind: 'UNCONFIRMED',
       correlationId: 'COR_3',
       submissionId: 'sub_CCCCCCCCCCCCCCCCCCCC',
-      values: { offerId: 'OFR_2', quantity: '5' },
+      values: { offerId: 'OFR_2', quantity: '5', offerStamp: 'stamp-OFR_2' },
     };
 
     it('never claims nothing was ordered, and links to the orders list', () => {
@@ -284,7 +292,7 @@ describe('PlaceOrderForm', () => {
       {
         kind: 'INVALID',
         submissionId: SUBMISSION,
-        values: { offerId: 'OFR_1', quantity: '0' },
+        values: { offerId: 'OFR_1', quantity: '0', offerStamp: 'stamp-OFR_1' },
         fieldErrors: { quantity: 'تعداد باید دست‌کم ۱ باشد', offerId: 'پیشنهاد را انتخاب کنید' },
         message: 'پیام',
       },
@@ -295,7 +303,7 @@ describe('PlaceOrderForm', () => {
         kind: 'UNCONFIRMED',
         correlationId: 'COR_3',
         submissionId: SUBMISSION,
-        values: { offerId: 'OFR_1', quantity: '2' },
+        values: { offerId: 'OFR_1', quantity: '2', offerStamp: 'stamp-OFR_1' },
       },
     ],
     [
@@ -304,7 +312,7 @@ describe('PlaceOrderForm', () => {
         kind: 'UNCONFIRMED',
         correlationId: 'COR_3',
         submissionId: SUBMISSION,
-        values: { offerId: 'OFR_1', quantity: '2' },
+        values: { offerId: 'OFR_1', quantity: '2', offerStamp: 'stamp-OFR_1' },
         retryRefused: true,
       },
     ],
@@ -314,7 +322,7 @@ describe('PlaceOrderForm', () => {
         kind: 'UNCONFIRMED',
         correlationId: 'COR_3',
         submissionId: SUBMISSION,
-        values: { offerId: 'OFR_1', quantity: '2' },
+        values: { offerId: 'OFR_1', quantity: '2', offerStamp: 'stamp-OFR_1' },
         retryUnknown: true,
       },
     ],
@@ -324,7 +332,7 @@ describe('PlaceOrderForm', () => {
         kind: 'UNCONFIRMED',
         correlationId: 'COR_3',
         submissionId: SUBMISSION,
-        values: { offerId: 'OFR_1', quantity: '2' },
+        values: { offerId: 'OFR_1', quantity: '2', offerStamp: 'stamp-OFR_1' },
         sessionEnded: true,
       },
     ],
@@ -334,7 +342,7 @@ describe('PlaceOrderForm', () => {
         kind: 'UNCONFIRMED',
         correlationId: 'COR_3',
         submissionId: SUBMISSION,
-        values: { offerId: 'OFR_1', quantity: '2' },
+        values: { offerId: 'OFR_1', quantity: '2', offerStamp: 'stamp-OFR_1' },
         viewOnly: true,
       },
     ],

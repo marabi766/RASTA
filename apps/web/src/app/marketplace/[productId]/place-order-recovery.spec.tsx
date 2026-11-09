@@ -64,6 +64,7 @@ const OFFER: Offer = {
   availableQuantity: 15,
   leadTimeDays: 5,
   minimumQuantity: 2,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 };
 
@@ -79,6 +80,7 @@ const STORAGE_KEY = keyFor('rasta.unresolved-order.', LOGIN_1, 'PRD_1'); // gitl
 function pageProps(overrides: Partial<PlaceOrderFormProps> = {}): PlaceOrderFormProps {
   return {
     offers: [OFFER],
+    offerStamps: { [OFFER.id]: `stamp-${OFFER.id}` },
     csrfToken: SESSION.csrfToken,
     // A page load mints a new id every time: this is the id a reload would send.
     submissionId: PAGE_KEY,
@@ -117,7 +119,7 @@ const UNCONFIRMED: PlaceOrderFormState = {
   kind: 'UNCONFIRMED',
   correlationId: 'COR_ORIGINAL',
   submissionId: KEY,
-  values: { offerId: 'OFR_1', quantity: '3' },
+  values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
 };
 
 function stored(): Record<string, unknown> | null {
@@ -131,7 +133,7 @@ function plant(overrides: Record<string, unknown> = {}, binding = LOGIN_1) {
     JSON.stringify({
       v: 1,
       submissionId: KEY,
-      values: { offerId: 'OFR_1', quantity: '3' },
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
       correlationId: 'COR_ORIGINAL',
       savedAt: Date.now(),
       owner: binding.owner,
@@ -245,7 +247,7 @@ describe('an unresolved order survives a navigation (F1)', () => {
     expect(screen.getByText(/ممکن است سفارش ثبت شده باشد/)).toBeInTheDocument();
     expect(stored()).toMatchObject({
       submissionId: KEY,
-      values: { offerId: 'OFR_1', quantity: '3' },
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
       correlationId: 'COR_ORIGINAL',
     });
     const raw = window.sessionStorage.getItem(STORAGE_KEY) ?? '';
@@ -615,7 +617,7 @@ describe('an order is remembered before it is sent (F1)', () => {
 
     expect(stored()).toMatchObject({
       submissionId: PAGE_KEY,
-      values: { offerId: 'OFR_1', quantity: '3' },
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
       correlationId: null,
       pending: true,
     });
@@ -702,7 +704,7 @@ describe('an order is remembered before it is sent (F1)', () => {
     submit.mockResolvedValueOnce({
       kind: 'INVALID',
       submissionId: PAGE_KEY,
-      values: { offerId: 'OFR_1', quantity: 'abc' },
+      values: { offerId: 'OFR_1', quantity: 'abc', offerStamp: 'stamp-OFR_1' },
       fieldErrors: { quantity: 'x' },
       message: null,
     });
@@ -731,7 +733,9 @@ describe('what is remembered is what was sent (F2)', () => {
       fireEvent.submit(first.container.querySelector('form') as HTMLFormElement);
     });
 
-    expect(stored()).toMatchObject({ values: { offerId: 'OFR_1', quantity: '3' } });
+    expect(stored()).toMatchObject({
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
+    });
     first.unmount();
 
     const reloaded = loadPage();
@@ -758,7 +762,9 @@ describe('what is remembered is what was sent (F2)', () => {
   });
 
   it('an entry an earlier build wrote with the text as typed is restored as the count, not deleted', async () => {
-    plant({ values: { offerId: 'OFR_1', quantity: '00000000000000003' } });
+    plant({
+      values: { offerId: 'OFR_1', quantity: '00000000000000003', offerStamp: 'stamp-OFR_1' },
+    });
     const { container } = loadPage();
     await waitFor(() => expect(container.querySelector('[name="submission"]')).toHaveValue(KEY));
     expect(container.querySelector('[name="quantity"]')).toHaveValue('3');
@@ -766,7 +772,7 @@ describe('what is remembered is what was sent (F2)', () => {
   });
 
   it('a quantity the action could never have accepted is never restored — kept as it is, and holds', async () => {
-    plant({ values: { offerId: 'OFR_1', quantity: '0' } });
+    plant({ values: { offerId: 'OFR_1', quantity: '0', offerStamp: 'stamp-OFR_1' } });
     const raw = window.sessionStorage.getItem(STORAGE_KEY);
     loadPage();
     await waitFor(() => expect(screen.queryByText(QUARANTINE_TITLE)).not.toBeNull());
