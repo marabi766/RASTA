@@ -26,9 +26,11 @@
 //     statement, a UESCAPE, a session setting that may move names (search_path, SET ROLE,
 //     set_config() of an unlisted one; SET/RESET read by its grammar). Every literal is read;
 //     SQL or an undecodable string in a migration's DO block goes to review; strings lexically
-//     enclosed by unlisted calls are refused. Known SQL-text executors are refused anywhere in
-//     a statement/body, including indirect inputs; no data-flow proof is attempted. DISCARD and
-//     writes to pg_settings are session changes. Only reviewed non-executing extensions are replayed;
+//     enclosed by unlisted calls are refused. Recognized SQL-text executor calls (core XML/full-text,
+//     dblink*, pg_background_* and cron.*) are refused in production SQL, live routine/view bodies
+//     and every migration statement's tokens, including DDL expressions; in DO bodies they go to
+//     review. Inputs need not contain a string; no data-flow proof is attempted. DISCARD and writes
+//     to pg_settings are session changes. Only reviewed non-executing extensions are replayed;
 //   - types as PostgreSQL reads them (`pg_catalog.timestamp`, `"timestamp"`);
 //   - a pin: grouping, `AT TIME ZONE 'UTC'` or timezone('UTC', …), then date_trunc() or a cast
 //     to plain timestamp, used where nothing converts it back (no coalesce(), CASE branch,
@@ -751,6 +753,13 @@ export function replayMigrations(texts) {
         refuse(`a session setting that may move names: ${firstLine(text)}`);
         continue;
       }
+      // One boundary for every statement, before any DDL/ALTER/inert branch can skip it.
+      // Expression slots may execute now (TYPE USING) or later (CHECK, policy, trigger, DEFAULT).
+      const executor = sqlTextExecutor(statement.tokens);
+      if (executor !== null) {
+        refuse(`a SQL-text executor in a migration statement: ${executor}: ${firstLine(text)}`);
+        continue;
+      }
       if (misread) {
         refuse(`a name the replay cannot read whole: ${misread.value}`);
         continue;
@@ -901,7 +910,6 @@ export function replayMigrations(texts) {
       } else if (!ONE_SHOT_HEADS.test(text)) {
         refuse(`a migration statement not modelled: ${firstLine(text)}`);
       } else if (
-        sqlTextExecutor(statement.tokens) !== null ||
         statement.tokens.some((t, i) => t.type === 'string' && holdsSql(statement.tokens, i))
       ) {
         // SQL text may run now through an executor or later as a scheduled job: not read.

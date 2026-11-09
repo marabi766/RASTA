@@ -1504,6 +1504,105 @@ test('FU-274 r1 source scan reaches both readers without clock words', () => {
     );
 });
 
+// r2: every DDL expression crosses the same executor boundary before replay dispatch.
+// Even slots PostgreSQL restricts to immutable expressions must refuse, without type inference.
+const R2_SQL_TEXT = `$q$SELECT 1 FROM task WHERE lease_until < now()$q$`;
+const R2_DDL_SLOTS = [
+  ['policy USING', (e) => `CREATE POLICY p ON task USING (${e})`],
+  ['policy WITH CHECK', (e) => `CREATE POLICY p ON task FOR INSERT WITH CHECK (${e})`],
+  ['ALTER policy USING', (e) => `ALTER POLICY p ON task USING (${e})`],
+  ['ALTER policy WITH CHECK', (e) => `ALTER POLICY p ON task WITH CHECK (${e})`],
+  ['column CHECK', (e) => `CREATE TABLE t2 (id text CHECK (${e}))`],
+  ['table CHECK', (e) => `CREATE TABLE t3 (id text, CONSTRAINT c CHECK (${e}))`],
+  ['ADD CONSTRAINT CHECK', (e) => `ALTER TABLE task ADD CONSTRAINT c CHECK (${e})`],
+  ['ADD COLUMN CHECK', (e) => `ALTER TABLE task ADD COLUMN x text CHECK (${e})`],
+  [
+    'trigger WHEN',
+    (e) => `CREATE TRIGGER tr BEFORE UPDATE ON task FOR EACH ROW WHEN (${e}) EXECUTE FUNCTION f()`,
+  ],
+  ['TYPE USING', (e) => `ALTER TABLE task ALTER COLUMN id TYPE text USING ((${e})::text)`],
+  [
+    'SET DATA TYPE USING',
+    (e) => `ALTER TABLE task ALTER id SET DATA TYPE text USING ((${e})::text)`,
+  ],
+  ['column DEFAULT', (e) => `CREATE TABLE t4 (x boolean DEFAULT (${e}))`],
+  ['SET DEFAULT', (e) => `ALTER TABLE task ALTER COLUMN id SET DEFAULT ((${e})::text)`],
+  ['ADD COLUMN DEFAULT', (e) => `ALTER TABLE task ADD COLUMN x boolean DEFAULT (${e})`],
+  ['GENERATED AS', (e) => `CREATE TABLE t5 (x boolean GENERATED ALWAYS AS (${e}) STORED)`],
+  [
+    'ADD GENERATED',
+    (e) => `ALTER TABLE task ADD COLUMN x boolean GENERATED ALWAYS AS (${e}) STORED`,
+  ],
+  ['index expression', (e) => `CREATE INDEX i ON task ((${e}))`],
+  ['index WHERE', (e) => `CREATE UNIQUE INDEX i ON task (id) WHERE (${e})`],
+  ['domain CHECK', (e) => `CREATE DOMAIN d AS text CHECK (${e})`],
+  ['ALTER domain CHECK', (e) => `ALTER DOMAIN d ADD CONSTRAINT c CHECK (${e})`],
+  ['view expression', (e) => `CREATE VIEW v2 AS SELECT (${e}) AS x`],
+  [
+    'SQL routine expression',
+    (e) => `CREATE FUNCTION g() RETURNS boolean LANGUAGE sql RETURN (${e})`,
+  ],
+  [
+    'partition bound',
+    (e) => `CREATE TABLE child PARTITION OF parent FOR VALUES IN (((${e})::text))`,
+  ],
+];
+const R2_DDL_BASE = `${R3_BASE}; CREATE TABLE parent (id text) PARTITION BY LIST (id);`;
+for (const [slot, ddl] of R2_DDL_SLOTS) {
+  for (const [input, expression] of [
+    ['plain SQL', `query_to_xml(${R2_SQL_TEXT}, true, false, '') IS NOT NULL`],
+    ['fragment SQL', `query_to_xml(${R1_FRAGMENTS}, true, false, '') IS NOT NULL`],
+    ['ts_stat subquery', `EXISTS (SELECT 1 FROM ts_stat(${R2_SQL_TEXT}))`],
+  ]) {
+    test(`FU-274 r2 DDL executor: ${slot} / ${input}`, () => {
+      const r = replayMigrations([R2_DDL_BASE, `${ddl(expression)};`]);
+      assert.equal(r.unmodelled.length, 1);
+      assert.match(r.unmodelled[0], /SQL-text executor in a migration statement/);
+      assert.equal(r.doBlocks.length, 0, 'refused directly, never exempted as a DO body');
+    });
+  }
+}
+for (const call of [
+  'query_to_xmlschema',
+  'query_to_xml_and_xmlschema',
+  'ts_rewrite',
+  'dblink',
+  'dblink_exec',
+  'dblink_send_query',
+  'pg_background_launch',
+  'cron.schedule',
+  'cron.schedule_in_database',
+  'pg_catalog."query_to_xml"',
+  '"pg_catalog".ts_stat',
+  '"cron"."schedule"',
+]) {
+  test(`FU-274 r2 DDL executor spelling: ${call}`, () => {
+    // No SQL/clock in the argument: recognition must not depend on reading its value.
+    const sql = `CREATE POLICY p ON task USING (${call}(id) IS NOT NULL);`;
+    assert.match(
+      replayMigrations([R2_DDL_BASE, sql]).unmodelled.join(),
+      /SQL-text executor in a migration statement/,
+    );
+  });
+}
+test('FU-274 r2 ordinary DDL expressions and executor names as data remain readable', () => {
+  const r = replayMigrations([
+    R2_DDL_BASE,
+    `CREATE POLICY p ON task USING (length(id) > 0) WITH CHECK (id <> 'query_to_xml($1)');
+     ALTER POLICY p ON task USING (id <> 'ts_stat($1)');
+     CREATE TABLE t2 (id text DEFAULT 'dblink_exec($1)' CHECK (length(id) > 0));
+     ALTER TABLE task ADD CONSTRAINT c CHECK (id <> 'cron.schedule($1)');
+     ALTER TABLE task ALTER COLUMN id TYPE text USING lower(id);
+     CREATE TRIGGER tr BEFORE UPDATE ON task FOR EACH ROW WHEN (NEW.id <> 'pg_background_launch($1)')
+       EXECUTE FUNCTION f();
+     CREATE INDEX i ON task ((lower(id))) WHERE length(id) > 0;
+     COMMENT ON TABLE task IS 'query_to_xml($1)';`,
+  ]);
+  assert.deepEqual(r.unmodelled, []);
+  assert.deepEqual(r.doBlocks, []);
+  assert.deepEqual(r.triggers.get('f'), ['task']);
+});
+
 test('the repository passes', () => {
   assert.deepEqual(utcClockProblems(REPOSITORY), []);
 });
