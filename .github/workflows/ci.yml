@@ -3351,7 +3351,11 @@ jobs:
           bash infrastructure/docker/postgres/00-init-databases.sh
       - name: Backup restore SQL on a disposable database
         timeout-minutes: 5
-        run: pnpm run test:backup-restore-drill-pg
+        run: |
+          # Match the pinned PostgreSQL 16 server; newer dumps may not restore on it.
+          test -x /usr/lib/postgresql/16/bin/pg_dump
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          pnpm run test:backup-restore-drill-pg
         env:
           PGHOST: localhost
           PGPORT: '5432'
