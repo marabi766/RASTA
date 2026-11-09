@@ -28,6 +28,7 @@ import {
 import {
   backoffSeconds,
   decideReconciliation,
+  established,
   needsProviderAnswer,
   shouldEscalate,
   type ProviderRefundAnswer,
@@ -192,12 +193,11 @@ export class PaymentReconciler {
 
   /** The provider's record of the exact attempt, or `UNREACHABLE`. Never throws. */
   private async ask(task: ClaimedTask, intent: PaymentIntent): Promise<ProviderRefundAnswer> {
-    const refund = task.kind === 'REFUND';
     try {
       const said = await this.provider.getRefundStatus({
         paymentIntentId: intent.id,
         providerReference: intent.providerReference ?? intent.id,
-        idempotencyKey: `${intent.idempotencyKey}:${refund ? 'refund' : 'uncredited'}`,
+        idempotencyKey: attemptKeyOf(intent, task.kind),
       });
       // "Never received" is evidence only from a provider that declares it
       // can vouch for an absence (Codex on #164, HIGH 2). The mock cannot:
@@ -304,6 +304,20 @@ export class PaymentReconciler {
       default:
         // RETRY, DEFER, ESCALATE: nothing moves in this transaction.
         return verdict;
+    }
+
+    // The provider's answer this effect rests on, kept with it (#1017 r3). An
+    // operator's resolution is not the provider's: it is its own record.
+    const answered = resolver.operator ? null : established(answer);
+    if (answered) {
+      await this.tasks.recordOutcome(tx, {
+        organizationId: row.organizationId,
+        paymentIntentId: row.id,
+        kind: task.kind,
+        attemptKey: attemptKeyOf(row, task.kind),
+        outcome: answered,
+        providerReference: null,
+      });
     }
 
     if ((await ownership.finish(tx, verdict.resolution, resolver.actor)) !== 1) {
@@ -450,6 +464,11 @@ const MARKERS = new Set([
   'REFUND_DECLINED_RELEASE_PENDING',
   'CAPTURED_REFUND_UNKNOWN',
 ]);
+
+/** The key a refund attempt is asked with, at the provider and in its recorded answer. */
+function attemptKeyOf(intent: PaymentIntent, kind: AppliedTask['kind']): string {
+  return `${intent.idempotencyKey}:${kind === 'REFUND' ? 'refund' : 'uncredited'}`;
+}
 
 /** The marker as the event's closed set has it, or null. */
 function markerOf(

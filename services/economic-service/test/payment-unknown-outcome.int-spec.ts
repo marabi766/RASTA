@@ -1,15 +1,16 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import {
-  bareObligation,
   asActor,
+  bareObligation,
   cleanup,
   newPrisma,
+  plantPaymentIntent,
   readBalances,
   tenants,
+  testEnv,
   wire,
   type Wiring,
-  testEnv,
 } from './helpers';
 import { PaymentService } from '../src/payment/payment.service';
 import { walletBalanceLimit } from '../src/wallet/wallet.repository';
@@ -460,11 +461,10 @@ describe('payment outcomes that must not be guessed (real database)', () => {
         const organizationId = `${org.c}-RESUME-${marker}`;
         const key = `RESUME-${ulid()}`;
         const { result } = await topUp(organizationId, 250n, key);
-        await runUnscoped('the suite marks the intent', () =>
-          prisma.client.paymentIntent.update({
-            where: { id: result.paymentIntentId },
-            data: { failureReason: marker },
-          }),
+        await plantPaymentIntent(
+          'UPDATE payment_intent SET failure_reason = $2 WHERE id = $1',
+          result.paymentIntentId,
+          marker,
         );
 
         await expect(topUp(organizationId, 250n, key)).rejects.toMatchObject({
@@ -695,11 +695,9 @@ describe('payment outcomes that must not be guessed (real database)', () => {
       const { result } = await topUp(organizationId, 280n, `R2CLR-${ulid()}`);
       const real = provider.refund.bind(provider);
       jest.spyOn(provider, 'refund').mockImplementationOnce(async (request: RefundRequest) => {
-        await runUnscoped('the suite clears the marker', () =>
-          prisma.client.paymentIntent.update({
-            where: { id: result.paymentIntentId },
-            data: { failureReason: null },
-          }),
+        await plantPaymentIntent(
+          'UPDATE payment_intent SET failure_reason = NULL WHERE id = $1',
+          result.paymentIntentId,
         );
         return real(request);
       });
@@ -723,11 +721,10 @@ describe('payment outcomes that must not be guessed (real database)', () => {
       const { result } = await topUp(organizationId, 260n, `R2ELS-${ulid()}`);
       const real = provider.refund.bind(provider);
       jest.spyOn(provider, 'refund').mockImplementationOnce(async (request: RefundRequest) => {
-        await runUnscoped('the suite resolves the intent elsewhere', () =>
-          prisma.client.paymentIntent.update({
-            where: { id: result.paymentIntentId },
-            data: { status: 'REFUNDED', refundedAt: new Date(), failureReason: null },
-          }),
+        await plantPaymentIntent(
+          `UPDATE payment_intent SET status = 'REFUNDED', refunded_at = now(), failure_reason = NULL
+            WHERE id = $1`,
+          result.paymentIntentId,
         );
         return real(request);
       });
@@ -745,11 +742,9 @@ describe('payment outcomes that must not be guessed (real database)', () => {
     it('asks the provider under the intent id when no provider reference was recorded', async () => {
       const organizationId = `${org.c}-R2-NOREF`;
       const { result } = await topUp(organizationId, 240n, `R2NOREF-${ulid()}`);
-      await runUnscoped('the suite blanks the reference', () =>
-        prisma.client.paymentIntent.update({
-          where: { id: result.paymentIntentId },
-          data: { providerReference: null },
-        }),
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET provider_reference = NULL WHERE id = $1',
+        result.paymentIntentId,
       );
       const refund = jest.spyOn(provider, 'refund');
 

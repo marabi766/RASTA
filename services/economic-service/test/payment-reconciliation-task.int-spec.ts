@@ -520,8 +520,10 @@ describe('payment reconciliation tasks (real database)', () => {
       await expect(insert(', lease_token', `, 'token-without-time'`)).rejects.toThrow(
         /ck_payment_reconciliation_lease_pair/,
       );
+      // DONE is now refused before its CHECK: only a decision finishes a task (#1017 r3), and
+      // the definer that writes it sets the time, resolution and resolver the CHECK requires.
       await expect(insert(', status', `, 'DONE'`)).rejects.toThrow(
-        /ck_payment_reconciliation_done_complete/,
+        /A reconciliation task is finished only by its decision/,
       );
       await expect(insert(', status', `, 'ESCALATED'`)).rejects.toThrow(
         /ck_payment_reconciliation_escalated/,

@@ -559,6 +559,7 @@ export class PaymentService {
     // Three outcomes, not two (ADR-064, U6): a call that failed without an
     // answer is not a refusal. It was treated as one, and a same-key retry
     // then credited a capture the provider may already have returned.
+    let refundReference: string | null = null;
     const refund: 'REFUNDED' | 'DECLINED' | 'UNKNOWN' = await this.provider
       .refund({
         paymentIntentId: intentId,
@@ -569,7 +570,10 @@ export class PaymentService {
         reason: 'the capture could not be credited to the wallet',
       })
       .then(
-        (result) => (result.outcome === 'REFUNDED' ? 'REFUNDED' : 'DECLINED'),
+        (result) => {
+          refundReference = result.providerReference;
+          return result.outcome === 'REFUNDED' ? 'REFUNDED' : 'DECLINED';
+        },
         () => 'UNKNOWN',
       );
 
@@ -578,6 +582,18 @@ export class PaymentService {
       // The mark and its alert commit together (Codex round 2 on #121, F2):
       // a stranded capture is never recorded without being announced.
       await this.prisma.transaction(async (tx) => {
+        // The decline that makes it creditable, kept with it (#1017 r3): the
+        // database moves no intent to CAPTURED_NOT_CREDITED without it.
+        if (marker === CAPTURED_NOT_CREDITED) {
+          await this.reconciliation.recordOutcome(tx, {
+            organizationId,
+            paymentIntentId: intentId,
+            kind: 'UNCREDITED_REFUND',
+            attemptKey: `${idempotencyKey}:uncredited`,
+            outcome: 'DECLINED',
+            providerReference: refundReference,
+          });
+        }
         await tx.paymentIntent.update({
           where: { id: intentId },
           data: { failureReason: marker },
@@ -996,6 +1012,18 @@ export class PaymentService {
         await this.markRefundUnresolved(requested.row, REFUND_UNKNOWN, 'PROVIDER_OUTCOME_UNKNOWN');
         throw error;
       }
+      // The answer, kept before anything acts on it (#1017 r3): the effect, or
+      // the marker when the effect fails, rests on it, and it outlives either
+      // rolling back. Should this write fail, the intent keeps REFUND_REQUESTED
+      // and its hold, and the reconciler asks again.
+      await this.reconciliation.recordOutcome(this.prisma.client, {
+        organizationId,
+        paymentIntentId: intentId,
+        kind: 'REFUND',
+        attemptKey: refundAttemptKey(requested.row),
+        outcome: providerResult.outcome === 'REFUNDED' ? 'REFUNDED' : 'DECLINED',
+        providerReference: providerResult.providerReference,
+      });
 
       if (providerResult.outcome === 'FAILED') {
         const context = {

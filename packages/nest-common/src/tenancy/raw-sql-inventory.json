@@ -841,98 +841,105 @@
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 87,
-    "hash": "5dfe8f0d4513b745010dfed27d2d839ae3b0c6e779643e8386731d59560927cb",
+    "line": 88,
+    "hash": "125a433b1a93cc794606ee9cb6ae924c885dd5b3837386e100a39cfcadb44c5f",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 116,
+    "line": 109,
+    "hash": "43fd6803a9fe05f00f937b69c4f831c0f6a7fc3fc1783a6015488b4016953bec",
+    "occurrence": 0,
+    "decision": "platform-wide: recordOutcome inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
+  },
+  {
+    "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
+    "line": 139,
     "hash": "519babb8fc1debfb77509308ab5118fd630daeb1d274d5a831741d6f4eaa804e",
     "occurrence": 0,
     "decision": "platform-wide: background payment-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 155,
+    "line": 178,
     "hash": "612ca2ad1170bb5807b25c85b3e75469cc1fb78c94f651c87154f883c42dce5c",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 168,
-    "hash": "71a18ea07213a555c06800de9b9a2e2ca493dce50976ba0644b8bb355a4165fc",
+    "line": 191,
+    "hash": "63284d3b4ed51e16b4666704151f6d642064055ca01a68b7ab1d8eef29570480",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 183,
+    "line": 205,
     "hash": "5d190d26c0dec4de32041278ddc45b655edde2960a652bee8a4e98e25ff60ee6",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 214,
+    "line": 236,
     "hash": "7bd692b3378fefb4974bf6f808d97e3cefaba1923261b1147f9968c3f8edcad9",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 245,
+    "line": 267,
     "hash": "48df634680df58816821e8977272f406062b91f8835a127cf800a6c1640f506e",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 258,
-    "hash": "a8436f5fbda722e568d1140d76fc8e1a60172e36f5c3b8ce1e9c2555962f7e36",
+    "line": 280,
+    "hash": "616c1ea4c6c53d7a616ddd01b7cb26b9a0be295db2b19ab1e9062c8691ecd1fd",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 281,
+    "line": 302,
     "hash": "e9eebdd886b3e9f05bc95f955fc57c38167098c26523c9815d9da8085d50ea1f",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 305,
+    "line": 326,
     "hash": "0b89d90f9c16fca47a7e1fd352168b3a8afbc565f85893e738530cd077bd4e02",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 350,
+    "line": 371,
     "hash": "7ff83f7601e35bdd6109d23a61f2966a5c7eb1b8140c555c9b6f17985af69b07",
     "occurrence": 0,
     "decision": "platform-wide: payment reconciler heals missing tasks across tenants from explicitly eligible payment markers"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 388,
+    "line": 409,
     "hash": "1b0622aa2a9b65f5c0a13cf168c3a0e548fc73aa0fb9b54fef027fccf208a9ba",
     "occurrence": 0,
     "decision": "platform-wide: heal inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 413,
-    "hash": "e67af55778befa5d70acddc7eb9d56293ab3e31d6a366228be23457a75743046",
+    "line": 434,
+    "hash": "3548475f1c5988597f7869a1c2f7c45cac1ecceddf0502ec38e7d245e3e2bc30",
     "occurrence": 0,
     "decision": "platform-wide: payment reconciler retires stale tasks across tenants under row locks when their marker and hold are absent"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 480,
+    "line": 498,
     "hash": "0359ec214755d85e66b4cb84106b0e55edab84493b9c48742b11369a951024e3",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"

@@ -6136,6 +6136,24 @@ un\` است — تغییر نام آن پوشه رفعش می‌کند.
 
 ---
 
+### FU-230: شرایط PaymentIntent پس از نوشتن ثابت است (2026-11-09)
+
+- `trg_payment_intent_terms_fixed` (economic ‏`20261109130000`): هر تغییر جز چرخهٔ عمر رد می‌شود (ستون تازه ثابت به دنیا
+  می‌آید)؛ INSERT فقط `CREATED` خالی؛ (وضعیت، نشانگر) فقط روی لبه‌های جدول `edges` و هر لبه فقط ستون‌های خودش را یک بار
+  می‌نویسد. DELETE و TRUNCATE رد می‌شوند. تابع مسیرش را `pg_catalog, pg_temp` سنجاق می‌کند (FU-266؛ شکل #1010).
+- `trg_payment_intent_evidenced` (deferred): `transaction_id` فقط Top-up خود Intent (در هر نوشتن)؛ نشانگرهای تحت تطبیق
+  فقط با Task باز گذاشته و فقط با تصمیم همان Task در همان تراکنش برداشته می‌شوند، روی پاسخ ثبت‌شدهٔ Provider
+  (`payment_provider_outcome`) یا Resolution تأییدشدهٔ اپراتور (#1017 r1 F1، r3).
+- #1017 r3: سابقه‌ها فقط‌افزودنی‌اند؛ Task فقط با درج `payment_reconciliation_decision` تمام می‌شود (Trigger با نقش Migrator)؛
+  نقش Runtime نباید هیچ تابع SECURITY DEFINER را اجرا کند (`runtime-forbidden.sql`)، پس Definer باید Trigger باشد. توابعی
+  که جدول می‌خوانند مسیر را سنجاق و Schema را از `TG_TABLE_SCHEMA` می‌گیرند (EXECUTE format، ورودی REVIEWED در
+  `utc-clock-sites-lib.mjs`).
+- لبهٔ تازه در سرویس = لبهٔ تازه در `edges` همان Migration (یا Migration بعدی)، وگرنه نوشتن در پایگاه داده رد می‌شود.
+- آزمون‌هایی که ردیف قدیمی یا جعلی می‌کارند از `plantPaymentIntent` / `plantPaymentTask` (`test/helpers.ts`) استفاده
+  می‌کنند: با نقش مالک و Triggerهای لازم برداشته‌شده فقط برای همان نوشتن‌ها.
+
+---
+
 ## Memory Update Protocol
 
 این فایل باید با هرکدام از این تغییرات به‌روز شود:

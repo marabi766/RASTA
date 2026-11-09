@@ -5,6 +5,7 @@ import {
   asActor,
   cleanup,
   newPrisma,
+  plantPaymentIntent,
   readBalances,
   tenants,
   testEnv,
@@ -697,11 +698,9 @@ describe('the payment reconciliation operator path (real database)', () => {
         operator.propose(made.intentId, proposal('DECLINED')),
       );
       // The marker is gone, its hold still out: not a state this resolution applies to.
-      await runUnscoped('the suite clears the marker', () =>
-        prisma.client.paymentIntent.update({
-          where: { id: made.intentId },
-          data: { failureReason: null },
-        }),
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET failure_reason = NULL WHERE id = $1',
+        made.intentId,
       );
 
       await expect(
@@ -829,11 +828,9 @@ describe('the payment reconciliation operator path (real database)', () => {
       const organizationId = `${org.b}-LEGACY`;
       const made = await escalatedUnknown(organizationId, 413n);
       // An intent created before the identity was recorded.
-      await runUnscoped('the suite makes the intent a legacy one', () =>
-        prisma.client.$executeRawUnsafe(
-          `UPDATE payment_intent SET created_by_issuer = NULL, created_by_subject = NULL WHERE id = $1`,
-          made.intentId,
-        ),
+      await plantPaymentIntent(
+        `UPDATE payment_intent SET created_by_issuer = NULL, created_by_subject = NULL WHERE id = $1`,
+        made.intentId,
       );
       const operator = operatorWith();
       const proposed = await as(organizationId, 'USR-ALICE', () =>
