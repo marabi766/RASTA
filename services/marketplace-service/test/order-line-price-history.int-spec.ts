@@ -217,15 +217,117 @@ describe('an order line agrees to a published offer price, in the database (D-15
   });
 
   it('refuses to delete a price a line agreed to, and an offer that was ordered', async () => {
+    // The guard answers before the key does; both refuse.
     await expect(
       owner.$executeRaw`DELETE FROM offer_price_history WHERE offer_id = ${offerId} AND version = 1`,
-    ).rejects.toThrow(/fk_order_line_price_history/);
-    // ON DELETE CASCADE from the offer reaches the history only if the offer can
-    // go, and order_line_offer_id_fkey (RESTRICT) says it cannot.
+    ).rejects.toThrow(/ck_offer_price_history_immutable: .*DELETE refused/);
     await expect(owner.$executeRaw`DELETE FROM offer WHERE id = ${offerId}`).rejects.toThrow(
-      /order_line_offer_id_fkey|fk_order_line_price_history/,
+      /order_line_offer_id_fkey|fk_order_line_price_history|ck_offer_price_history_immutable/,
     );
   });
+
+  // ---- no row is removed, so none is replaced (#1010 r1) ------------------------------
+
+  /** As the runtime role, in one statement: delete a row and put it back under the same id. */
+  const asRuntime = (sql: string, ...values: unknown[]) =>
+    runUnscoped('the suite attempts the replacement the guard exists to refuse', () =>
+      prisma.client.$executeRawUnsafe(sql, ...values),
+    );
+
+  it('refuses the runtime role deleting a line and re-inserting its id with 20 units', async () => {
+    await expect(
+      asRuntime(
+        `WITH gone AS (DELETE FROM order_line WHERE id = $1 RETURNING *)
+         INSERT INTO order_line (id, organization_id, order_id, offer_id, product_id,
+                                 unit_price_minor, quantity, line_total_minor, currency,
+                                 offer_version, product_name)
+         SELECT id, organization_id, order_id, offer_id, product_id, unit_price_minor, 20,
+                unit_price_minor * 20, currency, offer_version, product_name FROM gone`,
+        lineAtV1,
+      ),
+    ).rejects.toThrow(/ck_order_line_price_immutable: .*DELETE refused/);
+    // The id is still taken, so a re-insert is an upsert, and that is an UPDATE.
+    await expect(
+      asRuntime(
+        `INSERT INTO order_line SELECT * FROM order_line WHERE id = $1
+           ON CONFLICT (id) DO UPDATE SET quantity = 20,
+                                          line_total_minor = EXCLUDED.unit_price_minor * 20`,
+        lineAtV1,
+      ),
+    ).rejects.toThrow(/ck_order_line_price_immutable: .*UPDATE refused/);
+    const line = await runUnscoped('the suite reads the line back', () =>
+      prisma.client.orderLine.findUniqueOrThrow({ where: { id: lineAtV1 } }),
+    );
+    expect(line).toMatchObject({ quantity: 2, lineTotalMinor: 200_000n });
+  });
+
+  it('refuses the runtime role deleting an unreferenced price and re-inserting it cheaper', async () => {
+    await expect(
+      asRuntime(
+        `WITH gone AS (DELETE FROM offer_price_history WHERE offer_id = $1 AND version = 1
+                       RETURNING *)
+         INSERT INTO offer_price_history (id, organization_id, offer_id, version,
+                                          unit_price_minor, currency, changed_at, changed_by)
+         SELECT id, organization_id, offer_id, version, 1, currency, changed_at, changed_by
+           FROM gone`,
+        unordered,
+      ),
+    ).rejects.toThrow(/ck_offer_price_history_immutable: .*DELETE refused/);
+  });
+
+  /** DELETE of `parent` row `id` with only foreign key `keep` into it left (the rest dropped, rolled back). */
+  async function deleteThrough(
+    tx: PrismaClient,
+    parent: string,
+    id: string,
+    keep: string,
+    disable?: [table: string, trigger: string],
+  ): Promise<number> {
+    const references = await tx.$queryRawUnsafe<{ conname: string; child: string }[]>(
+      `SELECT conname, conrelid::regclass::text AS child FROM pg_constraint
+        WHERE contype = 'f' AND confrelid = $1::regclass AND conname <> $2`,
+      `"${parent}"`,
+      keep,
+    );
+    for (const { conname, child } of references) {
+      await tx.$executeRawUnsafe(`ALTER TABLE ${child} DROP CONSTRAINT "${conname}"`);
+    }
+    if (disable)
+      await tx.$executeRawUnsafe(`ALTER TABLE ${disable[0]} DISABLE TRIGGER "${disable[1]}"`);
+    return tx.$executeRawUnsafe(`DELETE FROM "${parent}" WHERE id = $1`, id);
+  }
+
+  it.each([
+    [
+      'an order deletes its lines',
+      'order',
+      () => orderAtV1,
+      'fk_order_line_tenant',
+      ['order_line', 'tg_order_line_price_guard'],
+      /ck_order_line_price_immutable: .*DELETE refused/,
+    ],
+    [
+      'an offer deletes its price history',
+      'offer',
+      () => unordered,
+      'fk_offer_price_history_tenant',
+      ['offer_price_history', 'tg_offer_price_history_guard'],
+      /ck_offer_price_history_immutable: .*DELETE refused/,
+    ],
+  ] as const)(
+    'refuses the cascade when %s — by the row guard',
+    async (_l, parent, row, keep, guard, refusal) => {
+      let refused: unknown;
+      await rolledBack(async (tx) => {
+        refused = await deleteThrough(tx, parent, row(), keep).catch((error: unknown) => error);
+      });
+      expect(String(refused)).toMatch(refusal);
+      // And it is the guard that refuses: without it the same cascade succeeds.
+      await rolledBack(async (tx) => {
+        expect(await deleteThrough(tx, parent, row(), keep, [...guard])).toBe(1);
+      });
+    },
+  );
 
   // ---- the guards, by raw SQL --------------------------------------------------------
 
