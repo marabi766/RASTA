@@ -45,8 +45,7 @@ export const OUTBOX_NOW = `(SELECT (jsonb_populate_record(NULL::outbox_message, 
  * a contract, in the same sense as an event schema.
  *
  * Every value is bound as a parameter. Nothing is interpolated into SQL (S-05),
- * with one guarded exception: the `statement_timeout` of {@link renewSql} and
- * {@link boundedReleaseSql}.
+ * including transaction-local timeouts via `set_config(..., true)`.
  *
  * **The token is the only fence.** Every mutation below matches on
  * `claim_token` exactly, and not one of them conditions on `claim_expires_at`.
@@ -602,7 +601,10 @@ export async function boundedReleaseSql(
   };
 
   return runTransaction(async (tx) => {
-    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${left()}`);
+    await tx.$executeRawUnsafe(
+      "SELECT pg_catalog.set_config('statement_timeout', $1, true)",
+      `${left()}ms`,
+    );
     left();
     const released = await update(tx);
     left();
@@ -611,10 +613,8 @@ export async function boundedReleaseSql(
 }
 
 /**
- * A `SET LOCAL statement_timeout` value. Interpolated because `SET LOCAL`
- * accepts no bind parameters. Not user input — it is derived from validated
- * configuration — and coerced to a safe positive integer here so nothing but
- * digits can reach the statement (S-05).
+ * A transaction-local statement timeout, in milliseconds. Keep the existing
+ * positive safe-integer validation before binding the value to `set_config`.
  */
 function localStatementTimeoutMs(deadlineMs: number, operation: string): number {
   const timeoutMs = Math.max(1, Math.floor(deadlineMs));
@@ -649,7 +649,10 @@ export async function renewSql(
   const timeoutMs = localStatementTimeoutMs(deadlineMs, 'renew');
 
   return runTransaction(async (tx) => {
-    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    await tx.$executeRawUnsafe(
+      "SELECT pg_catalog.set_config('statement_timeout', $1, true)",
+      `${timeoutMs}ms`,
+    );
     const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
       `UPDATE outbox_message
           SET claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', ${OUTBOX_NOW})
@@ -759,14 +762,8 @@ export interface PurgePublishedBatch {
  *   transaction-scoped, so it can never be left behind by a crashed process
  *   or a pooled connection.
  *
- * ## Interpolation
- *
- * The retention, the limit and the timeout are written into the statement,
- * the one guarded exception {@link renewSql} also makes: `SET LOCAL` takes no
- * bind parameter, and a literal cutoff lets the planner estimate it, which a
- * parameter in a generic plan would not. All three come from validated
- * configuration and are refused here unless they are positive safe integers,
- * so nothing but digits reaches the SQL (S-05).
+ * Runtime values are validated positive safe integers and bound as parameters.
+ * `set_config`'s third argument preserves SET LOCAL's transaction scope.
  */
 export async function purgePublishedSql(
   runTransaction: OutboxPurgeTxRunner,
@@ -779,7 +776,10 @@ export async function purgePublishedSql(
 
   return runTransaction(
     async (tx) => {
-      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+      await tx.$executeRawUnsafe(
+        "SELECT pg_catalog.set_config('statement_timeout', $1, true)",
+        `${timeoutMs}ms`,
+      );
 
       const lock = await tx.$queryRawUnsafe<{ acquired: boolean }[]>(
         `SELECT pg_try_advisory_xact_lock(hashtext('rasta.outbox_purge'), hashtext(current_schema()))
@@ -791,10 +791,10 @@ export async function purgePublishedSql(
         `WITH doomed AS (
          SELECT id FROM outbox_message
           WHERE published_at IS NOT NULL
-            AND published_at < ${OUTBOX_NOW} - make_interval(secs => ${retentionSeconds})
-            AND created_at   < ${OUTBOX_NOW} - make_interval(secs => ${retentionSeconds})
+            AND published_at < ${OUTBOX_NOW} - make_interval(secs => $1::double precision)
+            AND created_at   < ${OUTBOX_NOW} - make_interval(secs => $1::double precision)
             AND (last_error IS NULL OR last_error NOT LIKE '${MANUALLY_SKIPPED_PREFIX}%')
-          LIMIT ${limit}
+          LIMIT $2::bigint
             FOR UPDATE SKIP LOCKED
        )
        DELETE FROM outbox_message o
@@ -802,6 +802,8 @@ export async function purgePublishedSql(
         WHERE o.id = doomed.id
           AND o.published_at IS NOT NULL
           AND o.claim_token IS NULL`,
+        retentionSeconds,
+        limit,
       );
       return { deleted, busy: false };
       // The transaction outlives the statement by the margin, so the bound that
