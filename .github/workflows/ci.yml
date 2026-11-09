@@ -47,7 +47,7 @@ jobs:
   # ---------------------------------------------------------------------------
   quality-guards:
     name: Static guards and CI wiring (part of Lint, types and unit tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 1/5 of the former single `quality` job (FU-111): every static script guard
     # and workflow-wiring test, which need no build. The required check
     # "Lint, types and unit tests" is the `quality` aggregate below.
@@ -382,7 +382,7 @@ jobs:
 
   quality-lint:
     name: Format check and lint (part of Lint, types and unit tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 2/5 (FU-111). Lint runs on EVERY package: `turbo run lint` carries no
     # --filter/--affected and its turbo task is cache:false, so a new lint rule
     # is applied to the whole repository in the pull request that adds it.
@@ -412,7 +412,7 @@ jobs:
 
   quality-types:
     name: Type check (part of Lint, types and unit tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 3/5 (FU-111). The one gate the integration, migration, broker, E2E and
     # browser jobs wait for: a tree that does not type-check cannot pass them,
     # so they are not started on it. Lint, unit tests and the static guards run
@@ -441,7 +441,7 @@ jobs:
 
   quality-unit:
     name: Unit tests (part of Lint, types and unit tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 4/5 (FU-111). The step budget rule (JOB_SETUP_MINUTES) adds the unit-step
     # concurrency step's 10-minute limit to the setup allowance: 15 + 10 = 25.
     timeout-minutes: 25
@@ -497,7 +497,7 @@ jobs:
 
   quality-build:
     name: Build and built entry points (part of Lint, types and unit tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 5/5 (FU-111). The production build and the checks that load what it built.
     timeout-minutes: 20
     steps:
@@ -572,7 +572,7 @@ jobs:
   # ---------------------------------------------------------------------------
   quality:
     name: Lint, types and unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs:
       - quality-guards
@@ -604,7 +604,7 @@ jobs:
   # ---------------------------------------------------------------------------
   security:
     name: Security scans
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 33
     permissions:
       contents: read
@@ -722,7 +722,7 @@ jobs:
   # ---------------------------------------------------------------------------
   web-browser:
     name: Portal in a browser
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 37 minutes (headroom measurement, last 20 green CI runs on main and
     # merge-train branches): the job took up to 1462 s (p50 946 s), 81 % of
     # 30. 37 is ceil(1462 s x 1.5 / 60).
@@ -1468,7 +1468,7 @@ jobs:
   # ---------------------------------------------------------------------------
   prometheus-rules:
     name: Prometheus config and alert rules
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1518,7 +1518,7 @@ jobs:
   # ---------------------------------------------------------------------------
   integration-suites:
     name: Integration tests and database guards
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 13 suite + 54 guard/measurement limits + 8 setup allowance.
     timeout-minutes: 75
     needs: quality-types
@@ -2101,7 +2101,7 @@ jobs:
 
   integration-construction:
     name: Integration Construction
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: quality-types
     # Suite cap + the existing full-provisioning setup allowance (8 minutes).
     timeout-minutes: 25
@@ -2128,7 +2128,7 @@ jobs:
 
   integration-economic:
     name: Integration Economic and procurement
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: quality-types
     # Suite cap + the existing full-provisioning setup allowance (8 minutes).
     timeout-minutes: 24
@@ -2155,7 +2155,7 @@ jobs:
 
   integration-contract:
     name: Integration Contract and supply chain
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: quality-types
     # Suite cap + the existing full-provisioning setup allowance (8 minutes).
     timeout-minutes: 23
@@ -2183,7 +2183,7 @@ jobs:
 
   integration-security:
     name: Tenant isolation, test independence and retry replay
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # FU-185: 20 successful main runs, 42091919570..42295730635 (Nov 5-6).
     # Integration-only p95/max 349/352 s; 8 min gives >= 30% headroom.
     # Setup plus job bookkeeping p95/max 324/328 s: ceil(1.3 * 328 / 60) = 8 min.
@@ -2624,7 +2624,7 @@ jobs:
 
   integration-coverage-critical:
     name: Coverage gates (construction, contract, inventory)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # About 11.5 minutes on main run 38600385830 (setup ~3.5m, construction
     # 325 s, contract 105 s, inventory 54 s). Each gate keeps its own limit
     # (construction 11, the others 8).
@@ -2806,7 +2806,7 @@ jobs:
 
   integration-coverage:
     name: Coverage gates (marketplace, document, supplier, audit, notification, organization, procurement, analytics)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Economic coverage runs separately in three isolated legs (FU-286).
     # Eight remaining 8-minute gates + marketplace 20 + setup allowance 8.
     timeout-minutes: 84
@@ -3249,7 +3249,7 @@ jobs:
   # Native shards keep independent PostgreSQL and broker instances.
   integration-economic-coverage:
     name: Economic coverage (${{ matrix.shard }}/3)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: quality-types
     timeout-minutes: 16
     strategy:
@@ -3294,7 +3294,7 @@ jobs:
 
   integration-economic-coverage-merge:
     name: Economic merged coverage gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [quality-types, integration-economic-coverage]
     timeout-minutes: 6
     steps:
@@ -3314,7 +3314,7 @@ jobs:
   # Independent database-only gate: creates its own migrated fixture databases.
   integration-backup-drill:
     name: Backup restore PostgreSQL drill
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: quality-types
     timeout-minutes: 10
     services:
@@ -3367,7 +3367,7 @@ jobs:
   # still needs `integration`, and so all five through it.
   integration:
     name: Integration and security tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs:
       - integration-suites
@@ -3426,7 +3426,7 @@ jobs:
   # ---------------------------------------------------------------------------
   migration-reversibility-chain:
     name: Migration reversibility, whole chain (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Setup about 2 minutes; the heaviest shard's chain about 6.2 minutes on
     # that run's per-service times. The step has its own, tighter bound.
     timeout-minutes: 20
@@ -3628,7 +3628,7 @@ jobs:
 
   migration-guards:
     name: Migration verifiers and database guards
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Setup about 2.5 minutes, the by-name verifiers about 5.3 minutes, the
     # guards about 1.2 minutes on main run 40006639729.
     timeout-minutes: 20
@@ -3861,7 +3861,7 @@ jobs:
   # needs this job, and so all of them through it.
   migration-reversibility:
     name: Migration reversibility and database guards
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs:
       - migration-reversibility-chain
@@ -3896,7 +3896,7 @@ jobs:
   # ---------------------------------------------------------------------------
   broker-authorisation:
     name: Broker authorisation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: quality-types
 
@@ -3976,7 +3976,7 @@ jobs:
   # ---------------------------------------------------------------------------
   e2e:
     name: End-to-end (economic critical path)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: quality-types
 
@@ -4756,7 +4756,7 @@ jobs:
   # ---------------------------------------------------------------------------
   trivy-db:
     name: Trivy vulnerability DB (downloaded once)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Includes the verified Go archive's four-attempt transfer budget.
     timeout-minutes: 34
     # Every run downloads the DB, ordinary pull requests included: the required
@@ -4860,7 +4860,7 @@ jobs:
   # ---------------------------------------------------------------------------
   clamav-signatures:
     name: ClamAV image scan and signature freshness
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Waits for the one DB download, and only for that. `!cancelled()` rather
     # than the default success(): if the download failed this job still runs
@@ -4999,7 +4999,7 @@ jobs:
   # ---------------------------------------------------------------------------
   container-scope:
     name: Images to build and scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       services: ${{ steps.scope.outputs.services }}
@@ -5050,7 +5050,7 @@ jobs:
 
   containers:
     name: Build and scan images
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Building and scanning an image needs the image selection and the shared
     # Trivy DB, and nothing a test produces, so it runs beside the tests and
@@ -5190,7 +5190,7 @@ jobs:
   #     skipped case allowed.
   images:
     name: Images built and scanned
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs:
       - container-scope
