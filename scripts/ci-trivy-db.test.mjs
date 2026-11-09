@@ -2046,16 +2046,18 @@ test('trivy-db job: the sparse checkout holds every file the fetch imports (adde
     seen.add(`scripts/trivy-db-check/${rel}`);
   }
   seen.add('scripts/fixtures/trivy-db/real.db');
+  seen.add('scripts/ci-tool-download.mjs');
+  seen.add('.github/actions/install-ci-tool/action.yml');
   assert.deepEqual([...seen].sort(), sparse);
 });
 
 test('trivy-db job: pinned Go builds a sum-verified checker and runs its controls before fetch', () => {
   const steps = workflow.jobs['trivy-db'].steps;
-  const setupAt = steps.findIndex((s) => s.uses?.startsWith('actions/setup-go@'));
+  const setupAt = steps.findIndex((s) => s.with?.tool === 'go');
   const buildAt = steps.findIndex((s) => s.name === 'Build and test the official bbolt checker');
   const fetchAt = steps.findIndex((s) => s.id === 'fetch');
-  assert.match(steps[setupAt].uses, /@[a-f0-9]{40}$/);
-  assert.equal(steps[setupAt].with['go-version'], '1.24.9');
+  assert.equal(steps[setupAt].uses, './.github/actions/install-ci-tool');
+  assert.equal(steps[setupAt]['timeout-minutes'], 13);
   assert.ok(setupAt < buildAt && buildAt < fetchAt);
   const build = steps[buildAt];
   assert.equal(build.if, undefined);

@@ -11,8 +11,8 @@
       }
     },
     "concurrency": {
-      "group": "ci-${{ github.ref }}",
-      "cancel-in-progress": true
+      "group": "ci-${{ github.event_name == 'push' && github.run_id || github.ref }}",
+      "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
     },
     "env": {
       "NODE_VERSION": "22",
@@ -120,7 +120,7 @@
         "test:broker-default": "sha256:ba01da2069aefe24a5272f5e015dfafdbaf56c4fa70d2168640d0339fa11aa39",
         "test:ci-integration-split": "sha256:1478e392aeb8cb9b57e7942b8892cc661a0bd786b9942a392532f0984708e2a4",
         "test:ci-pg-connections": "sha256:2016ccf3d9faeeac8c23e461a30c7122cc5151d9892d727684d3e500f5a12e3b",
-        "test:ci-pull-image": "sha256:d618ab887da4f542256ef3d0250893ee8033bfa3e3b3c75d9a05af45afcf8723",
+        "test:ci-pull-image": "sha256:ee2b001aaea66fff77269d992c57e736eca65c5db9770c3d7f0d71c25247fcdd",
         "test:ci-temporal-cache": "sha256:870bc26b18f6bb4eea2243d0b8e584c44bce10117b571e976b78868ca8ed29af",
         "test:ci-trivy-db": "sha256:16ca2f79b1ba147f4a88294dad4ea32ba131e4440099155eda8fd66ec82be93c",
         "test:compose-ports": "sha256:bb6786a1a3cef801da4bb566befb7ef941f609f465ac4ab93d885f2740c90d39",

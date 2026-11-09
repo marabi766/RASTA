@@ -945,7 +945,8 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'integration-backup-drill': 8,
       'migration-reversibility-chain': 17,
       'migration-guards': 18,
-      'trivy-db': 21,
+      'trivy-db': 33,
+      security: 33,
       'quality-unit': 25,
     },
   );
