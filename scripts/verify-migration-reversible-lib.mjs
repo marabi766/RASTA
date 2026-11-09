@@ -3198,7 +3198,10 @@ export const EXPECTED = {
       'tg_order_hold_deadline_backfill_no_truncate',
       'tg_order_hold_deadline_revocation_guard',
       'tg_order_hold_deadline_revocation_no_truncate',
-      // 20261108120200_order_line_price_immutable (D-156): what a line agreed to never changes.
+      // 20261108120200_order_line_price_immutable (D-156): an order's money is sealed at placement.
+      'tg_order_placement_stamp',
+      'tg_order_line_placement_stamp',
+      'tg_order_financial_guard',
       'tg_order_line_price_guard',
       'tg_order_line_no_truncate',
       'tg_offer_price_history_guard',
@@ -3212,6 +3215,8 @@ export const EXPECTED = {
       'return_status_history_guard',
       'return_dispatch_release_guard',
       'order_hold_deadline_audit_guard',
+      'order_placement_stamp',
+      'order_financial_guard',
       'order_line_price_guard',
       'offer_price_history_guard',
     ],
@@ -3256,6 +3261,8 @@ export const EXPECTED = {
       'fk_order_hold_deadline_revocation_assignment',
       // 20261108120100_order_line_price_history_fk (D-156): a line's price is a published one.
       'fk_order_line_price_history',
+      // 20261108120200_order_line_price_immutable: a line is written by its order's placement.
+      'fk_order_line_placement',
     ],
     // Added by 20260929120100_order_idempotency_key_unique (review of #141):
     // one Idempotency-Key places at most one order per organization, even
@@ -3272,6 +3279,7 @@ export const EXPECTED = {
       'ux_return_dispatch_release_command',
       'ix_return_dispatch_release_request',
       'uq_offer_price_history_price',
+      'uq_order_placement',
     ],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,

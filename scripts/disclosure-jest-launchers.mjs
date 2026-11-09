@@ -25,7 +25,7 @@ export const JEST_LAUNCHERS = {
       'scripts/verify-migration-reversible-lib.test.mjs':
         'dc9985598eb7b2ecdfb748d798989ff11572dacda52121439ef846f5693eb00b',
       'scripts/verify-migration-reversible-lib.mjs':
-        'cbe05beb27588d48980dbf74254e2e252539e26917a9a0ef9074464744948ed6',
+        '0067015a5bcb27a12c0b53dda76517bc02fea5d402e82bfd5ffab924ca88751c',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },

@@ -3,12 +3,23 @@ import { join } from 'node:path';
 import { withUtcSession } from '@rasta/config';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
-import { asActor, cleanup, id, key, newPrisma, publishOffer, tenants, wire } from './helpers';
+import {
+  asActor,
+  cleanup,
+  id,
+  key,
+  newPrisma,
+  publishOffer,
+  sagaStep,
+  tenants,
+  wire,
+} from './helpers';
 
 /**
  * D-156 in the database: an order line's price is one its offer published at the
- * version the line names (fk_order_line_price_history), and neither the agreed
- * columns of a line nor a history row ever change (the two guards).
+ * version the line names (fk_order_line_price_history); an order's lines are written
+ * by the transaction that places it (fk_order_line_placement) and never change; its
+ * parties, total and currency never change; no history row ever changes (#1010 r2).
  *
  * Every refusal is asserted with raw SQL, not through the service — the service
  * is not the only writer a database has. Schema-changing steps (rolling the
@@ -182,38 +193,179 @@ describe('an order line agrees to a published offer price, in the database (D-15
 
   // ---- the key, by raw SQL -----------------------------------------------------------
 
-  /** A hand-written line on an existing order, for the offer nobody ordered. */
-  const insertLine = (version: number, price: bigint, currency = 'IRR') =>
-    owner.$executeRaw`
+  /**
+   * In `tx`: an order placed by hand, its header copied from orderAtV1 (`stamp` forged on the
+   * INSERT). Resolves with its id.
+   */
+  const placeByHand = async (tx: PrismaClient, stamp: string | null = null): Promise<string> => {
+    const order = id('ORD');
+    await tx.$executeRaw`
+      INSERT INTO "order" (id, organization_id, supplier_organization_id, placed_by,
+                           total_amount_minor, currency, idempotency_key, correlation_id,
+                           created_by, updated_at, placement_xact)
+      SELECT ${order}, organization_id, supplier_organization_id, placed_by, 40000, currency,
+             ${key('ph-hand')}, correlation_id, created_by, now(), ${stamp}::xid8
+        FROM "order" WHERE id = ${orderAtV1}`;
+    return order;
+  };
+  /** In `tx`: a hand-written line of the offer nobody ordered, on order `order`. */
+  const insertLine = (
+    tx: PrismaClient,
+    order: string,
+    version = 1,
+    price = 40_000n,
+    currency = 'IRR',
+    quantity = 1,
+  ) =>
+    tx.$executeRaw`
       INSERT INTO order_line (id, organization_id, order_id, offer_id, product_id,
                               unit_price_minor, quantity, line_total_minor, currency,
                               offer_version, product_name)
       SELECT ${id('OLN')}, o.organization_id, o.id, f.id, f.product_id,
-             ${price}, 1, ${price}, ${currency}, ${version}, 'hand-written'
-        FROM "order" o, offer f WHERE o.id = ${orderAtV1} AND f.id = ${unordered}`;
+             ${price}, ${quantity}, ${price} * ${quantity}, ${currency}, ${version}, 'hand-written'
+        FROM "order" o, offer f WHERE o.id = ${order} AND f.id = ${unordered}`;
 
   it.each([
     ['a price the offer never published', 1, 40_001n, 'IRR'],
     ['a version the offer has not reached', 2, 40_000n, 'IRR'],
     ['another currency', 1, 40_000n, 'USD'],
   ])('refuses an INSERTed line at %s', async (_label, version, price, currency) => {
-    await expect(insertLine(version, price, currency)).rejects.toThrow(
-      /fk_order_line_price_history/,
+    await rolledBack(async (tx) => {
+      const order = await placeByHand(tx);
+      await expect(insertLine(tx, order, version, price, currency)).rejects.toThrow(
+        /fk_order_line_price_history/,
+      );
+    });
+  });
+
+  it('accepts a line its order’s own transaction writes, whatever stamp the writer sent', async () => {
+    const stamps = await rolledBack(async (tx) => {
+      const order = await placeByHand(tx, '1');
+      expect(await insertLine(tx, order)).toBe(1);
+      return tx.$queryRaw<{ placed: boolean; lined: boolean }[]>`
+        SELECT o.placement_xact = pg_current_xact_id() AS placed,
+               l.placement_xact = o.placement_xact AS lined
+          FROM "order" o JOIN order_line l ON l.order_id = o.id WHERE o.id = ${order}`;
+    });
+    expect(stamps).toEqual([{ placed: true, lined: true }]);
+  });
+
+  // ---- an order placed is sealed (#1010 r2) -------------------------------------------
+
+  it.each([
+    ['as the runtime role', () => prisma.client],
+    ['even as the owner', () => owner],
+  ])('refuses a line appended to a placed order, %s', async (_l, client) => {
+    await expect(
+      runUnscoped('the suite appends the line the key exists to refuse', () =>
+        insertLine(client() as unknown as PrismaClient, orderAtV1, 1, 40_000n, 'IRR', 20),
+      ),
+    ).rejects.toThrow(/fk_order_line_placement/);
+  });
+
+  it('refuses a line appended after forging the order’s stamp, or to a pre-D-156 order', async () => {
+    let forged: unknown;
+    await rolledBack(async (tx) => {
+      forged =
+        await tx.$executeRaw`UPDATE "order" SET placement_xact = pg_current_xact_id() WHERE id = ${orderAtV1}`.catch(
+          (error: unknown) => error,
+        );
+    });
+    expect(String(forged)).toMatch(/ck_order_financial_immutable/);
+    let legacy: unknown;
+    await rolledBack(async (tx) => {
+      // An order written before the stamp existed: its stamp is NULL, and it still changes status.
+      await tx.$executeRawUnsafe(`ALTER TABLE "order" DISABLE TRIGGER "tg_order_placement_stamp"`);
+      const order = await placeByHand(tx);
+      await tx.$executeRawUnsafe(`ALTER TABLE "order" ENABLE TRIGGER "tg_order_placement_stamp"`);
+      expect(
+        await tx.$executeRaw`UPDATE "order" SET status = 'CANCELLING' WHERE id = ${order}`,
+      ).toBe(1);
+      legacy = await insertLine(tx, order).catch((error: unknown) => error);
+    });
+    expect(String(legacy)).toMatch(/fk_order_line_placement/);
+  });
+
+  it.each([
+    ['total_amount_minor', 'total_amount_minor = total_amount_minor + 1'],
+    ['currency', `currency = 'USD'`],
+    ['supplier_organization_id', `supplier_organization_id = 'ORG-ELSEWHERE'`],
+    ['organization_id', `organization_id = 'ORG-ELSEWHERE'`],
+    ['id', `id = 'ORD_ELSEWHERE'`],
+    ['placement_xact', 'placement_xact = NULL'],
+  ])('refuses an UPDATE of an order’s %s, as the runtime role and the owner', async (_c, set) => {
+    const sql = `UPDATE "order" SET ${set} WHERE id = $1`;
+    await expect(
+      runUnscoped('the suite attempts the header write the guard exists to refuse', () =>
+        prisma.client.$executeRawUnsafe(sql, orderAtV1),
+      ),
+    ).rejects.toThrow(/ck_order_financial_immutable/);
+    await expect(owner.$executeRawUnsafe(sql, orderAtV1)).rejects.toThrow(
+      /ck_order_financial_immutable/,
     );
   });
 
-  it('accepts a hand-written line at the published price (the key is not vacuous)', async () => {
+  it('lets an order’s status and the saga’s columns move (the header guard is not all-or-nothing)', async () => {
     await rolledBack(async (tx) => {
       expect(
-        await tx.$executeRaw`
-          INSERT INTO order_line (id, organization_id, order_id, offer_id, product_id,
-                                  unit_price_minor, quantity, line_total_minor, currency,
-                                  offer_version, product_name)
-          SELECT ${id('OLN')}, o.organization_id, o.id, f.id, f.product_id,
-                 40000, 1, 40000, 'IRR', 1, 'hand-written'
-            FROM "order" o, offer f WHERE o.id = ${orderAtV1} AND f.id = ${unordered}`,
+        await tx.$executeRaw`UPDATE "order" SET status = 'CANCELLING', cancellation_reason = 'x',
+                                    total_amount_minor = total_amount_minor WHERE id = ${orderAtV1}`,
       ).toBe(1);
     });
+  });
+
+  it('refuses the r2 replacement step by step, and a cancellation still restores what was reserved', async () => {
+    const { offerId: reserved } = await publishOffer(wiring, org.supplier, {
+      availableQuantity: 6,
+    });
+    const placed = await asBuyer(() =>
+      wiring.orders.place(
+        { lines: [{ offerId: reserved, offerVersion: 1, quantity: 2 }] },
+        key('ph-r2'),
+      ),
+    );
+    const line = placed.lines[0]!.id;
+    const asRuntimeRaw = (sql: string, ...values: unknown[]) =>
+      runUnscoped('the suite attempts the r2 replacement', () =>
+        prisma.client.$executeRawUnsafe(sql, ...values),
+      );
+    // 1. Park the line under another id, in another order of the same buyer.
+    await expect(
+      asRuntimeRaw(
+        `UPDATE order_line SET id = $2, order_id = $3 WHERE id = $1`,
+        line,
+        id('OLN'),
+        orderAtV1,
+      ),
+    ).rejects.toThrow(/ck_order_line_price_immutable: .*UPDATE refused/);
+    // 2. A new line with 20 units in the placed order (the same offer is still taken, so the
+    //    sibling: another offer).
+    await expect(
+      runUnscoped('the suite appends to the placed order', () =>
+        insertLine(prisma.client as unknown as PrismaClient, placed.id, 1, 40_000n, 'IRR', 20),
+      ),
+    ).rejects.toThrow(/fk_order_line_placement/);
+    // 3. The header the obligation is created from.
+    await expect(
+      asRuntimeRaw(`UPDATE "order" SET total_amount_minor = 1 WHERE id = $1`, placed.id),
+    ).rejects.toThrow(/ck_order_financial_immutable/);
+
+    await asBuyer(() => wiring.orders.cancel(placed.id, { reason: 'r2 replacement refused' }));
+    await asActor(
+      {
+        organizationId: org.buyer,
+        authType: 'SERVICE',
+        callerService: 'marketplace-service',
+        roles: ['SERVICE'],
+      },
+      () => wiring.orders.markCancelled(placed.id, 'r2 replacement refused', sagaStep()),
+    );
+    const offer = await runUnscoped('the suite reads the offer the cancellation released', () =>
+      prisma.client.offer.findUniqueOrThrow({ where: { id: reserved } }),
+    );
+    expect(offer.availableQuantity).toBe(6);
+    const order = await asBuyer(() => wiring.orders.get(placed.id));
+    expect(order).toMatchObject({ status: 'CANCELLED', totalAmountMinor: placed.totalAmountMinor });
   });
 
   it('refuses to delete a price a line agreed to, and an offer that was ordered', async () => {
@@ -338,12 +490,33 @@ describe('an order line agrees to a published offer price, in the database (D-15
     ['currency', `currency = 'USD'`],
     ['offer_version', 'offer_version = 1'],
     ['offer_id', `offer_id = '${'OFR_ELSEWHERE'}'`],
-  ])('refuses an UPDATE of a line’s %s, even by the owner', async (_column, set) => {
+    ['id', `id = 'OLN_SAVED'`],
+    [
+      'order_id (to another order of its buyer)',
+      `order_id = (SELECT id FROM "order" o WHERE o.organization_id = order_line.organization_id
+                      AND o.id <> order_line.order_id LIMIT 1)`,
+    ],
+    [
+      'organization_id with a matching order',
+      `(organization_id, order_id) = (SELECT organization_id, id FROM "order" o
+                      WHERE o.organization_id <> order_line.organization_id LIMIT 1)`,
+    ],
+    ['product_id', `product_id = 'PRD_ELSEWHERE'`],
+    ['product_name', `product_name = 'renamed'`],
+    ['placement_xact', 'placement_xact = NULL'],
+    ['nothing (a no-op)', 'quantity = quantity'],
+  ])('refuses an UPDATE of a line’s %s, as the runtime role and the owner', async (_c, set) => {
     // The v2 line: `offer_version = 1` with v1's price absent would otherwise be
     // a key violation; the guard answers first, whatever the change.
+    const sql = `UPDATE order_line SET ${set} WHERE id = $1`;
     await expect(
-      owner.$executeRawUnsafe(`UPDATE order_line SET ${set} WHERE id = $1`, lineAtV2),
-    ).rejects.toThrow(/ck_order_line_price_immutable/);
+      runUnscoped('the suite attempts the line write the guard exists to refuse', () =>
+        prisma.client.$executeRawUnsafe(sql, lineAtV2),
+      ),
+    ).rejects.toThrow(/ck_order_line_price_immutable: .*UPDATE refused/);
+    await expect(owner.$executeRawUnsafe(sql, lineAtV2)).rejects.toThrow(
+      /ck_order_line_price_immutable: .*UPDATE refused/,
+    );
   });
 
   it('refuses the same UPDATE from the runtime role', async () => {
@@ -356,18 +529,6 @@ describe('an order line agrees to a published offer price, in the database (D-15
                                     WHERE id = ${lineAtV1}`,
       ),
     ).rejects.toThrow(/ck_order_line_price_immutable/);
-  });
-
-  it('lets a line’s other columns keep their own rules (the guard is not all-or-nothing)', async () => {
-    await rolledBack(async (tx) => {
-      expect(
-        await tx.$executeRaw`UPDATE order_line SET product_name = 'renamed' WHERE id = ${lineAtV1}`,
-      ).toBe(1);
-      // A no-op write of an agreed column is not a change.
-      expect(
-        await tx.$executeRaw`UPDATE order_line SET unit_price_minor = unit_price_minor WHERE id = ${lineAtV1}`,
-      ).toBe(1);
-    });
   });
 
   it.each([
