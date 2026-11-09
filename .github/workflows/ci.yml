@@ -658,7 +658,17 @@ jobs:
           test "$OCTOPUS_COUNT" -eq 0
           # Gitleaks 8.30.1 can exit zero on Git errors; prove patches are readable.
           git log -p -U0 --full-history --diff-merges=remerge "$SCAN_BASE..$SCAN_HEAD" >/dev/null
-          gitleaks detect --verbose --redact --exit-code=2 --log-opts="--full-history --diff-merges=remerge $SCAN_BASE..$SCAN_HEAD" --report-format=sarif --report-path=results.sarif
+          # The pinned scanner can log errors/partial scans and still exit zero.
+          # Capture both streams synchronously; never accept an absent completion.
+          SCAN_LOG="$(mktemp "$RUNNER_TEMP/gitleaks.XXXXXX.log")"
+          SCAN_STATUS=0
+          gitleaks detect --verbose --redact --exit-code=2 --log-opts="--full-history --diff-merges=remerge $SCAN_BASE..$SCAN_HEAD" --report-format=sarif --report-path=results.sarif --no-color 2>&1 | tee "$SCAN_LOG" || SCAN_STATUS=$?
+          if grep -Eiq '(^|[[:space:]])ERR([[:space:]]|$)|partial scan' "$SCAN_LOG" ||
+             ! grep -Eq '(^|[[:space:]])INF scanned ~[0-9]+ bytes \(.+\) in .+$' "$SCAN_LOG"; then
+            echo '::error::Gitleaks did not prove a complete scan; refusing.'
+            exit 1
+          fi
+          exit "$SCAN_STATUS"
 
       - name: Dependency audit
         # High and critical fail. The repo holds no production secrets, but it

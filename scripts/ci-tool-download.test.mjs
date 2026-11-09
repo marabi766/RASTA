@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   symlinkSync,
+  unlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -173,7 +174,7 @@ test('helper caches by exact version and checksum, with no fallback key or skipp
     assert.equal(step['continue-on-error'], undefined);
   }
   const source = read('scripts/ci-tool-download.mjs');
-  assert.ok(source.includes('${name}-${tool.version}-${tool.sha256}'));
+  assert.ok(source.includes('ci-tool-v2-linux-x64-${name}-${tool.version}-${tool.sha256}'));
   for (const pin of Object.values(TOOLS)) {
     assert.match(pin.sha256, /^[a-f0-9]{64}$/);
     assert.ok(pin.url.includes(pin.version));
@@ -273,6 +274,7 @@ function rangeHarness(t) {
 const { spawnSync } = require('node:child_process');
 const opts = process.argv.find(a => a.startsWith('--log-opts=')).slice(11);
 const r = spawnSync('git', ['log', '-p', '-U0', ...opts.split(' ')], { encoding: 'utf8' });
+console.error('INF scanned ~0 bytes (0) in 1ms');
 process.exit(r.status || (r.stdout.includes('CI_RANGE_FIXTURE_') ? 2 : 0));
 `,
       { mode: 0o755 },
@@ -288,6 +290,7 @@ process.exit(r.status || (r.stdout.includes('CI_RANGE_FIXTURE_') ? 2 : 0));
         env: {
           ...fixtureGitEnv(),
           PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: dir,
           SCAN_BASE: from,
           SCAN_HEAD: head,
         },
@@ -337,8 +340,9 @@ topologyTest('conflict resolution introducing a secret fails with a redacted loc
   const result = h.scan(base, head);
   assert.equal(result.status, 2, result.stdout + result.stderr);
   if (process.env.GITLEAKS_TEST_BINARY) {
-    assert.match(result.stdout, /File:\s+(?:b\/)?base/);
+    assert.match(result.stdout, /File:\s+b\/base(?:\r?\n|$)/);
     assert.match(result.stdout, /Line:\s+1/);
+    assert.ok(result.stdout.includes(`${head}:b/base:range-fixture:1`));
     assert.ok(!result.stdout.includes('CI_RANGE_FIXTURE_RESOLUTION'));
   }
 });
@@ -436,3 +440,67 @@ test('push ranges cannot cancel or displace one another; PR updates may supersed
     'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
   });
 });
+
+for (const [label, output] of [
+  ['ERR on stderr', 'ERR error="stderr is not empty"\nINF scanned ~0 bytes (0) in 1ms'],
+  ['ERR on stdout', 'ERR parse failure\nINF scanned ~0 bytes (0) in 1ms'],
+  ['partial scan', 'INF partial scan\nINF scanned ~0 bytes (0) in 1ms'],
+  ['missing completion', 'INF no leaks found'],
+]) {
+  topologyTest(`exit-zero scanner refuses ${label}`, (t) => {
+    const h = rangeHarness(t);
+    unlinkSync(join(h.bin, 'gitleaks'));
+    writeFileSync(
+      join(h.bin, 'gitleaks'),
+      `#!/usr/bin/env node\nconsole.${label.includes('stdout') ? 'log' : 'error'}(${JSON.stringify(output)});\n`,
+      { mode: 0o755 },
+    );
+    const result = h.scan(h.base, h.commit('clean'));
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /did not prove a complete scan/);
+    assert.ok(result.stdout.includes(output)); // tee keeps both streams visible.
+  });
+}
+
+topologyTest('scan refuses a failed log capture even after a completed clean scan', (t) => {
+  const h = rangeHarness(t);
+  writeFileSync(join(h.bin, 'tee'), '#!/bin/sh\ncat\nexit 1\n', { mode: 0o755 });
+  assert.notEqual(h.scan(h.base, h.commit('clean')).status, 0);
+});
+
+test(
+  'pinned scanner Git attribute warning exits zero but the workflow refuses the partial scan',
+  { skip: !process.env.GITLEAKS_TEST_BINARY },
+  (t) => {
+    const h = rangeHarness(t);
+    // Git exits zero with this diagnostic; Gitleaks does not whitelist it.
+    const base = h.commit('.gitattributes', '* invalid/name\n');
+    h.git('checkout', '-b', 'side');
+    h.commit('side');
+    h.git('checkout', 'main');
+    h.commit('main-work');
+    h.git('merge', '--no-ff', 'side', '-m', 'merge');
+    const head = h.git('rev-parse', 'HEAD');
+    const range = `--full-history --diff-merges=remerge ${base}..${head}`;
+    const git = spawnSync('git', ['log', '-p', '-U0', ...range.split(' ')], {
+      cwd: h.dir,
+      encoding: 'utf8',
+      env: fixtureGitEnv(),
+    });
+    assert.equal(git.status, 0);
+    assert.match(git.stderr, /not a valid attribute name/);
+    const raw = spawnSync(
+      process.env.GITLEAKS_TEST_BINARY,
+      ['detect', '--redact', '--no-color', `--log-opts=${range}`],
+      { cwd: h.dir, encoding: 'utf8', env: fixtureGitEnv() },
+    );
+    assert.equal(raw.status, 0, raw.stderr);
+    assert.match(raw.stderr, /ERR.*stderr is not empty/);
+    const result = h.scan(base, head);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /did not prove a complete scan/);
+    t.diagnostic(
+      `Git exit ${git.status}: ${git.stderr}Gitleaks exit ${raw.status}: ${raw.stderr}Workflow exit ${result.status}: ${result.stdout}`,
+    );
+  },
+);
