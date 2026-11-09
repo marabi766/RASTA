@@ -1068,6 +1068,8 @@ test('R1 registry checks real launch paths and refuses executable/helper drift',
     ['scripts/verify-test-independence.mjs', 'services/maintenance-service event-flow'],
     ['scripts/aggregation-evidence.mjs', 'report.txt'],
     ['scripts/run-test-phases.mjs', 'test:integration'],
+    ['scripts/economic-coverage.mjs', 'shard'],
+    ['scripts/economic-coverage.mjs', 'merge'],
     ['scripts/ci-integration-split.test.mjs', ''],
   ]) {
     const read = (path) =>
@@ -1091,6 +1093,31 @@ test('R1 registry checks real launch paths and refuses executable/helper drift',
       assert.equal(drifted.length, 1);
       assert.match(drifted[0].reason, /changed\/unreadable/);
     }
+  }
+});
+
+test('economic coverage launcher refuses forwarded arguments and configuration', async () => {
+  const { JEST_LAUNCHERS } = await import('./disclosure-jest-launchers.mjs');
+  const sources = Object.fromEntries(
+    Object.keys(JEST_LAUNCHERS['scripts/economic-coverage.mjs'].sha256).map((file) => [
+      file,
+      readFileSync(join(root, file), 'utf8'),
+    ]),
+  );
+  for (const args of [
+    '',
+    'unknown',
+    'shard --config alternate.cjs',
+    'merge --setupFilesAfterEnv alternate.cjs',
+  ]) {
+    const commands = launchControl(
+      `node scripts/economic-coverage.mjs ${args}`,
+      'workflow',
+      sources,
+    );
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].opaque, true);
+    assert.match(commands[0].reason, /unsupported economic coverage/);
   }
 });
 

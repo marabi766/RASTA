@@ -470,6 +470,15 @@ export function jestCommands(paths, read) {
             'services/identity-service',
           );
           inspect('pnpm run test:aggregation-stress -- --json', name, '.', [...stack, path]);
+        } else if (entry.kind === 'economic-coverage') {
+          if (args.length !== 1 || !['shard', 'merge'].includes(args[0])) {
+            refuse(name, 'unsupported economic coverage arguments');
+            continue;
+          }
+          // The pinned wrapper varies only native shard selection and reporting.
+          // Merge lists the same inventory; every executing leg keeps both projects.
+          for (const shard of ['1/3', '2/3', '3/3'])
+            add(['--coverage', '--runInBand', '--shard', shard], 'services/economic-service');
         } else if (entry.kind === 'empty-unit-probe') {
           if (args.some((arg) => CONFIG_FLAG.test(arg))) {
             refuse(name, 'unsupported empty-unit probe configuration arguments');
