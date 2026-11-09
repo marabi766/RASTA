@@ -636,7 +636,7 @@ jobs:
           set -euo pipefail
           GITLEAKS_TEST_BINARY="$(command -v gitleaks)"
           export GITLEAKS_TEST_BINARY
-          node --test scripts/ci-tool-download.test.mjs
+          pnpm run test:ci-pull-image
 
       - name: Secret scan
         # Keep every introduced commit; remerge diffs isolate merge-only content

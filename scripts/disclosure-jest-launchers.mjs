@@ -6,7 +6,7 @@ export const JEST_LAUNCHERS = {
       'Node tests spawn curl/Git and the pinned Gitleaks binary, plus the exact pinned Secret scan shell in isolated Git fixtures; downloads are mocked except a loopback curl probe. No Jest, pnpm or Turbo child.',
     sha256: {
       'scripts/ci-tool-download.test.mjs':
-        'b4b9eabb969edade717d0d6b77b7767d77fd2bf537da5bc4b3f46baded4a7951',
+        'aaaf4ec48683f22fb34d1609bdb3eac9c77c510f34bb4bab7b2e7f32c6df9a3a',
       'scripts/ci-tool-download.mjs':
         'ee68f2a2fa8840b19acb90edf7f97829d41a3cc27c6128024d94ca3e748e5c02',
       'scripts/fixture-git-env.mjs':
@@ -14,7 +14,7 @@ export const JEST_LAUNCHERS = {
       'scripts/authored-source-inventory.cjs':
         '0b5d93cff1bf3868a9de93166d3d669d97099409e6affac231993066f749e65a',
       '.github/workflows/ci.yml':
-        '0bc24d222833fa76091b7037c82e628b033623e87c3037ee8c0398a3181ff7da',
+        '4bbc0648e214f0f8ff33d3b5dde45a20a62480ad3d0731fde93a2ab5dd80e4aa',
     },
   },
   'scripts/verify-migration-reversible-lib.test.mjs': {

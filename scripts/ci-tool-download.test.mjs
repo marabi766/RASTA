@@ -234,7 +234,13 @@ test('coverage refuses reintroduced Go/Gitleaks installers and raw release fetch
 
 // Execute the exact workflow shell against real Git topologies. The default
 // scanner exposes its input patch; set GITLEAKS_TEST_BINARY for the pinned CLI.
+const topologyTest = (name, body) =>
+  test(name, { skip: !!process.env.CI && !process.env.GITLEAKS_TEST_BINARY }, body);
 function rangeHarness(t) {
+  assert.ok(
+    !process.env.CI || process.env.GITLEAKS_TEST_BINARY,
+    'CI topologies require pinned Gitleaks',
+  );
   const dir = mkdtempSync(join(tmpdir(), 'ci-range-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const git = (...args) => {
@@ -299,21 +305,24 @@ test(
   },
 );
 for (const firstParent of ['feature', 'main']) {
-  test(`approved main finding is not re-attributed when merging with ${firstParent} first`, (t) => {
-    const h = rangeHarness(t);
-    h.git('checkout', '-b', 'feature');
-    h.commit('feature');
-    h.git('checkout', 'main');
-    const approved = h.commit('approved', 'CI_RANGE_FIXTURE_APPROVED');
-    const base = h.commit('.gitleaksignore', `${approved}:approved:range-fixture:1\n`);
-    if (process.env.GITLEAKS_TEST_BINARY) assert.equal(h.scan(h.base, base).status, 0);
-    h.git('checkout', firstParent);
-    h.git('merge', '--no-ff', firstParent === 'feature' ? 'main' : 'feature', '-m', 'merge');
-    const result = h.scan(base, h.git('rev-parse', 'HEAD'));
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-  });
+  topologyTest(
+    `approved main finding is not re-attributed when merging with ${firstParent} first`,
+    (t) => {
+      const h = rangeHarness(t);
+      h.git('checkout', '-b', 'feature');
+      h.commit('feature');
+      h.git('checkout', 'main');
+      const approved = h.commit('approved', 'CI_RANGE_FIXTURE_APPROVED');
+      const base = h.commit('.gitleaksignore', `${approved}:approved:range-fixture:1\n`);
+      if (process.env.GITLEAKS_TEST_BINARY) assert.equal(h.scan(h.base, base).status, 0);
+      h.git('checkout', firstParent);
+      h.git('merge', '--no-ff', firstParent === 'feature' ? 'main' : 'feature', '-m', 'merge');
+      const result = h.scan(base, h.git('rev-parse', 'HEAD'));
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+    },
+  );
 }
-test('conflict resolution introducing a secret fails with a redacted location', (t) => {
+topologyTest('conflict resolution introducing a secret fails with a redacted location', (t) => {
   const h = rangeHarness(t);
   h.git('checkout', '-b', 'side');
   h.commit('base', 'side conflict');
@@ -333,7 +342,7 @@ test('conflict resolution introducing a secret fails with a redacted location', 
     assert.ok(!result.stdout.includes('CI_RANGE_FIXTURE_RESOLUTION'));
   }
 });
-test('octopus merge content is refused because Git cannot remerge it', (t) => {
+topologyTest('octopus merge content is refused because Git cannot remerge it', (t) => {
   const h = rangeHarness(t);
   for (const branch of ['side-a', 'side-b']) {
     h.git('checkout', '-b', branch, h.base);
@@ -345,7 +354,7 @@ test('octopus merge content is refused because Git cannot remerge it', (t) => {
   const head = h.commit('merge-only', 'CI_RANGE_FIXTURE_OCTOPUS');
   assert.notEqual(h.scan(h.base, head).status, 0);
 });
-test('scan includes a second-parent secret even when removed before the merge', (t) => {
+topologyTest('scan includes a second-parent secret even when removed before the merge', (t) => {
   const h = rangeHarness(t);
   h.git('checkout', '-b', 'side');
   h.commit('side', 'CI_RANGE_FIXTURE_SECONDPARENT');
@@ -355,7 +364,7 @@ test('scan includes a second-parent secret even when removed before the merge', 
   h.git('merge', '--no-ff', 'side', '-m', 'merge');
   assert.equal(h.scan(h.base, h.git('rev-parse', 'HEAD')).status, 2);
 });
-test('scan includes secrets introduced inside a merge commit', (t) => {
+topologyTest('scan includes secrets introduced inside a merge commit', (t) => {
   const h = rangeHarness(t);
   h.git('checkout', '-b', 'side');
   h.commit('side');
@@ -365,7 +374,7 @@ test('scan includes secrets introduced inside a merge commit', (t) => {
   const head = h.commit('merge-only', 'CI_RANGE_FIXTURE_MERGECONTENT');
   assert.equal(h.scan(h.base, head).status, 2);
 });
-test('force-push scans new reachable commits and refuses an empty unequal range', (t) => {
+topologyTest('force-push scans new reachable commits and refuses an empty unequal range', (t) => {
   const h = rangeHarness(t);
   const old = h.commit('old-tip');
   h.git('checkout', '-b', 'replacement', h.base);
@@ -373,7 +382,7 @@ test('force-push scans new reachable commits and refuses an empty unequal range'
   assert.equal(h.scan(old, head).status, 2);
   assert.notEqual(h.scan(head, h.base).status, 0);
 });
-test('scan refuses unreadable or malformed refs and permits a valid clean range', (t) => {
+topologyTest('scan refuses unreadable or malformed refs and permits a valid clean range', (t) => {
   const h = rangeHarness(t);
   const head = h.commit('clean');
   assert.equal(h.scan(h.base, head).status, 0);
@@ -400,12 +409,14 @@ test(
   },
 );
 for (const failure of ['rev-list', 'log']) {
-  test(`scan refuses a failed ${failure} read even if Git emitted a positive count`, (t) => {
-    const h = rangeHarness(t);
-    const head = h.commit('clean');
-    writeFileSync(
-      join(h.bin, 'git'),
-      `#!/usr/bin/env node
+  topologyTest(
+    `scan refuses a failed ${failure} read even if Git emitted a positive count`,
+    (t) => {
+      const h = rangeHarness(t);
+      const head = h.commit('clean');
+      writeFileSync(
+        join(h.bin, 'git'),
+        `#!/usr/bin/env node
 if (process.argv[2] === '${failure}') { process.stdout.write('1\\n'); process.exit(128); }
 const { spawnSync } = require('node:child_process');
 const r = spawnSync('git', process.argv.slice(2), {
@@ -413,10 +424,11 @@ const r = spawnSync('git', process.argv.slice(2), {
 });
 process.exit(r.status ?? 1);
 `,
-      { mode: 0o755 },
-    );
-    assert.notEqual(h.scan(h.base, head).status, 0);
-  });
+        { mode: 0o755 },
+      );
+      assert.notEqual(h.scan(h.base, head).status, 0);
+    },
+  );
 }
 test('push ranges cannot cancel or displace one another; PR updates may supersede', () => {
   assert.deepEqual(parse(read('.github/workflows/ci.yml')).concurrency, {
