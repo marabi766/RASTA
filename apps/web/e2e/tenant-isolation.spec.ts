@@ -206,9 +206,11 @@ test.describe('tenant isolation through the live stack', () => {
       page,
     }) => {
       await page.goto(`/assets/${OTHER_TENANT_ASSET}/timeline`);
+      await expect(page.getByText('این دارایی پیدا نشد')).toBeVisible();
       const foreign = await mainText(page);
 
       await page.goto(`/assets/${MISSING_ID}/timeline`);
+      await expect(page.getByText('این دارایی پیدا نشد')).toBeVisible();
       const missing = await mainText(page);
 
       expect(foreign).toBe(missing);
@@ -388,6 +390,7 @@ test.describe('tenant isolation through the live stack', () => {
       const foreign = await mainText(page);
 
       await page.goto(`/assets/${MISSING_ID}`);
+      await expect(page.getByText('این دارایی پیدا نشد')).toBeVisible();
       const missing = await mainText(page);
 
       expect(foreign).toBe(missing);
@@ -406,6 +409,7 @@ test.describe('tenant isolation through the live stack', () => {
       const foreign = await mainText(page);
 
       await page.goto('/maintenance/MNT-SEED-9999');
+      await expect(page.getByText('این درخواست پیدا نشد')).toBeVisible();
       const missing = await mainText(page);
       expect(foreign).toBe(missing);
     });
@@ -585,6 +589,7 @@ test.describe('tenant isolation through the live stack', () => {
       const foreign = await mainText(page);
 
       await page.goto(`/projects/${MISSING_PROJECT}`);
+      await expect(page.getByText('این پروژه پیدا نشد')).toBeVisible();
       const missing = await mainText(page);
 
       expect(foreign).toBe(missing);
@@ -596,15 +601,28 @@ test.describe('tenant isolation through the live stack', () => {
     }) => {
       const live = await installLiveSession(page.context(), 'orgAdmin');
 
-      await page.goto(withContext(live.context, `/inventory?warehouse=${warehouseB}`));
-      await expect(page.getByText('انبار یافت نشد')).toBeVisible();
-      const foreign = await mainText(page);
+      const settled = async (id: string): Promise<{ status: number | undefined; text: string }> => {
+        const response = await page.goto(withContext(live.context, `/inventory?warehouse=${id}`));
+        await expect(page.getByText('انبار یافت نشد', { exact: true })).toBeVisible();
+        // The not-found message is server-rendered, but InventoryCommands renders
+        // nothing until its storage check in useEffect. Wait for the complete
+        // create form on BOTH navigations, including its restoration gate.
+        // A foreign-only missing/extra form must fail, not be polled away.
+        const create = page.getByRole('form', { name: 'ایجاد انبار', exact: true });
+        await expect(
+          create.getByRole('textbox', { name: 'نام انبار', exact: false }),
+        ).toBeVisible();
+        await expect(
+          create.getByRole('button', { name: 'ایجاد انبار', exact: true }),
+        ).toBeEnabled();
+        return { status: response?.status(), text: await mainText(page) };
+      };
+      const foreign = await settled(warehouseB);
+      const missing = await settled(MISSING_WAREHOUSE);
 
-      await page.goto(withContext(live.context, `/inventory?warehouse=${MISSING_WAREHOUSE}`));
-      const missing = await mainText(page);
-
-      expect(foreign).toBe(missing);
-      expect(foreign).not.toContain(WAREHOUSE_B_NAME);
+      expect(foreign.status).toBe(200);
+      expect(foreign).toEqual(missing);
+      expect(foreign.text).not.toContain(WAREHOUSE_B_NAME);
     });
 
     test('from the other side: ORG-DEH-0002 sees its own and not ORG-DEH-0001’s', async ({
