@@ -1650,12 +1650,6 @@ export const REVIEWED_FUNCTIONS = [
     why: 'every clock is compared with tender_award_standing_check columns, all timestamptz; the tender.created_at it matched is another table',
   },
   {
-    service: 'economic-service',
-    name: 'commission_rule_scope_change',
-    sha256: 'e6ff44532499976df88f04c51186e429c548c50c3c5410bfaa1bbad7a2fdb05e',
-    why: "set_config(setting, …) of setting := 'rasta.commission_rule_scope_' || to_hex(…), never search_path; its clock is pinned",
-  },
-  {
     service: 'supplier-service',
     name: 'performance_formula_version_guard',
     sha256: '67a8e42e41b700e26a8771f83ca3203e5c83eb8ba46d7bf2b1d0826e24a37b79',
