@@ -534,7 +534,11 @@ export const constructionEnvSchema = baseEnvSchema
       .max(604_800)
       .prefault(600),
 
-    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).prefault(1),
+    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('1')
+      .pipe(wholeNumberEnv(0, 1000)),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
     CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),
     CONSTRUCTION_PROGRESS_ALLOW_DECREASE: booleanEnv(false),

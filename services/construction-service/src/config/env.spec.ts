@@ -787,6 +787,7 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
 // FU-299: strict syntax applies to every replay/lease/retention budget in this service.
 describe('strict whole-number timing budgets', () => {
   it.each([
+    ['CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS', 0, 1000, 1],
     ['CONSTRUCTION_RECONCILE_LEASE_SECONDS', 10, 3600, 120],
     ['CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS', 10, 3600, 60],
     ['CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS', 10, 3600, 120],
@@ -818,7 +819,7 @@ describe('strict whole-number timing budgets', () => {
         `0x${min.toString(16)}`,
         String(min - 1),
         String(max + 1),
-        '0'.repeat(String(max).length + 1),
+        '0'.repeat(String(max).length + 1 - String(min).length) + String(min),
       ]) {
         expect(() => load({ [name]: value })).toThrow(name);
       }

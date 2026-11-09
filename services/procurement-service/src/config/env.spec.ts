@@ -439,7 +439,7 @@ describe('strict whole-number timing budgets', () => {
         `0x${min.toString(16)}`,
         String(min - 1),
         String(max + 1),
-        '0'.repeat(String(max).length + 1),
+        '0'.repeat(String(max).length + 1 - String(min).length) + String(min),
       ]) {
         expect(() => load({ [name]: value })).toThrow(name);
       }
