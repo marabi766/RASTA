@@ -25,7 +25,12 @@
 //   - R0 (PR #979 r1, r2): SQL anywhere in a string or a `||` chain of strings, a DO or EXECUTE
 //     statement, a UESCAPE, a session setting that may move names (search_path, SET ROLE,
 //     set_config() of an unlisted one; SET/RESET read by its grammar). Every literal is read;
-//     SQL in a string of a migration's DO block goes to review;
+//     SQL or an undecodable string in a migration's DO block goes to review; strings lexically
+//     enclosed by unlisted calls are refused. Recognized SQL-text executor calls (core XML/full-text,
+//     dblink*, pg_background_* and cron.*) are refused in production SQL, live routine/view bodies
+//     and every migration statement's tokens, including DDL expressions; in DO bodies they go to
+//     review. Inputs need not contain a string; no data-flow proof is attempted. DISCARD and writes
+//     to pg_settings are session changes. Only reviewed non-executing extensions are replayed;
 //   - types as PostgreSQL reads them (`pg_catalog.timestamp`, `"timestamp"`);
 //   - a pin: grouping, `AT TIME ZONE 'UTC'` or timezone('UTC', …), then date_trunc() or a cast
 //     to plain timestamp, used where nothing converts it back (no coalesce(), CASE branch,
@@ -395,7 +400,8 @@ const TRIGGER_BINDING =
 // Statement heads that change what is live: DDL the replay cannot follow from inside a body.
 const LIVE_DDL = new Set(['create', 'alter', 'drop', 'import']);
 /** DDL or dynamic SQL in a body, read from its tokens (words in strings are no statements). */
-const ddlIn = (tokens) => tokens.some((t) => isWord(t, 'execute', ...LIVE_DDL));
+const ddlIn = (tokens) =>
+  tokens.some((t) => isWord(t, 'execute', ...LIVE_DDL)) || sqlTextExecutor(tokens) !== null;
 
 /** The index of the parenthesis closing tokens[open]. */
 function closing(tokens, open) {
@@ -619,7 +625,10 @@ function readRoutine({ tokens, text }) {
     return { refused: `routine ${name} with a body not read` };
   }
   const signature = tokens.slice(i + 2, close).map((t) => t.value.toLowerCase());
-  const end = as < 0 ? tokens.length : as;
+  const end = as < 0 ? tokens.findIndex((t, at) => at > close && isWord(t, 'return', 'begin')) : as;
+  const headerTokens = as < 0 ? tokens.slice(0, end) : tokens;
+  if (headerTokens.some((t, at) => isWord(t, 'set') && setMovesNames(headerTokens, at)))
+    return { refused: `a routine setting that may move names: ${name}` };
   return {
     key: `${name}(${signature.join(' ')})`,
     name,
@@ -642,6 +651,34 @@ function unquotedText({ tokens, text }) {
     plain = plain.slice(0, at) + ' '.repeat(length) + plain.slice(at + length);
   }
   return plain;
+}
+
+// Validate the complete DDL object names before the replay's patterns can cut them. Read
+// [schema.]name from tokens, including IF [NOT] EXISTS and a partition's parent. Unsupported
+// schemas or a third component are refused; no regex backtracking can read IF as the name.
+function replayNameProblem(tokens) {
+  if (!isWord(tokens[0], 'create', 'alter', 'drop')) return null;
+  const object = tokens.findIndex((t) =>
+    isWord(t, 'table', 'view', 'function', 'procedure', 'routine'),
+  );
+  const positions = object < 0 ? [] : [object + 1];
+  tokens.forEach((t, at) => {
+    if (isWord(t, 'partition') && isWord(tokens[at + 1], 'of')) positions.push(at + 2);
+  });
+  for (let at of positions) {
+    if (isWord(tokens[at], 'if')) at += isWord(tokens[at + 1], 'not') ? 3 : 2;
+    if (isWord(tokens[at], 'only')) at += 1;
+    const name = relationAt(tokens, at, false);
+    if (
+      !name ||
+      name.unreadable ||
+      name.dynamic ||
+      isOp(tokens[name.end + 1], '.') ||
+      (name.schema !== null && name.schema !== 'public')
+    )
+      return `a DDL name the replay cannot resolve: ${tokens[at]?.value}`;
+  }
+  return null;
 }
 
 /** A CREATE TABLE's columns into `columns`; answers what is not modelled, or undefined. */
@@ -716,12 +753,28 @@ export function replayMigrations(texts) {
         refuse(`a session setting that may move names: ${firstLine(text)}`);
         continue;
       }
+      // One boundary for every statement, before any DDL/ALTER/inert branch can skip it.
+      // Expression slots may execute now (TYPE USING) or later (CHECK, policy, trigger, DEFAULT).
+      const executor = sqlTextExecutor(statement.tokens);
+      if (executor !== null) {
+        refuse(`a SQL-text executor in a migration statement: ${executor}: ${firstLine(text)}`);
+        continue;
+      }
       if (misread) {
         refuse(`a name the replay cannot read whole: ${misread.value}`);
         continue;
       }
       if ([...unquotedText(statement)].some((c) => c.codePointAt(0) > 0x7f)) {
         refuse(`a name the replay cannot read whole (not ASCII): ${firstLine(text)}`);
+        continue;
+      }
+      if (unmodelledExtension(statement.tokens)) {
+        refuse(`an extension the guard cannot model: ${firstLine(text)}`);
+        continue;
+      }
+      const nameProblem = replayNameProblem(statement.tokens);
+      if (nameProblem) {
+        refuse(nameProblem);
         continue;
       }
       const routine = readRoutine(statement);
@@ -859,8 +912,8 @@ export function replayMigrations(texts) {
       } else if (
         statement.tokens.some((t, i) => t.type === 'string' && holdsSql(statement.tokens, i))
       ) {
-        // SQL in a string of a one-shot statement may run later (a scheduled job): not read.
-        refuse(`SQL in a string of a one-shot statement: ${firstLine(text)}`);
+        // SQL text may run now through an executor or later as a scheduled job: not read.
+        refuse(`SQL text in a one-shot statement: ${firstLine(text)}`);
       }
     }
   }
@@ -1100,9 +1153,25 @@ function setMovesNames(tokens, i) {
  */
 function sessionChange(tokens) {
   return tokens.some((t, i) => {
-    const head =
-      i === 0 || isOp(tokens[i - 1], ';') || isWord(tokens[i - 1], 'begin', 'then', 'else', 'loop');
+    const head = startsStatement(tokens, i);
+    if (
+      head &&
+      isWord(t, 'discard') &&
+      isWord(tokens[i + 1], 'all', 'plans', 'sequences', 'temp', 'temporary')
+    )
+      return true;
     if (head && isWord(t, 'set', 'reset')) return setMovesNames(tokens, i);
+    const targetAt =
+      isWord(t, 'update') && !NOT_AN_UPDATE.has(nameOf(tokens[i - 1]))
+        ? i + 1
+        : (isWord(t, 'insert', 'merge') && isWord(tokens[i + 1], 'into')) ||
+            (isWord(t, 'delete') && isWord(tokens[i + 1], 'from'))
+          ? i + 2
+          : null;
+    if (targetAt !== null) {
+      const target = relationAt(tokens, targetAt, false);
+      if (target?.table === 'pg_settings') return true;
+    }
     if (nameOf(t) === 'set_config' && isOp(tokens[i + 1], '(')) {
       const setting =
         tokens[i + 2]?.type === 'string' && isOp(tokens[i + 3], ',') && stringValues(tokens, i + 2);
@@ -1114,15 +1183,24 @@ function sessionChange(tokens) {
   });
 }
 
-// A statement begins with one of these, at the start of a text or after a semicolon.
+// One reader for SQL and PL/pgSQL statement starts, shared by strings and session settings.
+// The lexer reads a label's closing `>>` as two operators.
+const startsStatement = (tokens, i) =>
+  i === 0 ||
+  isOp(tokens[i - 1], ';') ||
+  isWord(tokens[i - 1], 'begin', 'then', 'else', 'loop', 'declare') ||
+  (isOp(tokens[i - 2], '>') && isOp(tokens[i - 1], '>')) ||
+  (isWord(tokens[i - 2], 'return') && isWord(tokens[i - 1], 'query'));
+
+// A statement begins with one of these at a start the reader recognises.
 const STATEMENT_HEADS = new Set(
-  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare begin start explain'.split(
+  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare begin start explain declare perform discard'.split(
     ' ',
   ),
 );
-/** Whether tokens[i] heads a statement: a head word, first or after `;`, with more after it. */
+/** Whether tokens[i] heads a statement, including labeled and DECLARE/BEGIN bodies. */
 const headsStatement = (tokens, i) =>
-  (i === 0 || isOp(tokens[i - 1], ';')) &&
+  startsStatement(tokens, i) &&
   STATEMENT_HEADS.has(tokens[i]?.type === 'word' && tokens[i].lower) &&
   i + 1 < tokens.length;
 
@@ -1143,15 +1221,85 @@ function chainValues(tokens, i) {
   return joined;
 }
 
+// Installing an executor invalidates literal analysis, even when its SQL has no clock words.
+function unmodelledExtension(tokens, i = 0) {
+  if (!isWord(tokens[i], 'create') || !isWord(tokens[i + 1], 'extension')) return false;
+  let at = i + 2;
+  if (isWord(tokens[at], 'if') && isWord(tokens[at + 1], 'not') && isWord(tokens[at + 2], 'exists'))
+    at += 3;
+  return (
+    !['btree_gist', 'pg_trgm'].includes(tokens[at]?.value) ||
+    (tokens[at + 1] !== undefined && !isOp(tokens[at + 1], ';'))
+  );
+}
+
+// Calls proven to consume values, never execute them as SQL. An unlisted call receiving a
+// string may execute an opaque expression built from it: do not try to evaluate fragments.
+const VALUE_CALLS = new Set(
+  'timezone date_trunc to_char lower upper coalesce nullif concat concat_ws format chr length octet_length convert_to encode decode substring replace hashtextextended pg_advisory_xact_lock set_config current_setting nextval has_table_privilege extract date_bin min max sum bool_and strpos jsonb_build_object jsonb_populate_record hashtext translate string_agg int4send digest regexp_replace trim btrim count array_agg json_build_object json_agg pg_has_role has_database_privilege has_schema_privilege pg_try_advisory_xact_lock sha256 unnest tsrange greatest least'.split(
+    ' ',
+  ),
+);
+
+// These calls execute SQL text: its input may come from a parameter, a CTE, a subquery,
+// VALUES, or a variable assigned elsewhere in the body. Lexical argument inspection cannot
+// prove any of those safe. Refuse the call even without a string; quoted/qualified names too.
+const SQL_TEXT_EXECUTORS = new Set([
+  'query_to_xml',
+  'query_to_xmlschema',
+  'query_to_xml_and_xmlschema',
+  'ts_stat',
+  'ts_rewrite', // both overloads refused; no argument-type inference
+]);
+function sqlTextExecutor(tokens) {
+  const executor = tokens.find((t, i) => {
+    const name = nameOf(t);
+    return (
+      name !== null &&
+      isOp(tokens[i + 1], '(') &&
+      (SQL_TEXT_EXECUTORS.has(name) ||
+        /^(?:dblink|pg_background_)/.test(name) ||
+        (isOp(tokens[i - 1], '.') && nameOf(tokens[i - 2]) === 'cron'))
+    );
+  });
+  return executor?.value ?? null;
+}
+
+function opaqueStringCall(tokens, i) {
+  for (let at = enclosing(tokens, i); at >= 0; at = enclosing(tokens, at)) {
+    const before = tokens[at - 1];
+    const qualified = isOp(tokens[at - 2], '.');
+    if (
+      nameOf(before) === null ||
+      (!qualified &&
+        before.type === 'word' &&
+        (isGrouping(before) || isWord(before, 'as', 'materialized', 'lateral', 'array', 'filter')))
+    )
+      continue;
+    if (
+      !VALUE_CALLS.has(nameOf(before)) ||
+      (before.type === 'quoted' && before.value !== before.lower) ||
+      (qualified && (tokens[at - 3]?.value !== 'pg_catalog' || isOp(tokens[at - 4], '.')))
+    )
+      return before.value;
+  }
+  return null;
+}
+
 /**
  * Whether the string at tokens[i] holds SQL (PR #979 r2 F1): a statement starts anywhere in its
- * value (first, or after a `;`), or it holds a clock call. Prose heads no statement.
+ * value (including PL/pgSQL labels and blocks), or it holds a clock/executor call.
+ * Prose heads no statement. All string entry points use this reader.
  */
 function holdsSql(tokens, i) {
-  return (chainValues(tokens, i) ?? []).some((value) => {
+  if (opaqueStringCall(tokens, i)) return true;
+  const values = chainValues(tokens, i);
+  if (values === null) return true;
+  return values.some((value) => {
     const inner = lex(value); // prose is no SQL: `the signer's` lexes, but heads no statement
     return (
       inner.some((_, k) => headsStatement(inner, k)) ||
+      sqlTextExecutor(inner) !== null ||
       clocksIn(inner).some((c) => inner[c.index].type !== 'string')
     );
   });
@@ -1163,8 +1311,21 @@ function holdsSql(tokens, i) {
  * EXECUTE '…', a scheduled job), a DO or EXECUTE statement, and a search_path change.
  */
 function unreadableIn(tokens) {
+  const executor = sqlTextExecutor(tokens);
+  if (executor !== null) return `a SQL-text executor: ${executor}`;
   for (const [i, t] of tokens.entries()) {
     if (t.unreadable) return 'a U&"…" identifier with UESCAPE';
+    if (unmodelledExtension(tokens, i)) return 'an extension the guard cannot model';
+    const object = isWord(tokens[i + 1], 'or') && isWord(tokens[i + 2], 'replace') ? i + 3 : i + 1;
+    if (isWord(t, 'create') && isWord(tokens[object], 'function', 'procedure', 'routine'))
+      return 'routine-defining DDL in production SQL';
+    const modifier = isWord(tokens[i + 1], 'global', 'local') ? i + 2 : i + 1;
+    if (
+      isWord(t, 'create') &&
+      isWord(tokens[modifier], 'temp', 'temporary') &&
+      isWord(tokens[modifier + 1], 'table')
+    )
+      return 'a temporary table that may shadow a replayed table';
     if (headsStatement(tokens, i) && isWord(t, 'do', 'execute')) return `a ${t.lower} statement`;
     if (t.type !== 'string') continue;
     if (!stringValues(tokens, i)) return `a string: ${t.value}`;
@@ -1341,6 +1502,16 @@ export const REVIEWED_LITERALS = [
     file: 'services/construction-service/src/tender/tender-approval.errors.ts',
     text: 'execute (the tender changed, or the command is not the one approved); ask for approval again',
     why: 'a sentence of an error message that starts with "execute": no SQL is run from it',
+  },
+  {
+    file: 'services/api-gateway/src/proxy/rate-limiter.ts',
+    sha256: '77db5042c85ca53377753a751bc109e95837b778dabca7917c97c610f1512f4b',
+    why: 'Lua sliding-window script: redis.call executes Redis sorted-set commands, never SQL',
+  },
+  {
+    file: 'packages/contracts/src/common/__tests__/zod-stock-oracle.ts',
+    sha256: '7933cf2a7e2a89de22b992f171c83f70c959e8d2434dc092c041ca18d62a1d6e',
+    why: 'JavaScript child-process program: require loads modules, never SQL',
   },
 ];
 export const REVIEWED_FUNCTIONS = [
