@@ -462,7 +462,11 @@ test('a routine with a RAISE or SELECT INTO still names no table for its bare cl
     `BEGIN NEW."due_at" := now(); RAISE EXCEPTION 'x' USING ERRCODE = 'y'; RETURN NEW; END`,
     `BEGIN NEW."due_at" := now(); SELECT 1 INTO v; RETURN NEW; END`,
   ]) {
-    assert.match(problemsIn(body, scope).join(), /R3/, body);
+    assert.match(
+      definitionProblems({ body, header: '', language: 'plpgsql' }, scope).join(),
+      /R3/,
+      body,
+    );
   }
 });
 
@@ -1605,4 +1609,130 @@ test('FU-274 r2 ordinary DDL expressions and executor names as data remain reada
 
 test('the repository passes', () => {
   assert.deepEqual(utcClockProblems(REPOSITORY), []);
+});
+
+// FU-283: creation must fail before a later literal can resolve its shadow as a replayed table.
+const FU283_BASE = `CREATE TABLE task (id text, recorded_at timestamptz(3));`;
+const FU283_SCOPE = new Map(
+  [...replayMigrations([FU283_BASE]).tables].map(([name, columns]) => [name, [columns]]),
+);
+const FU283_CREATIONS = [
+  `CREATE TEMP VIEW fact AS SELECT 1 AS id`,
+  `CREATE TEMPORARY SEQUENCE fact`,
+  `CREATE GLOBAL TEMPORARY TABLE fact (id text)`,
+  `CREATE LOCAL TEMP TABLE fact (id text)`,
+  `CREATE OR REPLACE TEMPORARY VIEW fact AS SELECT 1 AS id`,
+  `CREATE TEMP MATERIALIZED VIEW fact AS SELECT 1 AS id`,
+  `CREATE TEMP unknown_object fact`,
+  `CrEaTe /* modifier */ TeMpOrArY /* object */ ViEw fact AS SELECT 1 AS id`,
+  `CREATE TABLE pg_temp.fact (recorded_at timestamp(3))`,
+  `CREATE VIEW "PG_TEMP"."Fact" AS SELECT 1 AS id`,
+  `CREATE SEQUENCE "Pg_TeMp_42".fact`,
+  `CREATE MATERIALIZED VIEW PG_TEMP_123.fact AS SELECT 1 AS id`,
+  `CREATE TYPE pg_temp.fact AS ENUM ('one')`,
+  `CREATE TABLE pg_temp /* schema */ . "Fact" AS SELECT 1 AS id`,
+  `CREATE TABLE U&"pg_\\0074emp".fact (id text)`,
+  `CREATE TEMP TABLE fact AS SELECT 1 AS id`,
+  `CREATE TABLE $1.fact (id text)`,
+  `CREATE TABLE fact (id text, LIKE pg_temp.other)`,
+  `SELECT 1 AS id INTO TEMP fact`,
+  `SELECT 1 AS id INTO TEMPORARY TABLE fact`,
+  `SELECT 1 AS id INTO UNLOGGED fact`,
+  `SELECT 1 AS id INTO TABLE fact`,
+  `SELECT 1 AS id INTO fact`,
+  `SELECT 1 AS id INTO pg_temp.fact`,
+  `SELECT 1 AS id INTO "PG_TEMP_42" . "Fact"`,
+  `WITH x AS (SELECT 1 AS id) SELECT id INTO /* target */ tEmP fact FROM x`,
+  `SELECT (SELECT 1) AS id INTO TEMP fact`,
+  `SELECT x.update INTO TEMP fact FROM task x`,
+  `SELECT * INTO TEMP fact FROM task`,
+  `SELECT 1 INTO $1`,
+];
+for (const sql of FU283_CREATIONS) {
+  test(`FU-283 creation boundary: ${sql}`, () => {
+    assert.match(problemsIn(sql, FU283_SCOPE).join(), /R0/);
+    assert.ok(replayMigrations([`${FU283_BASE}; ${sql};`]).unmodelled.length > 0, sql);
+    assert.match(
+      definitionProblems({ body: sql, header: '', language: 'sql' }, FU283_SCOPE).join(),
+      /R0/,
+    );
+    // Quoted SQL data must still reach the existing string boundary.
+    assert.match(problemsIn(`SELECT $quoted$${sql}$quoted$`, FU283_SCOPE).join(), /R0/);
+  });
+}
+for (const sql of [
+  `CREATE TEMP VIEW fact AS SELECT 1 AS id`,
+  `CREATE SEQUENCE pg_temp.fact`,
+  `SELECT 1 INTO TEMP fact`,
+  `SELECT 1 INTO TEMPORARY TABLE fact`,
+  `SELECT 1 INTO UNLOGGED fact`,
+  `SELECT 1 INTO "PG_TEMP_1".fact`,
+]) {
+  test(`FU-283 PL/pgSQL creation boundary: ${sql}`, () => {
+    const body = `<<scope>> DECLARE v int; BEGIN ${sql}; END scope`;
+    assert.ok(replayMigrations([`DO $body$${body}$body$;`]).unmodelled.length > 0);
+    assert.match(
+      definitionProblems({ body, header: '', language: 'plpgsql' }, FU283_SCOPE).join(),
+      /R0/,
+    );
+  });
+}
+for (const sql of [
+  `SET search_path TO pg_temp, public`,
+  `SET LOCAL "search_path" = 'pg_temp_42, public'`,
+  `sEt /* setting */ SeArCh_PaTh TO "PG_TEMP", public`,
+  `SELECT set_config('search_path', 'pg_temp,public', false)`,
+  `SELECT "pg_catalog"."set_config"($s$search_path$s$, $p$pg_temp_42,public$p$, true)`,
+  `SELECT set_config('search_path', $1, false)`,
+  `SET search_path FROM CURRENT`,
+]) {
+  test(`FU-283 temporary search path: ${sql}`, () => {
+    assert.match(problemsIn(sql, FU283_SCOPE).join(), /R0/);
+    assert.ok(replayMigrations([`${sql};`]).unmodelled.length > 0);
+    assert.ok(replayMigrations([`DO $$BEGIN ${sql}; END$$;`]).unmodelled.length > 0);
+    assert.match(definitionProblems({ body: sql, header: '' }, FU283_SCOPE).join(), /R0/);
+  });
+}
+test('FU-283 non-temporary names and data still pass', () => {
+  const benign = [
+    `CREATE TABLE fact (temp text, temporary text, pg_temp text)`,
+    `CREATE TABLE pg_temp_like (id text)`,
+    `CREATE TABLE public.fact (id text)`,
+    `CREATE VIEW fact AS SELECT 'pg_temp.x' AS temp`,
+    `CREATE SEQUENCE temp`,
+    `SELECT 'pg_temp.x', $q$pg_temp_42.fact$q$, 'temporary', 'INTO TEMP'`,
+    `SELECT temp, temporary, pg_temp FROM task`,
+    `INSERT INTO task (id) SELECT 'pg_temp.x'`,
+    `WITH x AS (SELECT 1) INSERT INTO task (id) SELECT 'x' FROM x`,
+    `SELECT /* CREATE TEMP VIEW pg_temp.fact */ 1`,
+  ];
+  for (const sql of benign) {
+    assert.deepEqual(problemsIn(sql, FU283_SCOPE), [], sql);
+    assert.deepEqual(replayMigrations([`${FU283_BASE}; ${sql};`]).unmodelled, [], sql);
+  }
+  assert.deepEqual(problemsIn('holds CREATE on schema $1', FU283_SCOPE), []);
+  for (const language of ['plpgsql', "'plpgsql'"]) {
+    const replay = replayMigrations([
+      `CREATE FUNCTION f() RETURNS int LANGUAGE ${language}
+      AS $$DECLARE v int; BEGIN SELECT 1 INTO v; RETURN v; END$$;`,
+    ]);
+    assert.deepEqual(replay.unmodelled, []);
+    assert.deepEqual(definitionProblems([...replay.functions.values()][0], FU283_SCOPE), []);
+  }
+  assert.deepEqual(
+    replayMigrations([`DO $$DECLARE v int; BEGIN SELECT 1 INTO v; END$$;`]).unmodelled,
+    [],
+  );
+  // Unspecified/SQL language must not acquire the variable-assignment exception.
+  assert.match(
+    definitionProblems({ body: 'SELECT 1 INTO fact', header: '' }, FU283_SCOPE).join(),
+    /R0/,
+  );
+});
+test('FU-283 source inventory reaches clock-free creation literals', () => {
+  for (const sql of [FU283_CREATIONS[0], FU283_CREATIONS[8], FU283_CREATIONS[18]])
+    assert.match(
+      scanOf('x-service', FU283_BASE, `export const sql = ${JSON.stringify(sql)};`).join(),
+      /R0/,
+    );
 });
