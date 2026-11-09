@@ -326,7 +326,7 @@ export const REVIEWED_PROGRAMS = new Map([
       paths: ['$RUNNER_TEMP/trivy-db-check-bin'], // the `go build -o` directory of the trivy-db job
       // the run secrets of the two `Generate run secrets` steps: `openssl rand -hex` output, one line of hex
       envValues: ['keycloak_password', 'internal_secret', 'web_session_secret'],
-      reason: `${TOOLING}; psql and openssl take SQL / key material from the job’s own services; gitleaks is checksum-pinned and scans a validated hex commit range; git only validates commit objects and counts that range (cat-file/rev-list)`,
+      reason: `${TOOLING}; psql and openssl take SQL / key material from the job’s own services; gitleaks is checksum-pinned and scans a validated hex commit range; git validates commit objects, counts the range, and preflights its merge-aware patches (cat-file/rev-list/log)`,
     },
   ],
   [
