@@ -316,7 +316,20 @@ export const STEP_INVENTORY = Object.freeze({
   'Backup restore SQL on a disposable database': postgresGuard(
     'pnpm run test:backup-restore-drill-pg',
   ),
-  'Economic coverage gate': coverageGate('economic'),
+  'Economic coverage gate': {
+    ...coverageGate('economic'),
+    run: withKafka('tests', 'node scripts/economic-coverage.mjs shard'),
+    env: {
+      ...KAFKA_TESTS,
+      ...databases('ECONOMIC'),
+      ECONOMIC_COVERAGE_SHARD: '${{ matrix.shard }}',
+    },
+  },
+  'Economic merged coverage gate': {
+    run: ['node scripts/economic-coverage.mjs merge'],
+    env: {},
+    timeout: 2,
+  },
   'Marketplace coverage gate': coverageGate('marketplace', {}, 20),
   'Document coverage gate': coverageGate('document', { ...BUCKET, ...SCANNER }),
   'Supplier coverage gate': coverageGate('supplier'),
@@ -434,6 +447,8 @@ export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-security': 8,
   'integration-coverage-critical': 8,
   'integration-coverage': 8,
+  'integration-economic-coverage': 8,
+  'integration-economic-coverage-merge': 4,
   'integration-backup-drill': 3,
   'migration-reversibility-chain': 4,
   'migration-guards': 7,
@@ -599,6 +614,7 @@ export function checkIntegrationSplit(workflow, root = ROOT) {
   const problems = [
     ...integrationPartitionProblems(INTEGRATION_PARTITIONS, root),
     ...integrationPartitionStepProblems(workflow),
+    ...economicCoverageProblems(workflow),
   ];
   // Inspect the exact plan the executable runner consumes, not only ownership.
   const effective = {};
@@ -653,6 +669,8 @@ export function checkIntegrationSplit(workflow, root = ROOT) {
   }
   const jobLevel = (id, job) => {
     for (const [key, why] of Object.entries(REFUSED_JOB_KEYS)) {
+      // This matrix's exact topology and artifact wiring are checked separately.
+      if (key === 'strategy' && id === 'integration-economic-coverage') continue;
       if (key === 'if' && id === AGGREGATE_JOB) continue;
       if (key === 'continue-on-error' && job[key] === false) continue;
       if (key in job) problems.push(`${id} sets ${key}: ${why}`);
@@ -784,6 +802,52 @@ export function checkIntegrationSplit(workflow, root = ROOT) {
   for (const [name, where] of seen) {
     if (where.length === 0) problems.push(`no ${SPLIT_PREFIX}* job runs "${name}"`);
     if (where.length > 1) problems.push(`"${name}" runs in more than one job: ${where.join(', ')}`);
+  }
+  return problems;
+}
+
+/** FU-286: only this reviewed matrix may fan out; every report is required. */
+export function economicCoverageProblems(workflow) {
+  const jobs = workflow?.jobs ?? {};
+  const shard = jobs['integration-economic-coverage'];
+  const merge = jobs['integration-economic-coverage-merge'];
+  const problems = [];
+  const same = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+  if (!same(shard?.strategy, { 'fail-fast': false, matrix: { shard: [1, 2, 3] } }))
+    problems.push('economic coverage requires all three isolated matrix legs');
+  const upload = shard?.steps?.filter((s) => s.name === 'Upload economic coverage shard');
+  if (
+    upload?.length !== 1 ||
+    !same(upload[0], {
+      name: 'Upload economic coverage shard',
+      uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+      with: {
+        name: 'economic-coverage-${{ matrix.shard }}',
+        path: '.economic-coverage',
+        'include-hidden-files': true,
+        'if-no-files-found': 'error',
+        'retention-days': 7,
+      },
+    })
+  )
+    problems.push('economic coverage must upload every complete shard report');
+  const downloads = merge?.steps?.filter((s) => s.uses?.startsWith('actions/download-artifact@'));
+  if (
+    downloads?.length !== 1 ||
+    !same(downloads[0], {
+      uses: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
+      with: { pattern: 'economic-coverage-*', path: '.economic-coverage', 'merge-multiple': true },
+    })
+  )
+    problems.push("economic coverage merge must download this run's shard reports");
+  if (!same(merge?.needs, [QUALITY_GATE_JOB, 'integration-economic-coverage']))
+    problems.push('economic coverage merge must need the complete matrix');
+  for (const [id, name] of [
+    ['integration-economic-coverage', 'Economic coverage gate'],
+    ['integration-economic-coverage-merge', 'Economic merged coverage gate'],
+  ]) {
+    if (jobs[id]?.steps?.filter((s) => s.name === name).length !== 1)
+      problems.push(`${id} must execute ${name}`);
   }
   return problems;
 }
@@ -1029,7 +1093,12 @@ function testStepProblems(label, step, declared, jobMinutes) {
       problems.push(`${label} lost ${key} from its env`);
       continue;
     }
-    const unresolved = unresolvedProblem(env[key]);
+    const unresolved =
+      key === 'ECONOMIC_COVERAGE_SHARD' &&
+      env[key] === '${{ matrix.shard }}' &&
+      declared.env[key] === env[key]
+        ? null
+        : unresolvedProblem(env[key]);
     if (unresolved) problems.push(`${label} sets ${key} ${unresolved}`);
     else if (value !== ANY && String(env[key]) !== value) {
       problems.push(`${label} must set ${key}: ${value}, not ${env[key]}`);
