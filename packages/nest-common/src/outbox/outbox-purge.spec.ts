@@ -508,14 +508,16 @@ describe('purgePublishedSql', () => {
   /** A transaction runner over a fake client that records every statement. */
   function fakeTx(acquired: boolean, deleted = 0) {
     const statements: string[] = [];
+    const parameters: unknown[][] = [];
     let bounds = { timeoutMs: 0, maxWaitMs: 0 };
     const client: OutboxSqlClient = {
       async $queryRawUnsafe<T>(query: string): Promise<T> {
         statements.push(query);
         return [{ acquired }] as T;
       },
-      async $executeRawUnsafe(query: string): Promise<number> {
+      async $executeRawUnsafe(query: string, ...values: unknown[]): Promise<number> {
         statements.push(query);
+        parameters.push(values);
         return query.includes('DELETE') ? deleted : 0;
       },
     };
@@ -523,7 +525,7 @@ describe('purgePublishedSql', () => {
       bounds = given;
       return fn(client);
     };
-    return { run, statements, bounds: () => bounds };
+    return { run, statements, parameters, bounds: () => bounds };
   }
 
   const options = {
@@ -540,24 +542,37 @@ describe('purgePublishedSql', () => {
 
     expect(batch).toEqual({ deleted: 42, busy: false });
     const [timeout, lock, del] = tx.statements.map(flat);
-    expect(timeout).toBe('SET LOCAL statement_timeout = 5000');
+    expect(timeout).toBe("SELECT pg_catalog.set_config('statement_timeout', $1, true)");
+    expect(tx.parameters).toEqual([['5000ms'], [604_800, 1000]]);
     expect(lock).toContain('pg_try_advisory_xact_lock');
     expect(lock).toContain('current_schema()');
     expect(del).toContain('published_at IS NOT NULL');
     const clock = OUTBOX_NOW.replace(/\s+/g, ' ');
-    expect(del).toContain(`published_at < ${clock} - make_interval(secs => 604800)`);
-    expect(del).toContain(`created_at < ${clock} - make_interval(secs => 604800)`);
+    expect(del).toContain(`published_at < ${clock} - make_interval(secs => $1::double precision)`);
+    expect(del).toContain(`created_at < ${clock} - make_interval(secs => $1::double precision)`);
     expect(del).toContain(`last_error NOT LIKE '${MANUALLY_SKIPPED_PREFIX}%'`);
-    expect(del).toContain('LIMIT 1000 FOR UPDATE SKIP LOCKED');
+    expect(del).toContain('LIMIT $2::bigint FOR UPDATE SKIP LOCKED');
     // Re-checked on the locked row, not only in the selection.
     expect(del).toMatch(
       /WHERE o\.id = doomed\.id AND o\.published_at IS NOT NULL AND o\.claim_token IS NULL/,
     );
     // The database clock decides, never the caller's.
-    expect(del).not.toMatch(/\$\d/);
+    expect(del).not.toMatch(/604800|LIMIT 1000/);
     // The transaction outlives the statement, so statement_timeout is what
     // applies; the wait for a connection is its own, separate bound.
     expect(tx.bounds()).toEqual({ timeoutMs: 10_000, maxWaitMs: 2000 });
+  });
+
+  it.each([
+    { retentionSeconds: 17, limit: 3 },
+    { retentionSeconds: Number.MAX_SAFE_INTEGER, limit: Number.MAX_SAFE_INTEGER },
+  ])('binds validated runtime options without narrowing their range: %j', async (values) => {
+    const tx = fakeTx(true, 0);
+    const control = fakeTx(true, 0);
+    await purgePublishedSql(tx.run, { ...options, ...values });
+    await purgePublishedSql(control.run, options);
+    expect(tx.statements).toEqual(control.statements);
+    expect(tx.parameters[1]).toEqual([values.retentionSeconds, values.limit]);
   });
 
   it('reports `busy` and deletes nothing when another session holds the lock', async () => {
