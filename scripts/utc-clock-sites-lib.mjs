@@ -52,7 +52,7 @@
 // LIMITS. This reads clocks, not types. It cannot see an instant reaching a `timestamp(3)`
 // column with no clock in the statement (a timestamptz column copied across, a
 // `$n::timestamptz` parameter), a pinned clock compared with or added to a timestamptz operand,
-// a pinned constant spliced into another literal (it is read where it is written), a CASE or
+// a CASE or
 // COALESCE sibling's type (refused for now, FU-226 part B), a column spliced with `${column}` on a named table,
 // `AT TIME ZONE 'UTC'` wrongly written into a timestamptz column, one-shot DML of a migration
 // (already applied; not live), or SQL outside production source and migrations (seeds,
@@ -72,6 +72,7 @@ import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { productionFiles, readSchemas, sqlLiterals } from './eligibility-clock-derive.mjs';
+import { sqlSinkTexts } from './utc-clock-sinks.mjs';
 import { lex as lexSql, stripComments } from './eligibility-clock-sql.mjs';
 
 const CALLS = new Set(['now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp']);
@@ -1132,7 +1133,8 @@ const KEEPS_NAMES = new Set(
   ),
 );
 const keepsNames = (tokens, k) => KEEPS_NAMES.has(nameOf(tokens[k])) || isOp(tokens[k + 1], '.');
-const spliced = (t) => t?.type === 'placeholder' || t?.type === 'param';
+const spliced = (t) => t?.type === 'placeholder' || t?.type === 'param' ||
+  (['quoted', 'string'].includes(t?.type) && t.value.includes('\uE000'));
 
 /**
  * Whether the SET or RESET at tokens[i] may move names, read by PostgreSQL's grammar (PR #979 r2
@@ -1866,6 +1868,11 @@ export function utcClockProblems(repository) {
     (d) => `schema/migration disagreement: ${d}`,
   );
   const reviewedUsed = new Set();
+  const sinks = new Map();
+  for (const sink of sqlSinkTexts(repository)) {
+    const path = sink.node.getSourceFile().fileName;
+    sinks.set(path, [...(sinks.get(path) ?? []), sink]);
+  }
   const allTables = new Map();
   for (const { tables } of perService.values()) {
     for (const [table, columns] of tables) {
@@ -1883,8 +1890,14 @@ export function utcClockProblems(repository) {
     const tables = service ? scoped : allTables;
     const source = readFileSync(path, 'utf8');
     const ast = ts.createSourceFile(local, source, ts.ScriptTarget.Latest, true);
-    for (const literal of sqlLiterals(ast)) {
-      if (isErrorMessage(literal.node)) continue;
+    for (const literal of [...sqlLiterals(ast), ...(sinks.get(path) ?? [])]) {
+      if (!literal.sink && isErrorMessage(literal.node)) continue;
+      if (literal.text === null) {
+        const location = literal.node.getSourceFile();
+        const line = location.getLineAndCharacterOfPosition(literal.node.getStart()).line + 1;
+        problems.push(`${local}:${line}: R0 unresolved SQL text passed to ${literal.sink}`);
+        continue;
+      }
       const found = problemsIn(literal.text, tables);
       if (found.length === 0) continue;
       // The column types its review assumed hold in every service, or the review is void.
