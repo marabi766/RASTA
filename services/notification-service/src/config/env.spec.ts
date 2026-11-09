@@ -283,3 +283,34 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
     );
   });
 });
+
+// FU-304: an explicitly empty value must not silently replace the default with zero.
+describe('strict whole-number optional-zero settings', () => {
+  const name = 'NOTIFICATION_RECIPIENT_CACHE_TTL_SECONDS';
+  const loadSetting = (value?: string) => loadNotificationEnv({ ...REQUIRED, [name]: value })[name];
+
+  it('preserves the unset default and both inclusive bounds', () => {
+    expect(loadSetting()).toBe(60);
+    expect(loadSetting('0')).toBe(0);
+    expect(loadSetting('3600')).toBe(3600);
+  });
+
+  it.each([
+    '',
+    ' ',
+    '\t',
+    ' 60 ',
+    '+60',
+    '-1',
+    '60.0',
+    '60e0',
+    '0x3c',
+    '۰',
+    '٠',
+    '60\n',
+    '3601',
+    '0'.repeat(4) + '60',
+  ])('refuses malformed or out-of-range input %j', (value) => {
+    expect(() => loadSetting(value)).toThrow(name);
+  });
+});
