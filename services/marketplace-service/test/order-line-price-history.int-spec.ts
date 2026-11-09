@@ -18,8 +18,9 @@ import {
 /**
  * D-156 in the database: an order line's price is one its offer published at the
  * version the line names (fk_order_line_price_history); an order's lines are written
- * by the transaction that places it (fk_order_line_placement) and never change; its
- * parties, total and currency never change; no history row ever changes (#1010 r2).
+ * by the transaction that places it, which seals it at its end (lines_sealed, data that a
+ * restore keeps, #1010 r4), and never change; its parties, total, currency and seal never
+ * change; no history row ever changes (#1010 r2).
  *
  * Every refusal is asserted with raw SQL, not through the service — the service
  * is not the only writer a database has. Schema-changing steps (rolling the
@@ -150,12 +151,26 @@ describe('an order line agrees to a published offer price, in the database (D-15
         tx,
         CHAIN.flatMap((name) => up(name)),
       );
-      return tx.$queryRaw<{ convalidated: boolean; confdeltype: string; confupdtype: string }[]>`
-        SELECT convalidated, confdeltype, confupdtype FROM pg_constraint
-         WHERE conname = 'fk_order_line_price_history'`;
+      return {
+        key: await tx.$queryRaw<
+          { convalidated: boolean; confdeltype: string; confupdtype: string }[]
+        >`
+          SELECT convalidated, confdeltype, confupdtype FROM pg_constraint
+           WHERE conname = 'fk_order_line_price_history'`,
+        // Every order already there is placed: sealed; a new one starts open.
+        seals: await tx.$queryRaw<{ sealed: boolean; fresh: string }[]>`
+          SELECT bool_and(lines_sealed) AS sealed,
+                 (SELECT column_default FROM information_schema.columns
+                   WHERE table_name = 'order' AND column_name = 'lines_sealed'
+                     AND table_schema = current_schema()) AS fresh
+            FROM "order"`,
+        legacy: String(await insertLine(tx, orderAtV1).catch((error: unknown) => error)),
+      };
     });
     // Validated over the rows, RESTRICT both ways ('r').
-    expect(after).toEqual([{ convalidated: true, confdeltype: 'r', confupdtype: 'r' }]);
+    expect(after.key).toEqual([{ convalidated: true, confdeltype: 'r', confupdtype: 'r' }]);
+    expect(after.seals).toEqual([{ sealed: true, fresh: 'false' }]);
+    expect(after.legacy).toMatch(/ck_order_lines_sealed/);
   });
 
   it.each([
@@ -194,21 +209,21 @@ describe('an order line agrees to a published offer price, in the database (D-15
   // ---- the key, by raw SQL -----------------------------------------------------------
 
   /**
-   * In `tx`: an order placed by hand, its header copied from orderAtV1 (`stamp` forged on the
-   * INSERT). Resolves with its id.
+   * In `tx`: an order placed by hand, its header copied from orderAtV1 (`sealed` as the INSERT
+   * writes it). Resolves with its id.
    */
-  const placeByHand = async (tx: PrismaClient, stamp: string | null = null): Promise<string> => {
+  const placeByHand = async (tx: PrismaClient, sealed = false): Promise<string> => {
     const order = id('ORD');
     await tx.$executeRaw`
       INSERT INTO "order" (id, organization_id, supplier_organization_id, placed_by,
                            total_amount_minor, currency, idempotency_key, correlation_id,
-                           created_by, updated_at, placement_xact)
+                           created_by, updated_at, lines_sealed)
       SELECT ${order}, organization_id, supplier_organization_id, placed_by, 40000, currency,
-             ${key('ph-hand')}, correlation_id, created_by, now(), ${stamp}::xid8
+             ${key('ph-hand')}, correlation_id, created_by, now(), ${sealed}
         FROM "order" WHERE id = ${orderAtV1}`;
     return order;
   };
-  /** In `tx`: a hand-written line of the offer nobody ordered, on order `order`. */
+  /** In `tx`: a hand-written line of `offer` (by default the one nobody ordered), on `order`. */
   const insertLine = (
     tx: PrismaClient,
     order: string,
@@ -216,6 +231,7 @@ describe('an order line agrees to a published offer price, in the database (D-15
     price = 40_000n,
     currency = 'IRR',
     quantity = 1,
+    offer = unordered,
   ) =>
     tx.$executeRaw`
       INSERT INTO order_line (id, organization_id, order_id, offer_id, product_id,
@@ -223,7 +239,7 @@ describe('an order line agrees to a published offer price, in the database (D-15
                               offer_version, product_name)
       SELECT ${id('OLN')}, o.organization_id, o.id, f.id, f.product_id,
              ${price}, ${quantity}, ${price} * ${quantity}, ${currency}, ${version}, 'hand-written'
-        FROM "order" o, offer f WHERE o.id = ${order} AND f.id = ${unordered}`;
+        FROM "order" o, offer f WHERE o.id = ${order} AND f.id = ${offer}`;
 
   it.each([
     ['a price the offer never published', 1, 40_001n, 'IRR'],
@@ -238,52 +254,113 @@ describe('an order line agrees to a published offer price, in the database (D-15
     });
   });
 
-  it('accepts a line its order’s own transaction writes, whatever stamp the writer sent', async () => {
-    const stamps = await rolledBack(async (tx) => {
-      const order = await placeByHand(tx, '1');
+  it('lets the placing transaction write its lines, and seals the order at its end', async () => {
+    const seen = await rolledBack(async (tx) => {
+      const order = await placeByHand(tx);
       expect(await insertLine(tx, order)).toBe(1);
-      return tx.$queryRaw<{ placed: boolean; lined: boolean }[]>`
-        SELECT o.placement_xact = pg_current_xact_id() AS placed,
-               l.placement_xact = o.placement_xact AS lined
-          FROM "order" o JOIN order_line l ON l.order_id = o.id WHERE o.id = ${order}`;
+      const sealed = () =>
+        tx.$queryRaw<
+          { lines_sealed: boolean }[]
+        >`SELECT lines_sealed FROM "order" WHERE id = ${order}`;
+      const open = await sealed();
+      // The end of the transaction, now: the deferred seal fires.
+      await tx.$executeRawUnsafe(`SET CONSTRAINTS "tg_order_lines_seal" IMMEDIATE`);
+      const closed = await sealed();
+      const late = String(await insertLine(tx, order).catch((error: unknown) => error));
+      return { open, closed, late };
     });
-    expect(stamps).toEqual([{ placed: true, lined: true }]);
+    expect(seen).toMatchObject({
+      open: [{ lines_sealed: false }],
+      closed: [{ lines_sealed: true }],
+    });
+    expect(seen.late).toMatch(/ck_order_lines_sealed/);
+    const placed = await runUnscoped('the suite reads a placed order back', () =>
+      prisma.client.order.findUniqueOrThrow({ where: { id: orderAtV1 } }),
+    );
+    expect(placed.linesSealed).toBe(true);
   });
 
-  // ---- an order placed is sealed (#1010 r2) -------------------------------------------
+  // ---- an order placed is sealed (#1010 r2, r4) ---------------------------------------
 
   it.each([
     ['as the runtime role', () => prisma.client],
     ['even as the owner', () => owner],
   ])('refuses a line appended to a placed order, %s', async (_l, client) => {
     await expect(
-      runUnscoped('the suite appends the line the key exists to refuse', () =>
+      runUnscoped('the suite appends the line the seal exists to refuse', () =>
         insertLine(client() as unknown as PrismaClient, orderAtV1, 1, 40_000n, 'IRR', 20),
       ),
-    ).rejects.toThrow(/fk_order_line_placement/);
+    ).rejects.toThrow(/ck_order_lines_sealed/);
   });
 
-  it('refuses a line appended after forging the order’s stamp, or to a pre-D-156 order', async () => {
-    let forged: unknown;
-    await rolledBack(async (tx) => {
-      forged =
-        await tx.$executeRaw`UPDATE "order" SET placement_xact = pg_current_xact_id() WHERE id = ${orderAtV1}`.catch(
-          (error: unknown) => error,
-        );
+  /**
+   * Committed by the owner as a pg_restore writes rows, before any trigger exists: an order
+   * stored with `sealed`, and one line. Resolves with its id.
+   */
+  const restored = (sealed: boolean) =>
+    owner.$transaction(async (raw) => {
+      const tx = raw as unknown as PrismaClient;
+      await tx.$executeRawUnsafe(`ALTER TABLE "order" DISABLE TRIGGER "tg_order_lines_seal"`);
+      await tx.$executeRawUnsafe(
+        `ALTER TABLE order_line DISABLE TRIGGER "tg_order_line_admission"`,
+      );
+      const order = await placeByHand(tx, sealed);
+      await insertLine(tx, order, 1, 100_000n, 'IRR', 1, offerId);
+      await tx.$executeRawUnsafe(`ALTER TABLE order_line ENABLE TRIGGER "tg_order_line_admission"`);
+      await tx.$executeRawUnsafe(`ALTER TABLE "order" ENABLE TRIGGER "tg_order_lines_seal"`);
+      return order;
     });
-    expect(String(forged)).toMatch(/ck_order_financial_immutable/);
-    let legacy: unknown;
+
+  it('refuses a line appended to a restored order, whatever transaction id the appender has', async () => {
+    const order = await restored(true);
+    await expect(
+      runUnscoped('the suite appends to a restored order', () =>
+        insertLine(prisma.client as unknown as PrismaClient, order, 1, 40_000n, 'IRR', 20),
+      ),
+    ).rejects.toThrow(/ck_order_lines_sealed/);
+    // Even the transaction that wrote the restored rows: no counter is consulted.
+    let same: unknown;
     await rolledBack(async (tx) => {
-      // An order written before the stamp existed: its stamp is NULL, and it still changes status.
-      await tx.$executeRawUnsafe(`ALTER TABLE "order" DISABLE TRIGGER "tg_order_placement_stamp"`);
-      const order = await placeByHand(tx);
-      await tx.$executeRawUnsafe(`ALTER TABLE "order" ENABLE TRIGGER "tg_order_placement_stamp"`);
-      expect(
-        await tx.$executeRaw`UPDATE "order" SET status = 'CANCELLING' WHERE id = ${order}`,
-      ).toBe(1);
-      legacy = await insertLine(tx, order).catch((error: unknown) => error);
+      await tx.$executeRawUnsafe(
+        `ALTER TABLE order_line DISABLE TRIGGER "tg_order_line_admission"`,
+      );
+      const copy = await placeByHand(tx, true);
+      await insertLine(tx, copy);
+      await tx.$executeRawUnsafe(`ALTER TABLE order_line ENABLE TRIGGER "tg_order_line_admission"`);
+      same = await insertLine(tx, copy).catch((error: unknown) => error);
     });
-    expect(String(legacy)).toMatch(/fk_order_line_placement/);
+    expect(String(same)).toMatch(/ck_order_lines_sealed/);
+  });
+
+  it('serializes a seal and an append: the append waits for the seal, then is refused', async () => {
+    const order = await restored(false);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const sealing = new Promise<void>((resolve) => (locked = resolve));
+    const seal = owner.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`UPDATE "order" SET lines_sealed = true WHERE id = ${order}`;
+        locked();
+        await held;
+      },
+      { timeout: 30_000 },
+    );
+    await sealing;
+    const append = runUnscoped('the suite appends while the seal is in flight', () =>
+      insertLine(prisma.client as unknown as PrismaClient, order),
+    );
+    const early = await Promise.race([
+      append.then(
+        () => 'admitted',
+        () => 'refused',
+      ),
+      new Promise((resolve) => setTimeout(() => resolve('waiting'), 1_500)),
+    ]);
+    release();
+    await seal;
+    expect(early).toBe('waiting');
+    await expect(append).rejects.toThrow(/ck_order_lines_sealed/);
   });
 
   it.each([
@@ -292,7 +369,7 @@ describe('an order line agrees to a published offer price, in the database (D-15
     ['supplier_organization_id', `supplier_organization_id = 'ORG-ELSEWHERE'`],
     ['organization_id', `organization_id = 'ORG-ELSEWHERE'`],
     ['id', `id = 'ORD_ELSEWHERE'`],
-    ['placement_xact', 'placement_xact = NULL'],
+    ['lines_sealed (unsealing)', 'lines_sealed = false'],
   ])('refuses an UPDATE of an order’s %s, as the runtime role and the owner', async (_c, set) => {
     const sql = `UPDATE "order" SET ${set} WHERE id = $1`;
     await expect(
@@ -344,7 +421,7 @@ describe('an order line agrees to a published offer price, in the database (D-15
       runUnscoped('the suite appends to the placed order', () =>
         insertLine(prisma.client as unknown as PrismaClient, placed.id, 1, 40_000n, 'IRR', 20),
       ),
-    ).rejects.toThrow(/fk_order_line_placement/);
+    ).rejects.toThrow(/ck_order_lines_sealed/);
     // 3. The header the obligation is created from.
     await expect(
       asRuntimeRaw(`UPDATE "order" SET total_amount_minor = 1 WHERE id = $1`, placed.id),
@@ -398,7 +475,8 @@ describe('an order line agrees to a published offer price, in the database (D-15
         lineAtV1,
       ),
     ).rejects.toThrow(/ck_order_line_price_immutable: .*DELETE refused/);
-    // The id is still taken, so a re-insert is an upsert, and that is an UPDATE.
+    // The id is still taken, so a re-insert is an upsert; its order is sealed, so the INSERT is
+    // refused before the conflict would make it an UPDATE (which the row guard refuses).
     await expect(
       asRuntime(
         `INSERT INTO order_line SELECT * FROM order_line WHERE id = $1
@@ -406,7 +484,7 @@ describe('an order line agrees to a published offer price, in the database (D-15
                                           line_total_minor = EXCLUDED.unit_price_minor * 20`,
         lineAtV1,
       ),
-    ).rejects.toThrow(/ck_order_line_price_immutable: .*UPDATE refused/);
+    ).rejects.toThrow(/ck_order_lines_sealed/);
     const line = await runUnscoped('the suite reads the line back', () =>
       prisma.client.orderLine.findUniqueOrThrow({ where: { id: lineAtV1 } }),
     );
@@ -503,7 +581,6 @@ describe('an order line agrees to a published offer price, in the database (D-15
     ],
     ['product_id', `product_id = 'PRD_ELSEWHERE'`],
     ['product_name', `product_name = 'renamed'`],
-    ['placement_xact', 'placement_xact = NULL'],
     ['nothing (a no-op)', 'quantity = quantity'],
   ])('refuses an UPDATE of a line’s %s, as the runtime role and the owner', async (_c, set) => {
     // The v2 line: `offer_version = 1` with v1's price absent would otherwise be

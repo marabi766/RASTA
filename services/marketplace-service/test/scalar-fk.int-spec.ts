@@ -17,7 +17,7 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
   let line: Prisma.OrderLineUncheckedCreateInput;
   /**
    * The scalar-FK specimen. Not an order line: those are written only by their order's placement
-   * and never updated (D-156, tg_order_line_price_guard, fk_order_line_placement).
+   * and never updated (D-156, tg_order_line_price_guard, tg_order_line_admission).
    */
   let child: Prisma.FulfillmentUncheckedCreateInput;
   const asBuyer = <T>(fn: () => Promise<T>, organizationId = org.buyer): Promise<T> =>

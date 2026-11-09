@@ -256,11 +256,10 @@ model Order {
   totalAmountMinor BigInt @map("total_amount_minor")
   currency         String @default("IRR")
 
-  /// The id of the transaction that placed the order, stamped by
-  /// tg_order_placement_stamp whatever the writer sent; null before D-156.
-  /// Only that transaction can write the order's lines (fk_order_line_placement
-  /// onto uq_order_placement).
-  placementXact Unsupported("xid8")? @map("placement_xact")
+  /// Placed: no further line (D-156, #1010 r4). Set at the end of the inserting
+  /// transaction (tg_order_lines_seal), never unset (tg_order_financial_guard);
+  /// tg_order_line_admission refuses a line of a sealed order.
+  linesSealed Boolean @default(false) @map("lines_sealed")
 
   /// The economic obligation this order created.
   ///
@@ -354,10 +353,6 @@ model OrderLine {
   /// column, and is never deleted, not even by its order's cascade
   /// (tg_order_line_price_guard).
   priceHistory OfferPriceHistory @relation(fields: [offerId, offerVersion, unitPriceMinor, currency], references: [offerId, version, unitPriceMinor, currency], map: "fk_order_line_price_history", onUpdate: Restrict, onDelete: Restrict)
-
-  /// Stamped like `Order.placementXact`; fk_order_line_placement makes it the
-  /// order's, so a line is written only by the transaction placing its order.
-  placementXact Unsupported("xid8")? @map("placement_xact")
 
   /// A snapshot for display, so a completed order still reads correctly after
   /// the product is renamed. Never used for an authorization or price
