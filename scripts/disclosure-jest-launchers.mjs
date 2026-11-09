@@ -214,9 +214,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        '0bb9440a4ec8bdd191707c8853a32315d0ba2c8cf4d5bf468830c4388d49d14a',
+        '94f5e4b161bf3facf0bca3daf9cb4ff433d57010b24686d2e746df697cf3c609',
       'scripts/ci-integration-split-lib.mjs':
-        '04916b838e43eaff29e95e14960b0e95f058b7401c9e68f3c1d3211c844f495c',
+        'a90c3be97d1a6cad0ecf94c9ee11de1cb9f7e5a9e470671f8a202ff070ea9026',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
