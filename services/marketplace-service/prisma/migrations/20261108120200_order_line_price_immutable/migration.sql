@@ -5,8 +5,9 @@
 -- re-keying, no move to another order or tenant. Both tables carry placement_xact, which a
 -- trigger stamps with the inserting transaction's id (pg_current_xact_id(): 64 bits, never
 -- reused, the top-level id inside a savepoint too), whatever the writer sent.
--- fk_order_line_placement ties a line's (order_id, placement_xact) to its order's. A line that
--- a later transaction appends to a placed order carries that later id, and no order has it.
+-- fk_order_line_placement ties a line's (organization_id, order_id, placement_xact) to its
+-- order's. A line that a later transaction appends to a placed order carries that later id,
+-- and no order has it.
 -- Lines and orders written before this migration keep a NULL stamp. The key does not check
 -- them, and those lines cannot change either.
 -- order: the columns that say who owes whom how much never change after INSERT: id,
@@ -31,9 +32,10 @@ SET LOCAL lock_timeout = '3s';
 
 ALTER TABLE "order" ADD COLUMN "placement_xact" xid8;
 ALTER TABLE "order_line" ADD COLUMN "placement_xact" xid8;
-CREATE UNIQUE INDEX "uq_order_placement" ON "order"("id", "placement_xact");
+CREATE UNIQUE INDEX "uq_order_placement" ON "order"("organization_id", "id", "placement_xact");
 ALTER TABLE "order_line" ADD CONSTRAINT "fk_order_line_placement"
-  FOREIGN KEY ("order_id", "placement_xact") REFERENCES "order"("id", "placement_xact")
+  FOREIGN KEY ("organization_id", "order_id", "placement_xact")
+  REFERENCES "order"("organization_id", "id", "placement_xact")
   ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 CREATE FUNCTION "order_placement_stamp"() RETURNS trigger
