@@ -774,6 +774,15 @@ function transportVerdict(error: unknown): 'upstream' | 'local' | 'unproven' {
   return UPSTREAM_TRANSPORT_CODE.test(code) ? 'upstream' : 'unproven';
 }
 
+const IDENTITY_REFUSAL_KEYS: ReadonlySet<string> = new Set([
+  'code',
+  'message',
+  'correlationId',
+  'traceId',
+  'timestamp',
+  'path',
+]);
+
 /**
  * The platform error envelope (`@rasta/contracts`) in a body, rebuilt from its
  * named fields only; null when the body is not one.
@@ -784,15 +793,6 @@ function transportVerdict(error: unknown): 'upstream' | 'local' | 'unproven' {
  * the path alone and a route-not-found `message` is the request's own
  * (see {@link relayedMessage}).
  */
-const IDENTITY_REFUSAL_KEYS: ReadonlySet<string> = new Set([
-  'code',
-  'message',
-  'correlationId',
-  'traceId',
-  'timestamp',
-  'path',
-]);
-
 function platformErrorEnvelope(
   status: number,
   text: string,

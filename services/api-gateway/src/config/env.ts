@@ -3,7 +3,6 @@ import {
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
-  DEFAULT_SHUTDOWN_TIMEOUT_MS,
   wholeNumberEnv,
   fixedEnvMessages,
   redisEnvSchema,
@@ -62,13 +61,6 @@ export const gatewayEnvSchema = baseEnvSchema
   .merge(authEnvSchema)
   .merge(serviceUrlEnvSchema)
   .extend({
-    // Strengthen inherited settings at this startup boundary too (FU-276).
-    PORT: wholeNumberEnv(1, 65535),
-    SHUTDOWN_TIMEOUT_MS: wholeNumberEnv(1000, 120_000).prefault(
-      String(DEFAULT_SHUTDOWN_TIMEOUT_MS),
-    ),
-    INTERNAL_TOKEN_TTL_SECONDS: wholeNumberEnv(30, 900).prefault('300'),
-
     GATEWAY_CORS_ORIGINS: z.string().prefault(''),
 
     /** Default per-user allowance. Individual routes may tighten this. */

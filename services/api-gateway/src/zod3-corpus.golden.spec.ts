@@ -14,7 +14,7 @@ import { gatewayEnvSchema } from './config/env';
  * `5c88ae21` (zod 3.25.76), where `legacyParse` does not exist and
  * `outcome` reads zod 3's own issues (`~/worker2/session/t109/scripts/record.sh`);
  * FU-276 now expects type refusals for programmatic numeric inputs; the sibling
- * case uses decimal strings so its boolean and cross-field checks remain reachable.
+ * case uses out-of-range digit strings so numeric and cross-field refusals coexist (FU-287).
  */
 
 type Issue = { path: readonly PropertyKey[]; code: string; message: string };
@@ -30,7 +30,7 @@ function outcome(schema: { safeParse(input: unknown): unknown }, input: unknown)
   return issues.map((issue) => [issue.path.map(String).join('.'), issue.code, issue.message]);
 }
 
-/** Expected diagnostics after the deliberate FU-276 startup-parser tightening. */
+/** Deliberate FU-276/FU-287 diagnostics; numeric/refinement trio checked with zod/v3. */
 const EXPECTED: Record<string, unknown> = {
   'gatewayEnvSchema m0 PORT=0.5': [
     ['PORT', 'invalid_type', 'Expected string, received number'],
@@ -44,6 +44,12 @@ const EXPECTED: Record<string, unknown> = {
     [
       ['OTEL_TRACES_ENABLED', 'custom', 'Expected a boolean such as "true" or "false"'],
       ['REDIS_URL', 'custom', 'Redis URL must be a valid URL'],
+      ['GATEWAY_UPSTREAM_TIMEOUT_MS', 'too_small', 'Number must be greater than or equal to 100'],
+      [
+        'GATEWAY_TENDER_OPEN_TIMEOUT_MS',
+        'too_small',
+        'Number must be greater than or equal to 5000',
+      ],
       ['GATEWAY_RATE_LIMIT_FAIL_OPEN', 'custom', 'Expected a boolean such as "true" or "false"'],
       [
         'GATEWAY_TRUSTED_PROXIES',
@@ -164,8 +170,8 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
       GATEWAY_RATE_LIMIT_WINDOW_MS: '1000',
       GATEWAY_TENANT_RATE_LIMIT_MAX: '1',
       GATEWAY_ANON_RATE_LIMIT_MAX: '1',
-      GATEWAY_UPSTREAM_TIMEOUT_MS: '10000',
-      GATEWAY_TENDER_OPEN_TIMEOUT_MS: '5000',
+      GATEWAY_UPSTREAM_TIMEOUT_MS: '99',
+      GATEWAY_TENDER_OPEN_TIMEOUT_MS: '98',
       GATEWAY_CIRCUIT_FAILURE_THRESHOLD: '1',
       GATEWAY_CIRCUIT_RESET_MS: '1000',
       GATEWAY_RATE_LIMIT_FAIL_OPEN: 'Sample',
@@ -174,7 +180,7 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
   ],
 ];
 
-describe('zod 3 diagnostics: an integer refusal with its enclosing refinements (PR #444 r3)', () => {
+describe('gateway diagnostics: strict numeric refusals with enclosing refinements (FU-287)', () => {
   it.each(CASES)('%s', (name, schema, input) => {
     const observed = outcome(schema, input);
     expect(observed).toEqual(EXPECTED[name]);

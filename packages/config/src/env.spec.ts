@@ -1,5 +1,6 @@
 import {
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
   kafkaEnvSchema,
@@ -1072,4 +1073,65 @@ describe('OUTBOX_SHUTDOWN_GRACE_SECONDS against SHUTDOWN_TIMEOUT_MS', () => {
         .SHUTDOWN_TIMEOUT_MS,
     ).toBe(40_000);
   });
+});
+
+// FU-287: source schemas, independent of any service's overrides or cross-field rules.
+describe('shared numeric environment fields', () => {
+  const shape = {
+    ...baseEnvSchema.shape,
+    ...authEnvSchema.shape,
+    ...kafkaEnvSchema.shape,
+    ...outboxPurgeEnvSchema.shape,
+  };
+  const fields = [
+    ['PORT', 1, 65535, undefined],
+    ['SHUTDOWN_TIMEOUT_MS', 1000, 120000, 25000],
+    ['INTERNAL_TOKEN_TTL_SECONDS', 30, 900, 300],
+    ['OUTBOX_POLL_INTERVAL_MS', 50, 2147483647, 500],
+    ['OUTBOX_BATCH_SIZE', 1, 1000, 100],
+    ['OUTBOX_CLAIM_LEASE_SECONDS', 20, 3600, 60],
+    ['OUTBOX_CLAIM_BACKOFF_SECONDS', 1, 3600, 5],
+    ['OUTBOX_CLAIM_BACKOFF_MAX_SECONDS', 1, 86400, 3600],
+    ['OUTBOX_SHUTDOWN_GRACE_SECONDS', 0, 300, 20],
+    ['OUTBOX_PURGE_RETENTION_HOURS', 1, 8760, 168],
+    ['OUTBOX_PURGE_INTERVAL_SECONDS', 10, 86400, 300],
+    ['OUTBOX_PURGE_BATCH_SIZE', 1, 10000, 1000],
+    ['OUTBOX_PURGE_MAX_BATCHES_PER_RUN', 1, 1000, 10],
+    ['OUTBOX_PURGE_STATEMENT_TIMEOUT_MS', 100, 60000, 5000],
+    ['OUTBOX_PURGE_MAX_WAIT_MS', 100, 60000, 2000],
+  ] as const;
+
+  it.each(fields)(
+    '%s keeps defaults/bounds and refuses numeric coercion',
+    (name, min, max, fallback) => {
+      const field = shape[name];
+      const absent = field.safeParse(undefined);
+      if (fallback === undefined) expect(absent.success).toBe(false);
+      else expect(absent).toEqual({ success: true, data: fallback });
+      for (const value of [min, max]) expect(field.parse(String(value))).toBe(value);
+      for (const value of [min - 1, max + 1])
+        expect(field.safeParse(String(value)).success).toBe(false);
+      for (const value of [
+        '',
+        ' ',
+        ' 100',
+        '100 ',
+        '100\n',
+        '+100',
+        '-0',
+        '100.0',
+        '1e2',
+        '0x64',
+        '0b1100100',
+        '0o144',
+        'NaN',
+        'Infinity',
+        '۹۹',
+        '9007199254740992',
+        100,
+        null,
+      ])
+        expect(field.safeParse(value).success).toBe(false);
+    },
+  );
 });

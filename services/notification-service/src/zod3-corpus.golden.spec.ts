@@ -29,10 +29,9 @@ function outcome(schema: { safeParse(input: unknown): unknown }, input: unknown)
   return issues.map((issue) => [issue.path.map(String).join('.'), issue.code, issue.message]);
 }
 
-/** Recorded under zod 3 on main 5c88ae21; never written by a test run. */
+/** Zod 3 records; FU-287 uses digit strings outside PORT bounds after source tightening. */
 const ZOD3: Record<string, unknown> = {
-  'notificationEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=0.5': [
-    ['PORT', 'invalid_type', 'Expected integer, received float'],
+  'notificationEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=0': [
     ['PORT', 'too_small', 'Number must be greater than or equal to 1'],
     ['OTEL_EXPORTER_OTLP_ENDPOINT', 'custom', 'URL must be a valid URL'],
     [
@@ -41,8 +40,7 @@ const ZOD3: Record<string, unknown> = {
       'must be a group in the notification-service. namespace',
     ],
   ],
-  'notificationEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=Infinity': [
-    ['PORT', 'invalid_type', 'Expected integer, received float'],
+  'notificationEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=65536': [
     ['PORT', 'too_big', 'Number must be less than or equal to 65535'],
     ['OTEL_EXPORTER_OTLP_ENDPOINT', 'custom', 'URL must be a valid URL'],
     [
@@ -55,11 +53,11 @@ const ZOD3: Record<string, unknown> = {
 
 const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
   [
-    'notificationEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=0.5',
+    'notificationEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=0',
     notificationEnvSchema,
     {
       SERVICE_NAME: 'Sample',
-      PORT: 0.5,
+      PORT: '0',
       DATABASE_URL: 'postgresql://one:two@localhost:5432/one',
       KAFKA_BROKERS: 'Sample',
       KAFKA_CLIENT_ID: 'ORG-SAMPLE',
@@ -73,11 +71,11 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
     },
   ],
   [
-    'notificationEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=Infinity',
+    'notificationEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=65536',
     notificationEnvSchema,
     {
       SERVICE_NAME: 'Sample',
-      PORT: Number.POSITIVE_INFINITY,
+      PORT: '65536',
       DATABASE_URL: 'postgresql://one:two@localhost:5432/one',
       KAFKA_BROKERS: 'Sample',
       KAFKA_CLIENT_ID: 'ORG-SAMPLE',
@@ -93,6 +91,15 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
 ];
 
 describe('zod 3 diagnostics: an integer refusal with its enclosing refinements (PR #444 r3)', () => {
+  it.each(['0.5', 'Infinity'])('PORT=%s retains strict numeric-format coverage', (PORT) => {
+    const [, schema, input] = CASES[0]!;
+    expect(outcome(schema, { ...(input as Record<string, unknown>), PORT })).toContainEqual([
+      'PORT',
+      'custom',
+      'Expected a whole number written as digits, such as "10"',
+    ]);
+  });
+
   it.each(CASES)('%s', (name, schema, input) => {
     const observed = outcome(schema, input);
     expect(observed).toEqual(ZOD3[name]);
