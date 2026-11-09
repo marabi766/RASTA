@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import childProcess, { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -21,8 +22,10 @@ import { authoredFiles } from './authored-source-inventory.cjs';
 import { parse as parseYaml } from 'yaml';
 
 import {
+  ADVISORY_LOCK_GATES,
   EXPECTED,
   HOLD_UNPROVEN_SINCE_AT_COMMIT,
+  advisoryLockGateScript,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
@@ -1015,6 +1018,68 @@ test('snapshotQuery reads only the named schema and strips its name', () => {
   assert.match(sql, /relname = '_prisma_migrations'/);
 });
 
+/** The gates as the migrations write them: `CREATE FUNCTION name(args)` … `$$body$$`. */
+function gateDefinitions(service) {
+  const text = readFileSync(
+    `services/${service}/prisma/migrations/20261109120000_guards_read_committed/migration.sql`,
+    'utf8',
+  );
+  return [
+    ...text.matchAll(
+      /^CREATE FUNCTION (read_committed_xact_lock\w*)\(([^)]*)\)[\s\S]*?\$\$([\s\S]*?)\$\$ LANGUAGE plpgsql VOLATILE;/gm,
+    ),
+  ].map(([statement, name, args, body]) => ({ statement, name, args, body }));
+}
+
+test('advisoryLockGateScript binds each gate to its signature, attributes and body; nothing else is exempt (FU-268, #1016 r1 F2)', () => {
+  const sql = advisoryLockGateScript('migration_check');
+  // Each reviewed gate is the body the migrations write, in both services that have one.
+  const md5 = (text) => createHash('md5').update(text).digest('hex');
+  for (const service of ['economic-service', 'inventory-service']) {
+    for (const { name, args, body } of gateDefinitions(service)) {
+      const signature = `${name}(${args.replace(/BIGINT/g, 'bigint').replace(/INTEGER/g, 'integer')})`;
+      assert.ok(
+        ADVISORY_LOCK_GATES.some((gate) => gate.signature === signature && gate.md5 === md5(body)),
+        `${service} ${signature}`,
+      );
+    }
+  }
+  for (const { signature, md5: hash } of ADVISORY_LOCK_GATES) {
+    assert.ok(sql.includes(`('${signature}', '${hash}')`), signature);
+  }
+  // By the attributes and body reviewed, in any schema (the deployed `public` holds the same
+  // gate); a name alone or a text in the body is not one, and a gate's name on anything else is
+  // refused.
+  assert.match(
+    sql,
+    /p\.prokind = 'f' AND NOT p\.prosecdef AND NOT p\.proretset AND p\.proconfig IS NULL/,
+  );
+  assert.match(sql, /pg_catalog\.md5\(p\.prosrc\)\) IN \(/);
+  assert.match(
+    sql,
+    /WHEN p\.proname IN \('read_committed_xact_lock', 'read_committed_xact_lock_shared'\)/,
+  );
+  assert.doesNotMatch(sql, /position\(/);
+  // Every schema but the catalogues, every routine's whole definition (a SQL-standard body too),
+  // and every other stored expression.
+  assert.doesNotMatch(sql, /pronamespace = 'migration_check'/);
+  assert.match(sql, /pg_get_functiondef\(p\.oid\)/);
+  for (const what of [
+    'pg_get_ruledef',
+    'pg_attrdef',
+    'pg_get_constraintdef',
+    'pg_policy',
+    'pg_get_triggerdef',
+    'pg_get_indexdef',
+  ]) {
+    assert.ok(sql.includes(what), what);
+  }
+  // What it cannot read is refused: U&"…" names, UESCAPE, and SQL text a routine executes.
+  assert.ok(sql.includes(String.raw`pg_(try_)?advisory_|u&"|\muescape\M|`));
+  assert.ok(sql.includes(String.raw`(routine AND def ~* '\mexecute\M')`));
+  assert.throws(() => advisoryLockGateScript('bad"schema'));
+});
+
 test('the builders refuse identifiers that would have to be quoted into SQL', () => {
   assert.throws(() => snapshotQuery('bad"schema'));
   assert.throws(() => recordSnapshotScript('meta', "x'; DROP TABLE t; --", 'ref'));
@@ -1223,6 +1288,115 @@ test(
     assert.match(result.stderr, /extension citext version=1\.5 schema=\(target\)/);
   },
 );
+
+// The review's probes (#1016 r1 F2), each accepted by the check before this round, and the
+// controls, against PostgreSQL: the three gates as the migration writes them, in `target`.
+const GATE_PROBES = [
+  [
+    'a gate whose READ COMMITTED check is only a comment',
+    'refused',
+    String.raw`
+    CREATE OR REPLACE FUNCTION target.read_committed_xact_lock(lock_key BIGINT) RETURNS VOID AS $$
+    BEGIN
+      -- current_setting('transaction_isolation') 'read committed'
+      PERFORM pg_catalog.pg_advisory_xact_lock(lock_key);
+    END; $$ LANGUAGE plpgsql VOLATILE;`,
+  ],
+  [
+    'a lock spelled U&"pg_\\0061dvisory_xact_lock"',
+    'refused',
+    String.raw`
+    CREATE FUNCTION target.f(lock_key BIGINT) RETURNS VOID AS $$
+    BEGIN PERFORM U&"pg_\0061dvisory_xact_lock"(lock_key); END; $$ LANGUAGE plpgsql;`,
+  ],
+  [
+    'a SQL-standard body (prosqlbody)',
+    'refused',
+    String.raw`
+    CREATE FUNCTION target.f(lock_key BIGINT) RETURNS VOID LANGUAGE sql
+    RETURN pg_catalog.pg_advisory_xact_lock(lock_key);`,
+  ],
+  [
+    'a lock in another schema',
+    'refused',
+    String.raw`
+    CREATE FUNCTION elsewhere.f(lock_key BIGINT) RETURNS VOID AS $$
+    BEGIN PERFORM pg_advisory_xact_lock(lock_key); END; $$ LANGUAGE plpgsql;`,
+  ],
+  [
+    "a function with a gate's name that takes no lock, in another schema",
+    'refused',
+    String.raw`
+    CREATE FUNCTION elsewhere.read_committed_xact_lock(lock_key BIGINT) RETURNS VOID AS $$
+    BEGIN END; $$ LANGUAGE plpgsql VOLATILE;`,
+  ],
+  [
+    'a gate with another attribute (SECURITY DEFINER)',
+    'refused',
+    'ALTER FUNCTION target.read_committed_xact_lock(BIGINT) SECURITY DEFINER;',
+  ],
+  [
+    'SQL text a routine executes',
+    'refused',
+    String.raw`
+    CREATE FUNCTION target.f() RETURNS VOID AS $$
+    BEGIN EXECUTE 'SELECT pg_' || 'advisory_xact_lock(1)'; END; $$ LANGUAGE plpgsql;`,
+  ],
+  [
+    'a view that takes the lock',
+    'refused',
+    'CREATE VIEW target.v AS SELECT pg_catalog.pg_advisory_xact_lock(1)::text AS locked;',
+  ],
+  ['control: the same gate in another schema (the deployed public)', 'accepted', 'GATE_ELSEWHERE'],
+  [
+    'control: a guard that locks through the gate',
+    'accepted',
+    String.raw`
+    CREATE FUNCTION target.f(lock_key BIGINT) RETURNS VOID AS $$
+    BEGIN PERFORM target.read_committed_xact_lock(lock_key); END; $$ LANGUAGE plpgsql;`,
+  ],
+];
+
+for (const [label, expected, probe] of GATE_PROBES) {
+  test(
+    `advisoryLockGateScript against PostgreSQL: ${label} is ${expected}`,
+    { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+    () => {
+      const scratch = newScratchDatabase(LIB_PURPOSE, 'gates');
+      createAsOwner(scratch);
+      let primary = null;
+      try {
+        const gates = gateDefinitions('economic-service').map(({ statement }) =>
+          statement.replace('CREATE FUNCTION ', 'CREATE FUNCTION target.'),
+        );
+        const setup = psqlAt(
+          libDatabaseUrl,
+          'CREATE SCHEMA target; CREATE SCHEMA elsewhere;' +
+            gates.join('\n') +
+            (probe === 'GATE_ELSEWHERE' ? gates[0].replace('target.', 'elsewhere.') : probe),
+          scratch.name,
+        );
+        assert.equal(setup.status, 0, setup.stderr);
+        const result = psqlAt(libDatabaseUrl, advisoryLockGateScript('target'), scratch.name);
+        if (expected === 'accepted') assert.equal(result.status, 0, result.stderr);
+        else {
+          assert.notEqual(result.status, 0);
+          assert.match(
+            result.stderr,
+            /names an advisory lock outside the reviewed READ COMMITTED gates/,
+          );
+        }
+      } catch (error) {
+        primary = error;
+        throw error;
+      } finally {
+        const dropped = dropAsOwner(scratch);
+        // eslint-disable-next-line no-unsafe-finally
+        if (!primary && !dropped.ok) throw new Error(`cleanup failed: ${dropped.output}`);
+      }
+    },
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Scratch databases: created marked, dropped only if marked, as their owner

@@ -52,6 +52,7 @@ import {
   verifierRoleProblem,
   CONNECTED_ROLE_PROBE,
   UNREADABLE_DATABASE_URL,
+  advisoryLockGateScript,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
@@ -512,6 +513,10 @@ const finalState = `after:${migrations.at(-1)}`;
 // --- up ---------------------------------------------------------------------
 deploy('up: prisma migrate deploy');
 mustRun('up: every expected object exists', assertionScript(expected, true, targetSchema));
+mustRun(
+  'up: every advisory lock is taken through the READ COMMITTED gate',
+  advisoryLockGateScript(targetSchema),
+);
 mustRun(
   'up: identical to the migrations applied one by one',
   searchPath(targetSchema) +
