@@ -21,6 +21,7 @@ import {
   utcClockProblems,
 } from './utc-clock-sites-lib.mjs';
 import { lex } from './eligibility-clock-sql.mjs';
+import { sqlSinkTexts } from './utc-clock-sinks.mjs';
 import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { authoredFiles } from './authored-source-inventory.cjs';
 
@@ -777,7 +778,7 @@ test('clocksIn reports each clock on its own', () => {
 });
 
 /** The whole scan over a repository of one service, in a git checkout of its own. */
-function scanOf(service, migration, source = '') {
+function scanOf(service, migration, source = '', extra = {}, collect = utcClockProblems) {
   const migrations = typeof migration === 'string' ? [['1_init', migration]] : migration;
   const root = mkdtempSync(join(tmpdir(), 'utc-clock-sites-'));
   try {
@@ -789,10 +790,11 @@ function scanOf(service, migration, source = '') {
       write(`services/${service}/prisma/migrations/${name}/migration.sql`, text);
     write(`services/${service}/prisma/schema.prisma`, 'model Anything {\n  id String @id\n}\n');
     write(`services/${service}/src/temporal/saga-start.store.ts`, source);
+    for (const [path, text] of Object.entries(extra)) write(path, text);
     execFileSync('git', ['init', '-q'], { cwd: root, env: fixtureGitEnv() });
     execFileSync('git', ['add', '-A'], { cwd: root, env: fixtureGitEnv() });
     // The reviewed entries name this repository's sites, which that one does not have.
-    return utcClockProblems(root).filter((problem) => !problem.startsWith('stale reviewed entry'));
+    return collect(root).filter((problem) => typeof problem !== 'string' || !problem.startsWith('stale reviewed entry'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1022,6 +1024,41 @@ test('F3: a setting that moves no name replays', () => {
   ]);
   assert.deepEqual(unmodelled, []);
 });
+
+// FU-266 (#1010 r2): a routine may pin its own path to the catalogue, temporary relations last.
+const PIN = `SET search_path = pg_catalog, pg_temp`;
+test('FU-266: a routine pinning search_path to pg_catalog, pg_temp replays', () => {
+  const { unmodelled } = replayMigrations([
+    BASE,
+    `CREATE FUNCTION g() RETURNS trigger LANGUAGE plpgsql ${PIN} AS $$BEGIN RETURN NEW; END$$;
+     CREATE OR REPLACE FUNCTION h() RETURNS trigger LANGUAGE plpgsql SET search_path TO pg_catalog, pg_temp
+       AS $$BEGIN RETURN NEW; END$$;`,
+  ]);
+  assert.deepEqual(unmodelled, []);
+});
+for (const [name, sql] of [
+  ['the pin as a session SET', `${PIN};`],
+  ['the pin on a database', `ALTER DATABASE d ${PIN};`],
+  ['the pin on a role', `ALTER ROLE r ${PIN};`],
+  ['the pin by ALTER FUNCTION', `ALTER FUNCTION g() ${PIN};`],
+  ['a third schema', `CREATE FUNCTION g() RETURNS void LANGUAGE sql ${PIN}, s AS 'SELECT 1';`],
+  [
+    'temporary first',
+    `CREATE FUNCTION g() RETURNS void LANGUAGE sql SET search_path = pg_temp, pg_catalog AS 'SELECT 1';`,
+  ],
+  [
+    'a quoted name',
+    `CREATE FUNCTION g() RETURNS void LANGUAGE sql SET search_path = "PG_CATALOG", pg_temp AS 'SELECT 1';`,
+  ],
+  [
+    'the catalogue alone',
+    `CREATE FUNCTION g() RETURNS void LANGUAGE sql SET search_path = pg_catalog AS 'SELECT 1';`,
+  ],
+]) {
+  test(`FU-266: a path that is not the pin is refused: ${name}`, () => {
+    assert.notEqual(replayMigrations([BASE, sql]).unmodelled.length, 0, sql);
+  });
+}
 
 test('F4: a DEFAULT is read to its end, past CASE … NULL … END and IS [NOT] NULL', () => {
   const at = (definition) => replaying(`CREATE TABLE t (${definition});`).tables.get('t').get('at');
@@ -1842,4 +1879,80 @@ test('FU-283 source inventory reaches clock-free creation literals', () => {
       scanOf('x-service', FU283_BASE, `export const sql = ${JSON.stringify(sql)};`).join(),
       /R0/,
     );
+});
+
+const sinkSchema = 'CREATE TABLE task (id text, at timestamptz(3));';
+const prismaImport = "import { Prisma as P } from '../generated/prisma';";
+const numericFiles = {
+  'services/x-service/src/limit.ts': 'export const MAX = 2_147_483_647;',
+  'services/x-service/src/reexport.ts': "export { MAX as LIMIT } from './limit';",
+};
+const sinkTextsOf = (source, extra) => scanOf('x-service', sinkSchema, source, extra, (root) => sqlSinkTexts(root).map((s) => s.text));
+for (const [name, pattern, source, extra] of [
+  ['finite SQL tuples', /INSERT INTO task.*VALUES/s, `${prismaImport}
+    function run(id: string) {
+      const rows = P.join([P.sql\`(\${id}, (now() AT TIME ZONE 'UTC'))\`]);
+      db.$executeRaw(P.sql\`INSERT INTO task (id, at) VALUES \${rows}\`);
+    }`],
+  ['mapped bound scalar', /WHERE id IN /, `${prismaImport} function run(ids: string[]) { db.$queryRaw(P.sql\`SELECT id FROM task WHERE id IN (\${P.join(ids.map(id => id))})\`); }`],
+  ['scalar Set list', /WHERE id IN .* AND id =/s, `${prismaImport}
+    function run(ids: readonly string[], tenant: string) {
+      db.$queryRaw(P.sql\`SELECT id FROM task WHERE id IN (\${P.join([...new Set(ids)].sort())}) AND id = \${tenant}\`);
+    }`],
+  ['numeric import alias', /2147483647/, `import { LIMIT as MAX } from '../reexport';
+    const NOW = "(now() AT TIME ZONE 'UTC')"; const PREDICATE = \`1 < \${MAX}\`;
+    const SQL = \`SELECT \${NOW} WHERE \${PREDICATE}\`;
+    db.$queryRawUnsafe(SQL);`, numericFiles],
+]) test(`sink proof: ${name}`, () => {
+  const texts = sinkTextsOf(source, extra);
+  assert.ok(texts.length && texts.every((text) => typeof text === 'string'));
+  assert.match(texts.join('\n'), pattern);
+});
+
+for (const [name, source, extra = {}] of [
+  ['non-tuple map fragment', `${prismaImport} function run(ids: string[]) { db.$queryRaw(P.sql\`SELECT \${P.join(ids.map(() => P.sql\`1\`))}\`); }`],
+  ['unknown-cardinality separator', `${prismaImport} function run(ids: string[]) { db.$queryRaw(P.sql\`SELECT \${P.join(ids, ' INTO TEMP task SELECT ')}\`); }`],
+  ['looped fragment pushes', `${prismaImport} function run(ids: string[]) { const parts = []; for (const id of ids) parts.push(P.sql\`id = \${id}\`); db.$queryRaw(P.sql\`SELECT 1 WHERE \${P.join(parts)}\`); }`],
+  ['replaced Array.push', `${prismaImport} Array.prototype.push = runtime; function run() { const parts = []; parts.push(P.sql\`id = 1\`); db.$queryRaw(P.sql\`SELECT 1 WHERE \${P.join(parts)}\`); }`],
+  ['numeric expression is unresolved', 'const n = 1 + 2; db.$queryRawUnsafe(`SELECT ${n}`);'],
+  ['object concatenation', `${prismaImport} db.$queryRawUnsafe('SELECT ' + P.sql\`1\`);`],
+  ['object interpolation', `${prismaImport} db.$queryRawUnsafe(\`SELECT \${P.sql\`1\`}\`);`],
+  ['escaped Sql fragment', `${prismaImport} const part = P.sql\`SELECT 1\`; leak(part); db.$queryRaw(part);`],
+  ['nested Sql mutation', `${prismaImport} const part = P.sql\`SELECT 1\`; part.strings[0] = runtime; db.$queryRaw(part);`],
+  ['aliased Sql escape', `${prismaImport} const part = P.sql\`SELECT 1\`; const alias = part; leak(alias); db.$queryRaw(part);`],
+  ['mutating Sql helper', `${prismaImport} function mutate(p) { p.strings[0] = runtime; } const part = P.sql\`SELECT 1\`; mutate(part); db.$queryRaw(part);`],
+  ['exported Sql fragment', `${prismaImport} export const part = P.sql\`SELECT 1\`; db.$queryRaw(part);`],
+  ['custom map method', `${prismaImport} const ids = { map: custom }; db.$queryRaw(P.sql\`SELECT \${P.join(ids.map(id => P.sql\`(1)\`))}\`);`],
+  ['replaced array join', "const pieces = ['SELECT 1']; pieces.join = runtime; db.$queryRawUnsafe(pieces.join(''));"],
+  ['escaped string array', `const pieces = ['SELECT 1']; mutate(pieces); db.$queryRawUnsafe(pieces.join(''));`],
+  ['shadow generated client', `${prismaImport} db.$queryRaw(P.sql\`SELECT 1\`);`,
+    { 'services/x-service/src/generated/prisma.ts': 'export const Prisma = { sql: custom };' }],
+  ['unknown inside error constructor', 'throw new Error(db.$queryRawUnsafe(runtime));'],
+  ['unknown expression', 'db.$queryRawUnsafe(runtime);'],
+  ['reassigned builder', "let build = () => 'SELECT 1'; build = runtime; db.$queryRawUnsafe(build());"],
+  ['unknown builder', 'db.$queryRawUnsafe(build());'],
+  ['shadowed String.raw', 'const String = { raw: custom }; db.$queryRawUnsafe(String.raw`SELECT 1`);'],
+  ['escaped list', `${prismaImport} function run() { const parts = []; leak(parts); parts.push(P.sql\`id = 1\`); db.$queryRaw(P.sql\`SELECT 1 WHERE \${P.join(parts)}\`); }`],
+  ['unknown pushed fragment', `${prismaImport} function run() { const parts = []; parts.push(build()); db.$queryRaw(P.sql\`SELECT 1 WHERE \${P.join(parts)}\`); }`],
+  ['arbitrary tag', 'db.$queryRawUnsafe(custom`SELECT 1`);'],
+  ['fake Prisma', 'const P = evil; db.$queryRaw(P.sql`SELECT 1`);'],
+  ['raw runtime fragment', `${prismaImport} db.$queryRaw(P.sql\`SELECT \${P.raw(runtime)}\`);`],
+  ['unresolved map body', `${prismaImport} function run(ids: string[]) { db.$queryRaw(P.sql\`SELECT \${P.join(ids.map(id => build(id)))}\`); }`],
+  ['unresolved list', `${prismaImport} function run(ids: unknown[]) { db.$queryRaw(P.sql\`SELECT \${P.join(ids)}\`); }`],
+  ['unresolved separator', `${prismaImport} db.$queryRaw(P.sql\`SELECT \${P.join([1, 2], runtime)}\`);`],
+  ['mutable import', "import { MAX } from '../limit'; db.$queryRawUnsafe(`SELECT ${MAX}`);",
+    { 'services/x-service/src/limit.ts': 'export let MAX = 1;' }],
+  ['mutated const', "const SQL = 'SELECT 1'; SQL = runtime; db.$queryRawUnsafe(SQL);"],
+  ['import cycle', "import { MAX } from '../limit'; db.$queryRawUnsafe(`SELECT ${MAX}`);",
+    { 'services/x-service/src/limit.ts': "import { OTHER } from './other'; export const MAX = OTHER;",
+      'services/x-service/src/other.ts': "import { MAX } from './limit'; export const OTHER = MAX;" }],
+]) test(`sink refusal: ${name}`, () => assert.ok(sinkTextsOf(source, extra).includes(null)));
+
+test('numeric SQL text preserves an imported alias value', () => {
+  const texts = sinkTextsOf("import { LIMIT } from '../reexport'; db.$queryRawUnsafe(`SELECT ${LIMIT}`);", numericFiles);
+  assert.deepEqual(texts, ['SELECT 2147483647']);
+});
+
+test('String.raw interpolations retain cooked JavaScript values', () => {
+  assert.deepEqual(sinkTextsOf('db.$queryRawUnsafe(String.raw`${`\\u0053ELECT 1`} WHERE 1 = 1`);'), ['SELECT 1 WHERE 1 = 1']);
 });

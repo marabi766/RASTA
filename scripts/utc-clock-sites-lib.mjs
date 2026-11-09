@@ -630,7 +630,9 @@ function readRoutine({ tokens, text }) {
   const signature = tokens.slice(i + 2, close).map((t) => t.value.toLowerCase());
   const end = as < 0 ? tokens.findIndex((t, at) => at > close && isWord(t, 'return', 'begin')) : as;
   const headerTokens = as < 0 ? tokens.slice(0, end) : tokens;
-  if (headerTokens.some((t, at) => isWord(t, 'set') && setMovesNames(headerTokens, at)))
+  const moves = (t, at) =>
+    isWord(t, 'set') && setMovesNames(headerTokens, at) && !pinsRoutinePath(headerTokens, at + 1);
+  if (headerTokens.some(moves))
     return { refused: `a routine setting that may move names: ${name}` };
   return {
     key: `${name}(${signature.join(' ')})`,
@@ -1190,8 +1192,29 @@ function sessionChange(tokens) {
         !setting || !setting.every((v) => KEEPS_NAMES.has(v.toLowerCase()) || /^\w+\.\w+$/.test(v))
       );
     }
-    return nameOf(t) === 'search_path'; // `ALTER … SET search_path`, a routine's SET clause
+    // `ALTER … SET search_path`, a routine's SET clause (but the FU-266 pin)
+    return nameOf(t) === 'search_path' && !pinsRoutinePath(tokens, i);
   });
+}
+
+/**
+ * FU-266: a CREATE [OR REPLACE] FUNCTION/PROCEDURE's own `SET search_path {=|TO} pg_catalog,
+ * pg_temp`, exactly, at tokens[i]. Its body then reads names from the catalogue and temporary
+ * relations last, never from a schema a migration made, so it moves no name into one.
+ */
+function pinsRoutinePath(tokens, i) {
+  const routine = isWord(tokens[1], 'or') && isWord(tokens[2], 'replace') ? 3 : 1;
+  return (
+    isWord(tokens[0], 'create') &&
+    isWord(tokens[routine], 'function', 'procedure') &&
+    isWord(tokens[i - 1], 'set') &&
+    (isWord(tokens[i + 1], 'to') || isOp(tokens[i + 1], '=')) &&
+    isWord(tokens[i + 2], 'pg_catalog') &&
+    isOp(tokens[i + 3], ',') &&
+    isWord(tokens[i + 4], 'pg_temp') &&
+    !isOp(tokens[i + 5], ',') &&
+    !isOp(tokens[i + 5], '.')
+  );
 }
 
 // One reader for SQL and PL/pgSQL statement starts, shared by strings and session settings.

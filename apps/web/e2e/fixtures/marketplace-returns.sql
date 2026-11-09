@@ -87,6 +87,8 @@ FROM (VALUES
 ) AS line(id, order_id, offer_id, quantity)
 JOIN "offer" offer ON offer."id" = line.offer_id
 JOIN "product" product ON product."id" = offer."product_id"
-ON CONFLICT ("id") DO NOTHING;
+-- Not ON CONFLICT: a second run's order is sealed, and the trigger refuses any line INSERT
+-- into it before a conflict is looked for (D-156, tg_order_line_admission).
+WHERE NOT EXISTS (SELECT 1 FROM "order_line" existing WHERE existing."id" = line.id);
 
 COMMIT;
