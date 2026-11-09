@@ -15,6 +15,11 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
   let own: string;
   let foreign: string;
   let line: Prisma.OrderLineUncheckedCreateInput;
+  /**
+   * The scalar-FK specimen. Not an order line: those are written only by their order's placement
+   * and never updated (D-156, tg_order_line_price_guard, tg_order_line_admission).
+   */
+  let child: Prisma.FulfillmentUncheckedCreateInput;
   const asBuyer = <T>(fn: () => Promise<T>, organizationId = org.buyer): Promise<T> =>
     asActor({ organizationId, roles: ['PROCUREMENT_USER'] }, async () => await fn());
   beforeAll(async () => {
@@ -44,6 +49,17 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
       prisma.client.orderLine.findFirstOrThrow({ where: { orderId: own } }),
     );
     line = { ...row };
+    child = await asBuyer(() =>
+      prisma.client.fulfillment.create({
+        data: {
+          id: id('FUL'),
+          organizationId: org.buyer,
+          orderId: own,
+          fulfilledBy: 'USR-SCALAR',
+          fulfilledByOrganizationId: org.supplier,
+        },
+      }),
+    );
   });
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
@@ -81,25 +97,29 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
     'upsert-update',
   ] as const;
   async function write(shape: (typeof shapes)[number], target: string): Promise<unknown> {
-    const data = { ...line, id: id('OLN'), orderId: target };
-    const where = { id: line.id };
+    const data = { ...child, id: id('FUL'), orderId: target };
+    const where = { id: child.id };
     switch (shape) {
       case 'create':
-        return prisma.client.orderLine.create({ data });
+        return prisma.client.fulfillment.create({ data });
       case 'createMany':
-        return prisma.client.orderLine.createMany({ data: [data] });
+        return prisma.client.fulfillment.createMany({ data: [data] });
       case 'createManyAndReturn':
-        return prisma.client.orderLine.createManyAndReturn({ data: [data] });
+        return prisma.client.fulfillment.createManyAndReturn({ data: [data] });
       case 'update':
-        return prisma.client.orderLine.update({ where, data: { orderId: target } });
+        return prisma.client.fulfillment.update({ where, data: { orderId: target } });
       case 'updateMany':
-        return prisma.client.orderLine.updateMany({ where, data: { orderId: target } });
+        return prisma.client.fulfillment.updateMany({ where, data: { orderId: target } });
       case 'updateManyAndReturn':
-        return prisma.client.orderLine.updateManyAndReturn({ where, data: { orderId: target } });
+        return prisma.client.fulfillment.updateManyAndReturn({ where, data: { orderId: target } });
       case 'upsert-create':
-        return prisma.client.orderLine.upsert({ where: { id: data.id }, create: data, update: {} });
+        return prisma.client.fulfillment.upsert({
+          where: { id: data.id },
+          create: data,
+          update: {},
+        });
       case 'upsert-update':
-        return prisma.client.orderLine.upsert({
+        return prisma.client.fulfillment.upsert({
           where,
           create: { ...data, orderId: own },
           update: { orderId: target },
@@ -110,16 +130,16 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
     '%s refuses cross-tenant order injection and preserves existing rows',
     async (shape) => {
       const before = await asBuyer(() =>
-        prisma.client.orderLine.findMany({ orderBy: { id: 'asc' } }),
+        prisma.client.fulfillment.findMany({ orderBy: { id: 'asc' } }),
       );
       await expect(asBuyer(() => write(shape, foreign))).rejects.toMatchObject({ code: 'P2003' });
       expect(
-        await asBuyer(() => prisma.client.orderLine.findMany({ orderBy: { id: 'asc' } })),
+        await asBuyer(() => prisma.client.fulfillment.findMany({ orderBy: { id: 'asc' } })),
       ).toEqual(before);
     },
   );
   it.each(shapes)('%s permits the same-tenant link', async (shape) => {
-    // A fresh same-tenant order avoids (orderId, offerId) uniqueness collisions.
+    // A fresh same-tenant order each time, so no shape depends on another's move.
     const target = id('ORD');
     await copyParent(target, org.buyer);
     await expect(asBuyer(() => write(shape, target))).resolves.toBeDefined();
@@ -174,7 +194,7 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
   it('cannot bypass atomic enforcement through runUnscoped', async () => {
     await expect(
       runUnscoped('prove database ownership enforcement survives explicit guard bypass', () =>
-        prisma.client.orderLine.update({ where: { id: line.id }, data: { orderId: foreign } }),
+        prisma.client.fulfillment.update({ where: { id: child.id }, data: { orderId: foreign } }),
       ),
     ).rejects.toMatchObject({ code: 'P2003' });
   });

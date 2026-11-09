@@ -197,8 +197,8 @@ model OfferPriceHistory {
   changedAt DateTime @default(now()) @map("changed_at")
   changedBy String   @map("changed_by")
 
-  /// The lines that agreed to this price (D-156); a row one names is never
-  /// removed (fk_order_line_price_history, RESTRICT).
+  /// The lines that agreed to this price (D-156). No row is ever changed or
+  /// deleted, not even by its offer's cascade (tg_offer_price_history_guard).
   orderLines OrderLine[]
 
   @@unique([offerId, version], map: "uq_offer_price_version")
@@ -251,8 +251,15 @@ model Order {
 
   /// Recomputed from the lines, never accumulated (the maintenance-service
   /// lesson): a total that drifts from its lines is a total nobody can audit.
+  /// With id, both parties and the currency, never changed after placement
+  /// (tg_order_financial_guard, D-156).
   totalAmountMinor BigInt @map("total_amount_minor")
   currency         String @default("IRR")
+
+  /// Placed: no further line (D-156, #1010 r4). Set at the end of the inserting
+  /// transaction (tg_order_lines_seal), never unset (tg_order_financial_guard);
+  /// tg_order_line_admission refuses a line of a sealed order.
+  linesSealed Boolean @default(false) @map("lines_sealed")
 
   /// The economic obligation this order created.
   ///
@@ -342,7 +349,9 @@ model OrderLine {
 
   /// The database's proof of the price: (offer, version, unit price, currency)
   /// is a row the offer published. Cross-tenant by design: the line is the
-  /// buyer's, the history the supplier's.
+  /// buyer's, the history the supplier's. A line never changes, not one
+  /// column, and is never deleted, not even by its order's cascade
+  /// (tg_order_line_price_guard).
   priceHistory OfferPriceHistory @relation(fields: [offerId, offerVersion, unitPriceMinor, currency], references: [offerId, version, unitPriceMinor, currency], map: "fk_order_line_price_history", onUpdate: Restrict, onDelete: Restrict)
 
   /// A snapshot for display, so a completed order still reads correctly after
