@@ -10,6 +10,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   serviceUrlSchema,
+  wholeNumberEnv,
 } from '@rasta/config';
 import { contractOperationBudgets } from './operation-budgets';
 
@@ -341,18 +342,9 @@ export const contractEnvSchema = baseEnvSchema
      * D-050: ORGANIZATION_MOVED's instant is the organization service host's clock, the commit
      * deadline is this service's PostgreSQL clock. The window comparison is made against
      * `deadline + margin`, so skew in either direction can only add a review, never drop one.
-     * A value that is not a finite number >= 0 refuses to start (fail closed).
+     * Only plain digits for whole seconds, 0 to 86,400, are accepted (fail closed).
      */
-    CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: z
-      .string()
-      .trim()
-      .regex(
-        /^\d+(\.\d+)?$/,
-        fixed('CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS must be a number >= 0'),
-      )
-      .prefault('300')
-      .transform(Number)
-      .pipe(z.number().finite().max(86_400)),
+    CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: wholeNumberEnv(0, 86_400).prefault('300'),
 
     /**
      * The sweeper behind ORGANIZATION_MOVED (Q-83, docs/23 D-041), construction-service's

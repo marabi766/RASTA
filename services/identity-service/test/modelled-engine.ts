@@ -54,7 +54,10 @@ export function modelledPool(name?: string, shared?: string[]) {
   const tx = {
     $executeRaw: (strings: TemplateStringsArray) =>
       statement(strings.join('?').includes('INSERT') ? 'INSERT' : 'STATEMENT'),
-    $executeRawUnsafe: (sql: string) => statement(sql.startsWith('SET LOCAL') ? 'SET' : sql),
+    $executeRawUnsafe: (sql: string) =>
+      statement(
+        sql.startsWith('SET LOCAL') || sql.startsWith('SELECT pg_catalog.set_config') ? 'SET' : sql,
+      ),
   };
   const client = {
     async $transaction<T>(

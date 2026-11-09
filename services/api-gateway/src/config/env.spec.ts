@@ -261,6 +261,7 @@ describe('the revocation list settings', () => {
     it.each([
       ['0', 0],
       ['10', 10],
+      ['05', 5],
       ['60', 60],
     ])('takes %p as stated, in production too', (value, expected) => {
       expect(
@@ -272,7 +273,7 @@ describe('the revocation list settings', () => {
       ).toBe(expected);
     });
 
-    it.each(['61', '-1', '1.5', '', ' 10', '10s', '1e1', '0x0a', '100'])(
+    it.each(['61', '-1', '1.5', '', ' 10', '10s', '1e1', '0x0a', '100', '005'])(
       'refuses %p: whole seconds from 0 to 60 only',
       (value) => {
         expect(() => withMode({ KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: value })).toThrow(
@@ -358,7 +359,7 @@ describe('strict decimal integer environment settings', () => {
     ['GATEWAY_RATE_LIMIT_WINDOW_MS', 1000, 2147483647],
     ['GATEWAY_TENANT_RATE_LIMIT_MAX', 1, Number.MAX_SAFE_INTEGER],
     ['GATEWAY_ANON_RATE_LIMIT_MAX', 1, Number.MAX_SAFE_INTEGER],
-    ['GATEWAY_UPSTREAM_TIMEOUT_MS', 100, 180000],
+    ['GATEWAY_UPSTREAM_TIMEOUT_MS', 100, 2147483647],
     ['GATEWAY_TENDER_OPEN_TIMEOUT_MS', 5000, 180000],
     ['GATEWAY_CIRCUIT_FAILURE_THRESHOLD', 1, Number.MAX_SAFE_INTEGER],
     ['GATEWAY_CIRCUIT_RESET_MS', 1000, 2147483647],
@@ -376,12 +377,20 @@ describe('strict decimal integer environment settings', () => {
     });
 
   it.each(settings)('%s accepts both bounds and refuses out-of-range values', (name, min, max) => {
-    for (const value of [min, max])
+    for (const value of name === 'GATEWAY_UPSTREAM_TIMEOUT_MS' ? [min] : [min, max])
       expect(
         numericLoad(name, String(value))[name as keyof ReturnType<typeof loadGatewayEnv>],
       ).toBe(value);
     for (const value of [min - 1, max + 1])
-      expect(() => numericLoad(name, String(value))).toThrow(EnvValidationError);
+      expect(envRefusalOf(() => numericLoad(name, String(value)))?.issues).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: name })]),
+      );
+  });
+
+  it('UPSTREAM has its own timer cap, independent of the tender refinement', () => {
+    const field = gatewayEnvSchema.shape.GATEWAY_UPSTREAM_TIMEOUT_MS;
+    expect(field.safeParse('2147483647').success).toBe(true);
+    expect(field.safeParse('2147483648').success).toBe(false);
   });
 
   it.each(settings)('%s refuses coercion at startup without echoing the input', (name, min) => {
@@ -411,4 +420,16 @@ describe('strict decimal integer environment settings', () => {
       expect(JSON.stringify(refusal)).not.toContain('private-sentinel-79');
     }
   });
+});
+
+describe('reviewed CIDR prefix bounds', () => {
+  it.each(['10.0.0.0/05', '10.0.0.0/32', '::/128', '::/001'])(
+    'accepts %s including existing leading zeros',
+    (entry) =>
+      expect(() => loadGatewayEnv({ ...BASE, GATEWAY_TRUSTED_PROXIES: entry })).not.toThrow(),
+  );
+  it.each(['10.0.0.0/0', '::/0', '10.0.0.0/33', '::/129', '::/0001', '::/+1', '::/1.5', '::/ 5'])(
+    'refuses %s',
+    (entry) => expect(() => loadGatewayEnv({ ...BASE, GATEWAY_TRUSTED_PROXIES: entry })).toThrow(),
+  );
 });

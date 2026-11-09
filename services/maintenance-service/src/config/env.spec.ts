@@ -39,6 +39,8 @@ describe('the replay fence budget (FU-171, PM decision D-133)', () => {
 
   it('defaults to a 30 s skew: B = 2 · 30 s + 7 s', () => {
     expect(env().MAINTENANCE_CLOCK_SKEW_SECONDS).toBe(30);
+    expect(env({ MAINTENANCE_CLOCK_SKEW_SECONDS: '05' }).MAINTENANCE_CLOCK_SKEW_SECONDS).toBe(5);
+    expect(() => env({ MAINTENANCE_CLOCK_SKEW_SECONDS: '0005' })).toThrow();
     expect(replayFenceBudgetMs(30)).toBe(67_000);
   });
 

@@ -2,19 +2,23 @@
 export const JEST_LAUNCHERS = {
   'scripts/ci-tool-download.test.mjs': {
     kind: 'non-jest',
+    workflowSteps: {
+      file: '.github/workflows/ci.yml',
+      job: 'security',
+      names: ['Test pinned Gitleaks scan topologies', 'Secret scan'],
+      sha256: 'cbe89eeb29efa1fd90d6f6cde75a21d01227140567c1018f1f6766496d0cdb40',
+    },
     reaches:
       'Node tests spawn curl/Git and the pinned Gitleaks binary, plus the exact pinned Secret scan shell in isolated Git fixtures; downloads are mocked except a loopback curl probe. No Jest, pnpm or Turbo child.',
     sha256: {
       'scripts/ci-tool-download.test.mjs':
-        'aaaf4ec48683f22fb34d1609bdb3eac9c77c510f34bb4bab7b2e7f32c6df9a3a',
+        '430d053397e935ccb36d79cafd2a1d1df305cfe8fa023d1f0e163365796e9109',
       'scripts/ci-tool-download.mjs':
-        'ee68f2a2fa8840b19acb90edf7f97829d41a3cc27c6128024d94ca3e748e5c02',
+        '0e9a7d8bcbf35ae61d822c0e4af8f4d8d94960195131145e540190ed4e23607b',
       'scripts/fixture-git-env.mjs':
         '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
       'scripts/authored-source-inventory.cjs':
         '0b5d93cff1bf3868a9de93166d3d669d97099409e6affac231993066f749e65a',
-      '.github/workflows/ci.yml':
-        '4bbc0648e214f0f8ff33d3b5dde45a20a62480ad3d0731fde93a2ab5dd80e4aa',
     },
   },
   'scripts/verify-migration-reversible-lib.test.mjs': {
@@ -210,9 +214,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        '0bb9440a4ec8bdd191707c8853a32315d0ba2c8cf4d5bf468830c4388d49d14a',
+        '94f5e4b161bf3facf0bca3daf9cb4ff433d57010b24686d2e746df697cf3c609',
       'scripts/ci-integration-split-lib.mjs':
-        '04916b838e43eaff29e95e14960b0e95f058b7401c9e68f3c1d3211c844f495c',
+        'a90c3be97d1a6cad0ecf94c9ee11de1cb9f7e5a9e470671f8a202ff070ea9026',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },

@@ -316,7 +316,7 @@ export const STEP_INVENTORY = Object.freeze({
   'Backup restore SQL on a disposable database': postgresGuard(
     'pnpm run test:backup-restore-drill-pg',
   ),
-  'Economic coverage gate': coverageGate('economic'),
+  'Economic coverage gate': coverageGate('economic', {}, 13), // FU-286 stopgap 11-09: 3 train timeouts at 8 min, all tests green (3298/3298); main 5:12-7:42, main+#1016 killed at 8:01 and 8:13; 13 ~ 1.5x max. Sharding = FU-286.
   'Marketplace coverage gate': coverageGate('marketplace', {}, 20),
   'Document coverage gate': coverageGate('document', { ...BUCKET, ...SCANNER }),
   'Supplier coverage gate': coverageGate('supplier'),

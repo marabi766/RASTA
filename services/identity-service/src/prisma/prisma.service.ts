@@ -408,7 +408,8 @@ export class PrismaService implements OnModuleInit {
         : this.client.$transaction(
             async (tx) => {
               await tx.$executeRawUnsafe(
-                `SET LOCAL statement_timeout = ${localStatementTimeoutOf(statementTimeoutMs)}`,
+                "SELECT pg_catalog.set_config('statement_timeout', $1, true)",
+                `${localStatementTimeoutOf(statementTimeoutMs)}ms`,
               );
               return committable(tx as ExtendedPrismaClient);
             },
@@ -433,9 +434,8 @@ export interface TransactionOptions {
 }
 
 /**
- * A positive whole number of milliseconds for `SET LOCAL statement_timeout`,
- * which takes no bind parameter. Only ever a constant of this service, and
- * checked so nothing but digits reaches the statement (S-05).
+ * Validate the positive whole milliseconds before binding the transaction-local
+ * timeout to `set_config` (S-05).
  */
 function localStatementTimeoutOf(ms: number): number {
   if (!Number.isSafeInteger(ms) || ms < 1) {

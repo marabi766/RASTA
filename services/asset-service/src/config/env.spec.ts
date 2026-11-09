@@ -87,12 +87,17 @@ describe('claim authority configuration', () => {
 
   it('parses the ceiling as a bigint in minor units', () => {
     expect(ceiling.parse('5000000000000')).toBe(5_000_000_000_000n);
+    expect(ceiling.parse('05')).toBe(5n);
+    expect(ceiling.parse('9'.repeat(30))).toBe(10n ** 30n - 1n);
   });
 
   it('refuses a ceiling that is not a plain non-negative integer', () => {
     expect(() => ceiling.parse('12.5')).toThrow();
     expect(() => ceiling.parse('-1')).toThrow();
     expect(() => ceiling.parse('1e9')).toThrow();
+    for (const value of [' 5 ', ' ', '9'.repeat(31), '0'.repeat(31), '5\n']) {
+      expect(() => ceiling.parse(value)).toThrow();
+    }
   });
 });
 

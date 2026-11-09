@@ -1146,6 +1146,59 @@ test('reviewed non-Jest launchers refuse configuration overrides and any source/
   }
 });
 
+test('Gitleaks launcher pins complete unique security steps, allowing unrelated workflow edits', async () => {
+  const { parse, stringify } = require('yaml');
+  const { JEST_LAUNCHERS } = await import('./disclosure-jest-launchers.mjs');
+  const file = 'scripts/ci-tool-download.test.mjs';
+  const pin = JEST_LAUNCHERS[file].workflowSteps;
+  const control = '.github/workflows/step-pin-control.yml';
+  const paths = [control, file];
+  const check = (change) => {
+    const workflow = parse(readFileSync(join(root, pin.file), 'utf8'));
+    change(workflow);
+    return jestCommands(paths, (path) =>
+      path === control
+        ? `jobs:\n  control:\n    steps:\n      - run: node ${file}\n`
+        : path === pin.file
+          ? stringify(workflow)
+          : readFileSync(join(root, path), 'utf8'),
+    );
+  };
+  assert.deepEqual(
+    check((w) => {
+      w.jobs.security.steps.push({ run: 'echo unrelated' });
+    }),
+    [],
+  );
+  for (const name of pin.names) {
+    for (const field of ['run', 'env', 'if', 'shell', 'continue-on-error']) {
+      const commands = check((w) => {
+        w.jobs.security.steps.find((s) => s.name === name)[field] = 'changed';
+      });
+      assert.equal(commands.length, 1, `${name} ${field}`);
+      assert.match(commands[0].reason, /changed\/unreadable/);
+    }
+    for (const duplicate of [false, true]) {
+      const commands = check((w) => {
+        const steps = w.jobs.security.steps;
+        const index = steps.findIndex((s) => s.name === name);
+        if (duplicate) steps.push(steps[index]);
+        else steps.splice(index, 1);
+      });
+      assert.equal(commands.length, 1);
+      assert.match(commands[0].reason, /changed\/unreadable/);
+    }
+  }
+  const unreadable = jestCommands(paths, (path) => {
+    if (path === pin.file) throw new Error('unreadable workflow');
+    return path === control
+      ? `jobs:\n  control:\n    steps:\n      - run: node ${file}\n`
+      : readFileSync(join(root, path), 'utf8');
+  });
+  assert.equal(unreadable.length, 1);
+  assert.match(unreadable[0].reason, /changed\/unreadable/);
+});
+
 test('R1 subshell cwd does not leak to sibling launches', () => {
   const commands = launchControl(
     '( cd apps/web && pnpm test -- --config a.json ); pnpm --filter @rasta/web test -- --config b.json',
