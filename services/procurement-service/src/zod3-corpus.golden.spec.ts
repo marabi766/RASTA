@@ -31,7 +31,8 @@ function outcome(schema: { safeParse(input: unknown): unknown }, input: unknown)
   return issues.map((issue) => [issue.path.map(String).join('.'), issue.code, issue.message]);
 }
 
-/** Zod 3 records; FU-287 uses digit strings outside PORT bounds after source tightening. */
+/** Zod 3 records; FU-287 uses digit strings outside PORT bounds after source tightening.
+ * The separate digit-format cases pin the full strict-parser issue list. */
 const ZOD3: Record<string, unknown> = {
   'procurementEnvSchema m0 same OTEL_EXPORTER_OTLP_ENDPOINT + PORT=0': [
     ['PORT', 'too_small', 'Number must be greater than or equal to 1'],
@@ -260,14 +261,16 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
 ];
 
 describe('zod 3 diagnostics: an integer refusal with its enclosing refinements (PR #444 r3)', () => {
-  it.each(['0.5', 'Infinity'])('PORT=%s retains strict numeric-format coverage', (PORT) => {
-    const [, schema, input] = CASES[0]!;
-    expect(outcome(schema, { ...(input as Record<string, unknown>), PORT })).toContainEqual([
-      'PORT',
-      'invalid_string',
-      'Expected a whole number written as digits, such as "10"',
-    ]);
-  });
+  it.each(['0.5', 'Infinity'])(
+    'PORT=%s pins the complete strict numeric-format issue list',
+    (PORT) => {
+      const [, schema, input] = CASES[0]!;
+      expect(outcome(schema, { ...(input as Record<string, unknown>), PORT })).toEqual([
+        ['PORT', 'invalid_string', 'Expected a whole number written as digits, such as "10"'],
+        ['OTEL_EXPORTER_OTLP_ENDPOINT', 'custom', 'URL must be a valid URL'],
+      ]);
+    },
+  );
 
   it.each(CASES)('%s', (name, schema, input) => {
     const observed = outcome(schema, input);
