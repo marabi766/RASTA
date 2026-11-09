@@ -1,7 +1,7 @@
 // SQL is checked where it is executed, after composing its text. Unknown text refuses.
 import ts from 'typescript';
 import { dirname, resolve as pathResolve } from 'node:path';
-import { PLACEHOLDER } from './eligibility-clock-sql.mjs';
+import { PLACEHOLDER, lex } from './eligibility-clock-sql.mjs';
 import { files as authoredFiles, productionFiles, walk } from './eligibility-clock-derive.mjs';
 
 export const SQL_SINKS = new Set([
@@ -47,9 +47,24 @@ export function sqlSinkTexts(repository) {
   });
   const targetOf = (n) => unwrap(ts.isTaggedTemplateExpression(n) ? n.tag : n.expression);
   const argumentsOf = (n) => ts.isTaggedTemplateExpression(n) ? [n.template] : n.arguments;
+  const callers = new Map();
+  for (const c of calls) {
+    const d = declaration(targetOf(c));
+    if (d) callers.set(d, [...(callers.get(d) ?? []), c]);
+  }
+  const functionOf = (n) => {
+    while (n && !ts.isFunctionLike(n)) n = n.parent;
+    return n;
+  };
   const refs = new Map(), bindings = new Map();
   for (const ast of sources) walk(ast, (n) => {
-    if (!ts.isIdentifier(n)) return;
+    if (ts.isElementAccessExpression(n) && unwrap(n.expression).kind === ts.SyntaxKind.ThisKeyword &&
+      !ts.isStringLiteralLike(n.argumentExpression)) {
+      let owner = n.parent;
+      while (owner && !ts.isClassDeclaration(owner)) owner = owner.parent;
+      for (const member of owner?.members ?? []) refs.set(member, [...(refs.get(member) ?? []), n]);
+    }
+    if (!ts.isIdentifier(n) && !ts.isStringLiteralLike(n)) return;
     const d = declaration(n);
     if (d && n !== d.name) refs.set(d, [...(refs.get(d) ?? []), n]);
     const s = checker.getSymbolAtLocation(n);
@@ -68,14 +83,19 @@ export function sqlSinkTexts(repository) {
   });
   const combine = (a, b, sep = '') => !a || !b || a.length * b.length > 128 ? null :
     a.flatMap((x) => b.map((y) => x + sep + y));
+  const arrayMethod = (n, name) => {
+    const d = declaration(n);
+    return ts.isPropertyAccessExpression(n) && n.name.text === name && d &&
+      !mutable.has(d) && program.isSourceFileDefaultLibrary(d.getSourceFile());
+  };
   const scalarType = (t) => t.isUnion() ? t.types.every(scalarType) :
     !!(t.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike |
       ts.TypeFlags.BooleanLike | ts.TypeFlags.Null | ts.TypeFlags.Undefined)) ||
     (t.symbol?.name === 'Date' && t.symbol.declarations?.every((d) => program.isSourceFileDefaultLibrary(d.getSourceFile())));
   const scalar = (n) => {
     const t = checker.getTypeAtLocation(unwrap(n));
-    const native = t.symbol?.declarations?.every((d) =>
-      program.isSourceFileDefaultLibrary(d.getSourceFile()) || /\/@types\/node\/buffer[^/]*\.d\.ts$/.test(d.getSourceFile().fileName));
+    const native = ['Buffer', 'Uint8Array'].includes(t.symbol?.name) && t.symbol?.declarations?.every((d) =>
+      program.isSourceFileDefaultLibrary(d.getSourceFile()) || /\/@types\/node\//.test(d.getSourceFile().fileName));
     const item = checker.isArrayType(t) || checker.isTupleType(t) || native
       ? checker.getIndexTypeOfType(t, ts.IndexKind.Number) : null;
     return scalarType(t) || (item && scalarType(item));
@@ -127,6 +147,48 @@ export function sqlSinkTexts(repository) {
     safeMemo.set(d, result);
     return result;
   };
+  // An object adapter may only travel into known functions. Every use of their
+  // receiving parameter must be a direct dispatch; storing/returning it refuses.
+  const dispatches = (owner, method) => {
+    if (!stable(owner) || exported(owner)) return null;
+    let escaped = false;
+    if (ts.isPropertyDeclaration(owner)) walk(owner.parent, (n) => {
+      if (n.kind === ts.SyntaxKind.ThisKeyword &&
+        !((ts.isPropertyAccessExpression(n.parent) || ts.isElementAccessExpression(n.parent)) && n.parent.expression === n)) escaped = true;
+    });
+    if (escaped) return null;
+    const result = [];
+    for (const ref of refs.get(owner) ?? []) {
+      const value = ts.isPropertyAccessExpression(ref.parent) || ts.isElementAccessExpression(ref.parent) ? ref.parent : ref;
+      const call = value.parent;
+      if (!ts.isCallExpression(call) || !call.arguments.includes(value)) return null;
+      const fn = declaration(call.expression), index = call.arguments.indexOf(value);
+      if (!fn || mutable.has(fn) || !ts.isFunctionLike(fn) || !fn.body || !fn.parameters[index]) return null;
+      for (const use of refs.get(fn.parameters[index]) ?? []) {
+        const access = use.parent, invocation = access.parent;
+        if (!ts.isPropertyAccessExpression(access) || access.expression !== use ||
+          access.name.text !== method || !ts.isCallExpression(invocation) || invocation.expression !== access) return null;
+        result.push(invocation);
+      }
+    }
+    return result.length ? result : null;
+  };
+  const parameterCalls = (d) => {
+    const fn = d.parent, property = fn.parent;
+    if (ts.isPropertyAssignment(property) && ts.isObjectLiteralExpression(property.parent)) {
+      const owner = property.parent.parent;
+      return owner.initializer === property.parent ? dispatches(owner, property.name.getText()) : null;
+    }
+    const owner = ts.isVariableDeclaration(property) ? property : fn;
+    if (exported(owner)) return null;
+    if (mutable.has(owner) || (ts.isVariableDeclaration(owner) && !stable(owner))) return null;
+    if (ts.isMethodDeclaration(owner) && !owner.modifiers?.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword)) return null;
+    if ((refs.get(owner) ?? []).some((r) => {
+      const target = ts.isPropertyAccessExpression(r.parent) && r.parent.name === r ? r.parent : r;
+      return !ts.isCallExpression(target.parent) || target.parent.expression !== target;
+    })) return null;
+    return callers.get(owner) ?? callers.get(fn) ?? null;
+  };
   const resolve = (input, seen = new Set(), env = new Map(), raw = false, asFragment = false) => {
     const n = unwrap(input);
     if (!n || seen.has(n) || seen.size > 64) return null;
@@ -159,7 +221,21 @@ export function sqlSinkTexts(repository) {
       if (stable(d) && d.initializer) return scalarType(checker.getTypeAtLocation(n)) || safeRefs(d) ? go(d.initializer) : null;
       if (ts.isParameter(d)) {
         if (env.has(d)) return resolve(env.get(d), next, env, raw, asFragment);
-        return null;
+        const fn = d.parent, index = fn.parameters.indexOf(d);
+        const sites = parameterCalls(d);
+        if (!sites?.length) return null;
+        if ((refs.get(d) ?? []).some((r) => {
+          const c = r.parent;
+          if (ts.isTemplateSpan(c)) {
+            const use = c.parent.parent;
+            if (ts.isTaggedTemplateExpression(use) &&
+              (prisma(use.tag, 'sql') || SQL_SINKS.has(nameOf(use.tag)))) return false;
+            if (ts.isCallExpression(use) && SQL_SINKS.has(nameOf(use.expression)) && use.arguments[0] === c.parent) return false;
+          }
+          return !ts.isCallExpression(c) || !SQL_SINKS.has(nameOf(c.expression)) || c.arguments[0] !== r;
+        })) return null;
+        const values = sites.map((c) => go(argumentsOf(c)[index] ?? d.initializer));
+        return values.every(Boolean) ? values.flat() : null;
       }
       return null;
     }
@@ -181,12 +257,92 @@ export function sqlSinkTexts(repository) {
         }
         const sep = n.arguments[1] ? go(n.arguments[1]) : [','];
         if (!sep || sep.length !== 1) return null;
+        // Local push-only fragment lists: enumerate every subset, including
+        // conditional pushes. No alias, escape, replacement or other mutator.
+        if (d && mutable.has(d) && functionOf(d) && ts.isVariableDeclaration(d) &&
+          (d.parent.flags & ts.NodeFlags.Const) && ts.isArrayLiteralExpression(d.initializer) && !d.initializer.elements.length) {
+          let out = [''];
+          for (const ref of refs.get(d) ?? []) {
+            const access = ref.parent, call = access.parent;
+            if (ts.isPropertyAccessExpression(access) && access.expression === ref && access.name.text === 'length') {
+              if (ts.isBinaryExpression(call) && call.left === access && ts.isAssignmentOperator(call.operatorToken.kind)) return null;
+              continue;
+            }
+            if (ts.isCallExpression(access) && prisma(access.expression, 'join') && access.arguments[0] === ref) continue;
+            if (!arrayMethod(access, 'push') ||
+              !ts.isCallExpression(call) || call.expression !== access || functionOf(call) !== functionOf(d)) return null;
+            for (let ancestor = call.parent; ancestor && ancestor !== functionOf(d); ancestor = ancestor.parent)
+              if (ts.isIterationStatement(ancestor, false)) return null;
+            for (const value of call.arguments) {
+              const pushed = fragment(value, next, env);
+              if (!pushed) return null;
+              const added = combine(out, pushed, sep[0]);
+              if (!added || out.length + added.length > 128) return null;
+              out = [...out, ...added];
+            }
+          }
+          return out.map((s) => s.startsWith(sep[0]) ? s.slice(sep[0].length) : s);
+        }
         if (ts.isArrayLiteralExpression(list))
           return list.elements.reduce((out, e, i) => combine(out, fragment(e, next, env), i ? sep[0] : ''), ['']);
         if (!/^\s*,\s*$/.test(sep[0])) return null;
+        if (ts.isCallExpression(list) && arrayMethod(list.expression, 'map') &&
+          list.arguments.length === 1 && ts.isArrowFunction(list.arguments[0])) {
+          const tuples = fragment(list.arguments[0].body, next, env);
+          return tuples?.every((text) => {
+            const tokens = lex(text); let depth = 0;
+            if (tokens.length === 1 && tokens[0].type === 'placeholder') return true;
+            return tokens[0]?.value === '(' && tokens.at(-1)?.value === ')' && tokens.every((t, i) => {
+              if (t.type === 'op' && t.value === '(') depth += 1;
+              if (t.type === 'op' && t.value === ')') depth -= 1;
+              return i === tokens.length - 1 ? depth === 0 : depth > 0;
+            });
+          }) ? tuples : null;
+        }
         const element = checker.getIndexTypeOfType(checker.getTypeAtLocation(list), ts.IndexKind.Number);
         return element && scalarType(element) ? [PLACEHOLDER(0)] : null;
       }
+      if (arrayMethod(n.expression, 'join')) {
+        let array = unwrap(n.expression.expression);
+        if (!ts.isArrayLiteralExpression(array)) {
+          const d = declaration(array);
+          if (!d || mutable.has(d) || !(d.parent.flags & ts.NodeFlags.Const)) return null;
+          if ((refs.get(d) ?? []).some((r) => !ts.isPropertyAccessExpression(r.parent) ||
+            r.parent.expression !== r || r.parent.name.text !== 'join')) return null;
+          array = unwrap(d.initializer);
+        }
+        if (!array || !ts.isArrayLiteralExpression(array)) return null;
+        const sep = n.arguments[0] ? go(n.arguments[0]) : [','];
+        if (!sep || sep.length !== 1) return null;
+        return array.elements.every((e) => scalarType(checker.getTypeAtLocation(unwrap(e))))
+          ? array.elements.reduce((out, e, i) => combine(out, go(e), i ? sep[0] : ''), ['']) : null;
+      }
+      let fn = declaration(n.expression);
+      if (!fn || mutable.has(fn)) return null;
+      if (ts.isVariableDeclaration(fn)) fn = stable(fn) ? unwrap(fn.initializer) : null;
+      if (!fn || !ts.isFunctionLike(fn) || !fn.body) return null;
+      let opaque = false;
+      walk(fn.body, (r) => {
+        if (ts.isNewExpression(r) || ts.isDeleteExpression(r) ||
+          (ts.isBinaryExpression(r) && ts.isAssignmentOperator(r.operatorToken.kind))) opaque = true;
+        if (ts.isCallExpression(r) && !prisma(r.expression, 'join') &&
+          !['map', 'join', 'push'].some((name) => arrayMethod(r.expression, name))) opaque = true;
+        if (ts.isCallExpression(r) && arrayMethod(r.expression, 'push')) {
+          const local = declaration(r.expression.expression);
+          if (!local || !ts.isVariableDeclaration(local) || functionOf(local) !== fn ||
+            !local.initializer || !ts.isArrayLiteralExpression(local.initializer) || local.initializer.elements.length) opaque = true;
+        }
+      });
+      if (opaque) return null;
+      const bound = new Map(env);
+      fn.parameters.forEach((p, i) => bound.set(p, n.arguments[i] ?? p.initializer));
+      const returns = [];
+      if (!ts.isBlock(fn.body)) returns.push(fn.body);
+      else walk(fn.body, (r) => {
+        if (ts.isReturnStatement(r) && functionOf(r) === fn) returns.push(r.expression);
+      });
+      const values = returns.map((r) => asFragment ? fragment(r, next, bound) : resolve(r, next, bound, raw));
+      return values.length && values.every(Boolean) ? values.flat() : null;
     }
     return null;
   };
@@ -202,7 +358,8 @@ export function sqlSinkTexts(repository) {
     // A locally implemented method called execute/query is a domain command or a
     // wrapper. Its body is scanned for real SQL sinks, not treated as SQL itself.
     if ((name === 'execute' || name === 'query') && d &&
-      ((ts.isFunctionLike(d) && d.body) || ts.isParameter(d) || ts.isBindingElement(d))) return [];
+      ((ts.isFunctionLike(d) && d.body) || (ts.isBindingElement(d) &&
+        functionOf(d)?.name?.getText() === '$allOperations'))) return [];
     const node = argumentsOf(call)[0] ?? call;
     const tagged = ts.isTaggedTemplateExpression(call);
     // Safe tags bind scalars; nested SQL fragments still need complete proof.

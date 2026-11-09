@@ -1854,12 +1854,19 @@ const numericFiles = {
 };
 const sinkTextsOf = (source, extra) => scanOf('x-service', sinkSchema, source, extra, (root) => sqlSinkTexts(root).map((s) => s.text));
 for (const [name, pattern, source, extra] of [
-  ['finite SQL tuples', /INSERT INTO task.*VALUES/s, `${prismaImport}
-    function run(id: string) {
-      const rows = P.join([P.sql\`(\${id}, (now() AT TIME ZONE 'UTC'))\`]);
+  ['mapped SQL tuples', /INSERT INTO task.*VALUES/s, `${prismaImport}
+    function run(ids: string[]) {
+      const rows = P.join(ids.map(id => P.sql\`(\${id}, (now() AT TIME ZONE 'UTC'))\`));
       db.$executeRaw(P.sql\`INSERT INTO task (id, at) VALUES \${rows}\`);
     }`],
+  ['push-only fragment list', /SELECT id FROM task WHERE/s, `${prismaImport}
+    function predicate(id: string, flag: boolean) {
+      const parts = []; if (flag) parts.push(P.sql\`id = \${id}\`);
+      return parts.length ? P.sql\`(\${P.join(parts, ' OR ')})\` : null;
+    }
+    function run(id: string) { db.$queryRaw(P.sql\`SELECT id FROM task WHERE \${predicate(id, true)}\`); }`],
   ['mapped bound scalar', /WHERE id IN /, `${prismaImport} function run(ids: string[]) { db.$queryRaw(P.sql\`SELECT id FROM task WHERE id IN (\${P.join(ids.map(id => id))})\`); }`],
+  ['mapped Sql scalar', /WHERE id IN /, `${prismaImport} function run(ids: string[]) { db.$queryRaw(P.sql\`SELECT id FROM task WHERE id IN (\${P.join(ids.map(id => P.sql\`\${id}\`))})\`); }`],
   ['scalar Set list', /WHERE id IN .* AND id =/s, `${prismaImport}
     function run(ids: readonly string[], tenant: string) {
       db.$queryRaw(P.sql\`SELECT id FROM task WHERE id IN (\${P.join([...new Set(ids)].sort())}) AND id = \${tenant}\`);
@@ -1877,6 +1884,7 @@ for (const [name, pattern, source, extra] of [
 for (const [name, source, extra = {}] of [
   ['non-tuple map fragment', `${prismaImport} function run(ids: string[]) { db.$queryRaw(P.sql\`SELECT \${P.join(ids.map(() => P.sql\`1\`))}\`); }`],
   ['unknown-cardinality separator', `${prismaImport} function run(ids: string[]) { db.$queryRaw(P.sql\`SELECT \${P.join(ids, ' INTO TEMP task SELECT ')}\`); }`],
+  ['fragment list length mutation', `${prismaImport} function run() { const parts = []; parts.push(P.sql\`id = 1\`); parts.length = runtime; db.$queryRaw(P.sql\`SELECT 1 WHERE \${P.join(parts)}\`); }`],
   ['looped fragment pushes', `${prismaImport} function run(ids: string[]) { const parts = []; for (const id of ids) parts.push(P.sql\`id = \${id}\`); db.$queryRaw(P.sql\`SELECT 1 WHERE \${P.join(parts)}\`); }`],
   ['replaced Array.push', `${prismaImport} Array.prototype.push = runtime; function run() { const parts = []; parts.push(P.sql\`id = 1\`); db.$queryRaw(P.sql\`SELECT 1 WHERE \${P.join(parts)}\`); }`],
   ['numeric expression is unresolved', 'const n = 1 + 2; db.$queryRawUnsafe(`SELECT ${n}`);'],
@@ -1913,9 +1921,74 @@ for (const [name, source, extra = {}] of [
       'services/x-service/src/other.ts': "import { MAX } from './limit'; export const OTHER = MAX;" }],
 ]) test(`sink refusal: ${name}`, () => assert.ok(sinkTextsOf(source, extra).includes(null)));
 
+
 test('numeric SQL text preserves an imported alias value', () => {
   const texts = sinkTextsOf("import { LIMIT } from '../reexport'; db.$queryRawUnsafe(`SELECT ${LIMIT}`);", numericFiles);
   assert.deepEqual(texts, ['SELECT 2147483647']);
+});
+
+const roleFiles = {
+  'services/x-service/src/role.ts': `interface Client { $queryRawUnsafe(q: string): unknown }
+    const SQL = 'SELECT 1';
+    export function check(client: Client) { return client.$queryRawUnsafe(SQL); }`,
+};
+const adapter = `import { check as verify } from '../role';
+  class Gate {
+    private readonly adapter = { $queryRawUnsafe: (q: string, ...values: unknown[]) =>
+      track(() => base.$queryRawUnsafe(q, ...values)) };
+    run() { return verify(this.adapter); }
+  }`;
+test('sink proof: forwarded interface callback', () => {
+  assert.deepEqual(scanOf('x-service', sinkSchema, adapter, roleFiles), []);
+});
+for (const [name, source, extra] of [
+  ['mutating builder parameter', `${prismaImport} function mutate<T extends { strings: string[] }>(p: T): T { p.strings.push(runtime); return p; } db.$queryRaw(mutate(P.sql\`SELECT 1\`));`],
+  ['opaque mutating builder', `${prismaImport} function mutate(p) { Reflect.set(p, 'strings', [runtime]); return p; } db.$queryRaw(mutate(P.sql\`SELECT 1\`));`],
+  ['global array join replacement', "Array.prototype.join = runtime; const pieces = ['SELECT 1']; db.$queryRawUnsafe(pieces.join(''));"],
+  ['raw join object conversion', `${prismaImport} db.$queryRawUnsafe(['SELECT ', P.sql\`1\`].join(''));`],
+  ['exported forwarding arrow', "export const run = (q: string) => db.$queryRawUnsafe(q); run('SELECT 1');"],
+  ['exported adapter', `import { check } from '../role'; export const adapter = { $queryRawUnsafe: (q: string) => base.$queryRawUnsafe(q) }; check(adapter);`, roleFiles],
+  ['escaped forwarding function', "function run(q: string) { db.$queryRawUnsafe(q); } run('SELECT 1'); leak(run);"],
+  ['bound forwarding escape', "function run(q: string) { db.$queryRawUnsafe(q); } run('SELECT 1'); leak(run.bind(null, runtime));"],
+  ['explicit call forwarding', "function run(q: string) { db.$queryRawUnsafe(q); } run('SELECT 1'); run.call(null, runtime);"],
+  ['mutated dispatch function', adapter, { ...roleFiles, 'services/x-service/src/role.ts': roleFiles['services/x-service/src/role.ts'] + '\ncheck = runtime;' }],
+  ['unknown query callback', 'function run(query: (q: string) => unknown) { query(runtime); }'],
+  ['unknown destructured query', 'function run(client: { query: (q: string) => unknown }) { const { query } = client; query(runtime); }'],
+  ['owner escape', adapter.replace('return verify(this.adapter);', 'leak(this); return verify(this.adapter);'), roleFiles],
+  ['dynamic member escape', adapter.replace('return verify(this.adapter);', 'leak(this[runtime]); return verify(this.adapter);'), roleFiles],
+  ['computed adapter escape', adapter.replace('return verify(this.adapter);', "leak(this['adapter']); return verify(this.adapter);"), roleFiles],
+  ['escaped adapter', adapter.replace('verify(this.adapter)', 'leak(this.adapter)'), roleFiles],
+  ['additional unknown caller', adapter.replace('return verify(this.adapter);', 'leak(this.adapter); return verify(this.adapter);'), roleFiles],
+  ['unresolved forwarding argument', adapter, { ...roleFiles,
+    'services/x-service/src/role.ts': roleFiles['services/x-service/src/role.ts'].replace("const SQL = 'SELECT 1'", 'const SQL = runtime') }],
+  ['escaped receiving parameter', adapter, { ...roleFiles,
+    'services/x-service/src/role.ts': roleFiles['services/x-service/src/role.ts'].replace('return client.', 'leak(client); return client.') }],
+  ['escaped query parameter', adapter.replace('track(() =>', 'track(q, () =>'), roleFiles],
+  ['finite annotation still needs every caller', "function run(q: 'SELECT 1') { db.$queryRawUnsafe(q); } run(runtime);"],
+  ['multiple callers include unknown', "function run(q: string) { db.$queryRawUnsafe(q); } run('SELECT 1'); run(runtime);"],
+  ['unresolved sink inside error', 'throw new Error(db.$queryRawUnsafe(runtime));'],
+]) test(`sink forwarding refuses: ${name}`, () => {
+  assert.match(scanOf('x-service', sinkSchema, source, extra).join(), /R0 unresolved SQL/);
+});
+
+for (const source of [
+  'db.$executeRawUnsafe(String.raw`${`\\u0053ELECT 1`} INTO TEMP task`);',
+  'db.$executeRawUnsafe("SELECT 1 IN" + "TO TEMP task");',
+  'const s = "SELECT 1"; db.$executeRawUnsafe(`${s} INTO TEMP task`);',
+  'db.$executeRawUnsafe(`${runtime} INTO TEMP task`);',
+  'db.$executeRawUnsafe(`CREATE TABLE "${runtime}".task (id text)`);',
+  `${prismaImport} db.$queryRaw(P.sql\`SELECT \${P.join([P.sql\`now() INTO TEMP task\`])}\`);`,
+]) test(`joined SQL is classified: ${source}`, () => assert.ok(scanOf('x-service', sinkSchema, source).length));
+
+test('quoted CREATE target preserves splice provenance', () => {
+  assert.match(problemsIn('CREATE TABLE "\uE0000\uE001".task (id text)', scope).join(), /CREATE target/);
+});
+test('joined fragment with no keyword is SQL in its outer SELECT', () => {
+  const source = `${prismaImport} function run(ids: string[]) {
+    const tail = P.sql\`INTO TEMP task\`;
+    db.$queryRaw(P.sql\`SELECT 1 \${P.join([tail])}\`);
+  }`;
+  assert.match(scanOf('x-service', sinkSchema, source).join(), /INTO whose created relation/);
 });
 
 test('String.raw interpolations retain cooked JavaScript values', () => {
