@@ -2902,6 +2902,8 @@ export const EXPECTED = {
       'payment_refund_decline',
       // The instant line rules began to price (docs/23 D-057).
       'commission_pricing_cutover',
+      // The instant each rule change was decided at, which no session sets (#1016 r1 F1).
+      'commission_rule_scope_decision',
       // The participation rule's versions (ADR-047, docs/24 Q-139).
       'participation_rule',
       // The levels-and-badges versions (COM-012, docs/24 Q-140).
@@ -2995,8 +2997,11 @@ export const EXPECTED = {
       'trg_ledger_entry_wallet_covered',
       // ...checked in account id order, once per account (FU-268).
       'trg_ledger_entry_wallet_debits_noted',
-      // A scoped commission rule is written only under READ COMMITTED (FU-268).
-      'trg_commission_rule_read_committed',
+      // A commission scope decision is the database's, and kept; rules are never truncated
+      // (#1016 r1 F1).
+      'trg_commission_rule_scope_decided',
+      'trg_commission_rule_scope_decision_kept',
+      'trg_commission_rule_history_kept',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -3059,7 +3064,7 @@ export const EXPECTED = {
       'read_committed_xact_lock_shared',
       'note_wallet_account_debits',
       'wallet_account_debited_later',
-      'enforce_commission_rule_read_committed',
+      'commission_rule_scope_decided',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',
@@ -4668,54 +4673,95 @@ export function assertionScript(expected, present, schema) {
 // A guard that takes a transaction lock and then reads what a writer holding
 // the same lock may just have committed protects nothing under REPEATABLE READ
 // or SERIALIZABLE: their reads use the transaction's first snapshot, from
-// before the wait (#936 r1 F1, #983 r1 F3). So no function of any service names
-// an advisory lock itself. It takes the lock through the schema's gate,
-// `read_committed_xact_lock` or `read_committed_xact_lock_shared`, which
-// refuses every other isolation level once it holds the lock, and a gate is
-// one only if it asks for READ COMMITTED; a reviewed exemption only for the
-// exact body reviewed (ADVISORY_LOCK_REVIEWED). Read from the catalogue after the
-// deploy, so it is every function's body as it stands, whichever migration
-// wrote it last. Extension members are the extension's.
+// before the wait (#936 r1 F1, #983 r1 F3). So nothing stored in the database
+// names an advisory lock but the gates, `read_committed_xact_lock` and
+// `read_committed_xact_lock_shared`, which refuse every other isolation level
+// once they hold the lock. Read from the catalogue after the deploy, in every
+// schema: every routine's whole definition (`pg_get_functiondef`, so a
+// SQL-standard body too) and every view, rule, default, constraint, policy,
+// trigger and index as PostgreSQL prints it back.
+//
+// What it cannot read it refuses (#1016 r1 F2): a `U&"…"` name or a UESCAPE,
+// whose spelling is not the name PostgreSQL reads, and SQL text a routine
+// executes (EXECUTE, query_to_xml, ts_stat, dblink, pg_background, cron), whose
+// names it cannot see. A comment counts as text, so it can only refuse. A gate
+// is one only as reviewed: in the schema checked, by signature, attributes and
+// the md5 of its body; there is no other exemption. Extension members are the
+// extension's.
 // -----------------------------------------------------------------------------
 
-export const ADVISORY_LOCK_GATES = ['read_committed_xact_lock', 'read_committed_xact_lock_shared'];
-
-/**
- * Functions that still take an advisory lock themselves, each bound to the exact body reviewed
- * (md5 of `prosrc`): any change to the body ends the exemption. Each says what gates it instead.
- */
-export const ADVISORY_LOCK_REVIEWED = [
+/** The reviewed gates: what each review read (economic and inventory 20261109120000). */
+export const ADVISORY_LOCK_GATES = [
   {
-    name: 'commission_rule_scope_change',
-    md5: '00575ce77214199041c83f4c5d64e9ec',
-    why:
-      'economic 20261016120000 body, kept byte for byte: check:utc-clock-sites binds its review to ' +
-      'it. Every caller holds the same lock through the gate first: trg_commission_rule_read_committed ' +
-      'on each scoped rule write, lockScopeForChange in the service.',
+    signature: 'read_committed_xact_lock(lock_key bigint)',
+    md5: '31d208b4fd46ad6f26fb7ed4674693c9',
+  },
+  {
+    signature: 'read_committed_xact_lock(lock_key integer, lock_subkey integer)',
+    md5: '59691e094f935c798ff9c6eac023df63',
+  },
+  {
+    signature: 'read_committed_xact_lock_shared(lock_key bigint)',
+    md5: '999ff87c73fb2252697b136d50c0df3f',
   },
 ];
 
+/** Text that names an advisory lock, or that this cannot read. */
+const ADVISORY_OR_UNREADABLE = String.raw`pg_(try_)?advisory_|u&"|\muescape\M|\m(query_to_xml\w*|ts_stat|ts_rewrite|dblink\w*|pg_background_\w*)\M|\mcron\s*\.`;
+
 export function advisoryLockGateScript(schema) {
   assertSchemaName(schema);
-  const gates = ADVISORY_LOCK_GATES.map((name) => `'${name}'`).join(', ');
-  const reviewed = ADVISORY_LOCK_REVIEWED.map(({ name, md5 }) => `('${name}', '${md5}')`).join(
+  const gates = ADVISORY_LOCK_GATES.map(({ signature, md5 }) => `('${signature}', '${md5}')`).join(
     ', ',
   );
+  // Not the catalogues', not an extension's.
+  const own = (classid, objid) =>
+    `NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend e WHERE e.classid = '${classid}'::regclass
+                    AND e.objid = ${objid} AND e.deptype = 'e')`;
   return `DO $$
 DECLARE offenders TEXT;
 BEGIN
-  SELECT string_agg(p.oid::regprocedure::text, ', ' ORDER BY p.oid::regprocedure::text)
-    INTO offenders
-    FROM pg_proc p
-   WHERE p.pronamespace = '${schema}'::regnamespace
-     AND p.prosrc ~* 'pg_(try_)?advisory_'
-     AND p.oid NOT IN (SELECT objid FROM pg_depend WHERE classid = 'pg_proc'::regclass AND deptype = 'e')
-     AND NOT (p.proname IN (${gates})
-              AND position('current_setting(''transaction_isolation'')' IN p.prosrc) > 0
-              AND position('''read committed''' IN p.prosrc) > 0)
-     AND (p.proname, md5(p.prosrc)) NOT IN (${reviewed});
+  WITH rel AS (
+    SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+       AND ${own('pg_catalog.pg_class', 'c.oid')}
+  ), stored(what, def, routine) AS (
+    SELECT 'function ' || p.oid::regprocedure::text, pg_catalog.pg_get_functiondef(p.oid), true
+      FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prokind <> 'a'
+       AND ${own('pg_catalog.pg_proc', 'p.oid')}
+       AND NOT (n.nspname = '${schema}' AND p.prokind = 'f' AND NOT p.prosecdef AND NOT p.proretset
+                AND p.proconfig IS NULL AND p.provolatile = 'v' AND p.prorettype = 'pg_catalog.void'::regtype
+                AND p.prolang = (SELECT l.oid FROM pg_catalog.pg_language l WHERE l.lanname = 'plpgsql')
+                AND (p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',
+                     pg_catalog.md5(p.prosrc)) IN (${gates}))
+    UNION ALL
+    SELECT 'rule ' || r.rulename || ' on ' || r.ev_class::regclass::text, pg_catalog.pg_get_ruledef(r.oid), false
+      FROM pg_catalog.pg_rewrite r WHERE r.ev_class IN (SELECT oid FROM rel)
+    UNION ALL
+    SELECT 'default of ' || a.adrelid::regclass::text, pg_catalog.pg_get_expr(a.adbin, a.adrelid), false
+      FROM pg_catalog.pg_attrdef a WHERE a.adrelid IN (SELECT oid FROM rel)
+    UNION ALL
+    SELECT 'constraint ' || c.conname, pg_catalog.pg_get_constraintdef(c.oid), false
+      FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_namespace n ON n.oid = c.connamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+       AND (c.conrelid IN (SELECT oid FROM rel) OR (c.conrelid = 0 AND ${own('pg_catalog.pg_type', 'c.contypid')}))
+    UNION ALL
+    SELECT 'policy ' || p.polname || ' on ' || p.polrelid::regclass::text,
+           COALESCE(pg_catalog.pg_get_expr(p.polqual, p.polrelid), '') || ' ' ||
+           COALESCE(pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid), ''), false
+      FROM pg_catalog.pg_policy p WHERE p.polrelid IN (SELECT oid FROM rel)
+    UNION ALL
+    SELECT 'trigger ' || t.tgname || ' on ' || t.tgrelid::regclass::text, pg_catalog.pg_get_triggerdef(t.oid), false
+      FROM pg_catalog.pg_trigger t WHERE NOT t.tgisinternal AND t.tgrelid IN (SELECT oid FROM rel)
+    UNION ALL
+    SELECT 'index ' || i.indexrelid::regclass::text, pg_catalog.pg_get_indexdef(i.indexrelid), false
+      FROM pg_catalog.pg_index i WHERE i.indrelid IN (SELECT oid FROM rel)
+  )
+  SELECT string_agg(what, ', ' ORDER BY what) INTO offenders FROM stored
+   WHERE def ~* '${ADVISORY_OR_UNREADABLE}' OR (routine AND def ~* '\\mexecute\\M');
   IF offenders IS NOT NULL THEN
-    RAISE EXCEPTION 'functions that take an advisory lock themselves, not through read_committed_xact_lock (FU-268): %', offenders;
+    RAISE EXCEPTION 'names an advisory lock outside the reviewed READ COMMITTED gates, or SQL this cannot read (FU-268, #1016 r1 F2): %', offenders;
   END IF;
 END
 $$;`;

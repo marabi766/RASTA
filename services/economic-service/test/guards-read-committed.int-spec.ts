@@ -3,6 +3,7 @@ import { PrismaClient } from '../src/generated/prisma';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { WALLET_ACCOUNT_COVERED_REFUSAL } from '../src/wallet/balances';
 import {
+  aroundCommissionHistory,
   asActor,
   cleanup,
   databaseUrl,
@@ -174,7 +175,7 @@ describe('lock-then-read guards hold under every isolation level (real database)
     // wallet-hold-funding.int-spec.ts, the wallet and escrow one in wallet-account-covered.int-spec.ts.
     const GUARDS: [string, (tx: Raw, w: Funded) => Promise<unknown>, RegExp][] = [
       [
-        'trg_commission_rule_read_committed (a rule change)',
+        'trg_commission_rule_effective_dated (a rule change)',
         insertRule,
         /A guard that locks and then reads runs only under READ COMMITTED/,
       ],
@@ -217,9 +218,8 @@ describe('lock-then-read guards hold under every isolation level (real database)
       );
     });
 
-    // `commission_rule_scope_change` caches the instant a change is decided at in a setting any
-    // session may write, and then takes no lock: the rule write is gated all the same (FU-268
-    // self-review).
+    // 20261016120000 cached the instant a change is decided at in a setting any session may write,
+    // and then took no lock (FU-268 self-review): the setting is read by nothing now.
     it.each(LEVELS)(
       'under %s, a rule change whose instant the session set beforehand is refused all the same',
       async (isolationLevel) => {
@@ -253,9 +253,6 @@ describe('lock-then-read guards hold under every isolation level (real database)
           WHERE p.pronamespace = current_schema()::regnamespace
             AND p.prosrc ~* 'pg_(try_)?advisory_'
             AND p.proname NOT IN ('read_committed_xact_lock', 'read_committed_xact_lock_shared')
-            -- The verifier's one reviewed exemption, bound to that exact body (ADVISORY_LOCK_REVIEWED).
-            AND NOT (p.proname = 'commission_rule_scope_change'
-                     AND md5(p.prosrc) = '00575ce77214199041c83f4c5d64e9ec')
           ORDER BY 1`,
       );
       expect(rows.map((row) => row.proname)).toEqual([]);
@@ -263,6 +260,133 @@ describe('lock-then-read guards hold under every isolation level (real database)
   });
 
   // ---------------------------------------------------------------------------------------------
+
+  describe('(#1016 r1 F1) commission history: one boundary, at an instant no session sets', () => {
+    const IN_FORCE = /a commission rule in force keeps its status/;
+    const ruleOrg = () => `${org.a}-CMR-${(n += 1)}`;
+    const keyOf = `commission_rule_scope_key($1, 'LOGISTICS'::"BusinessLine", NULL)`;
+    /** A LOGISTICS line rule of its own scope, starting at `validFrom` (SQL), as `tx` writes it. */
+    const insertRule = (tx: Raw, organizationId: string, validFrom: string, conflict = '') =>
+      tx.$executeRawUnsafe(
+        `INSERT INTO commission_rule (id, organization_id, business_line, rate_basis_points,
+           valid_from, status, created_by, updated_by, updated_at)
+         VALUES ($2, $1, 'LOGISTICS', 200, ${validFrom}, 'ACTIVE', 'itest', 'itest', now()) ${conflict}`,
+        organizationId,
+        `CMR_${ulid()}`,
+      );
+    /** A rule in force since yesterday: planted around the guard, as the owner. */
+    const inForce = async () => {
+      const organizationId = ruleOrg();
+      await aroundCommissionHistory((tx) =>
+        insertRule(tx, organizationId, `(now() AT TIME ZONE 'UTC') - interval '1 day'`),
+      );
+      return organizationId;
+    };
+    const withdraw = (tx: Raw, organizationId: string) =>
+      tx.$executeRawUnsafe(
+        `UPDATE commission_rule SET status = 'INACTIVE' WHERE organization_id = $1`,
+        organizationId,
+      );
+
+    it('(i) an instant the session wrote into the old setting withdraws nothing', async () => {
+      const organizationId = await inForce();
+      await expect(
+        runtime.$transaction(async (tx) => {
+          await tx.$queryRawUnsafe(
+            `SELECT set_config('rasta.commission_rule_scope_' || to_hex(${keyOf}),
+               '2020-01-01T00:00:00.000', true) AS r`,
+            organizationId,
+          );
+          await withdraw(tx, organizationId);
+        }),
+      ).rejects.toThrow(IN_FORCE);
+    });
+
+    it('(i) a decision the session writes itself gets the database clock: still refused', async () => {
+      const organizationId = await inForce();
+      await expect(
+        runtime.$transaction(async (tx) => {
+          const [row] = await tx.$queryRawUnsafe<{ at: Date }[]>(
+            `INSERT INTO commission_rule_scope_decision (transaction_id, scope_key, decided_at)
+             VALUES ('1'::xid8, ${keyOf}, '2020-01-01') RETURNING decided_at AS at`,
+            organizationId,
+          );
+          // Not the instant the INSERT named: the clock, read once the scope's lock was held.
+          expect(row!.at.getTime()).toBeGreaterThan(Date.now() - 600_000);
+          await withdraw(tx, organizationId);
+        }),
+      ).rejects.toThrow(IN_FORCE);
+    });
+
+    it('(i) a decision is never changed or removed', async () => {
+      const KEPT = /a commission scope decision is never changed or removed/;
+      for (const change of [
+        `UPDATE commission_rule_scope_decision SET decided_at = '2020-01-01'`,
+        'DELETE FROM commission_rule_scope_decision',
+      ]) {
+        await expect(
+          runtime.$transaction(async (tx) => {
+            await tx.$queryRawUnsafe(
+              `SELECT commission_rule_scope_change($1, 'LOGISTICS', NULL)::text AS r`,
+              ruleOrg(),
+            );
+            await tx.$executeRawUnsafe(
+              // ISOLATION-ALLOW-UNBOUNDED: refused before any row changes; rolled back.
+              `${change} WHERE transaction_id = pg_current_xact_id()`,
+            );
+          }),
+        ).rejects.toThrow(KEPT);
+      }
+      await expect(
+        owner.$transaction((tx) =>
+          // ISOLATION-ALLOW-UNBOUNDED: refused by its trigger; rolled back.
+          tx.$executeRawUnsafe('TRUNCATE commission_rule_scope_decision'),
+        ),
+      ).rejects.toThrow(KEPT);
+    });
+
+    it('(ii) a rule that has started is never deleted, though nothing references it', async () => {
+      const organizationId = await inForce();
+      await expect(
+        runtime.$executeRawUnsafe(
+          'DELETE FROM commission_rule WHERE organization_id = $1',
+          organizationId,
+        ),
+      ).rejects.toThrow(/a commission rule that has started is history: it is never deleted/);
+      // Control: one that has not started yet goes, as a withdrawal would.
+      const ahead = ruleOrg();
+      await insertRule(runtime, ahead, `(now() AT TIME ZONE 'UTC') + interval '1 day'`);
+      await expect(
+        runtime.$executeRawUnsafe('DELETE FROM commission_rule WHERE organization_id = $1', ahead),
+      ).resolves.toBe(1);
+    });
+
+    it.each([
+      ['an INSERT', ''],
+      ['the insert branch of ON CONFLICT', 'ON CONFLICT (id) DO NOTHING'],
+    ])('(iii) %s that starts before the decided instant is refused', async (_how, conflict) => {
+      await expect(
+        insertRule(
+          runtime,
+          ruleOrg(),
+          `(now() AT TIME ZONE 'UTC') - interval '1 minute'`,
+          conflict,
+        ),
+      ).rejects.toThrow(/a commission rule starts now or later, never in the past/);
+      // Control: at the decided instant itself, and later.
+      await expect(
+        insertRule(
+          runtime,
+          ruleOrg(),
+          `commission_rule_scope_change($1, 'LOGISTICS', NULL)`,
+          conflict,
+        ),
+      ).resolves.toBe(1);
+      await expect(
+        insertRule(runtime, ruleOrg(), `(now() AT TIME ZONE 'UTC') + interval '1 day'`, conflict),
+      ).resolves.toBe(1);
+    });
+  });
 
   describe('(F1) two transactions debiting two accounts in opposite orders both commit', () => {
     it('no deadlock at commit: both lock in id order', async () => {

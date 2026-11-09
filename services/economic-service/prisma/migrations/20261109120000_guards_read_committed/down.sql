@@ -2,11 +2,14 @@
 --
 -- Gives back, byte for byte, the bodies of 20261016120000 (the pricing scope lock), 20261105120000
 -- (the hold reference and the transaction id), 20261107120000 (the hold journal guards) and
--- 20261108120000 (the wallet and escrow accounts), which take their locks themselves, then drops
--- the commission rule gate, the note trigger, their functions, the leg predicate and the gate.
--- Nothing was rewritten going up, so nothing is put back. The service calls the gate itself
--- (`lockReadCommitted`, `lockScopeForChange`): roll the release back first, or a rule change and a
--- reward, participation or recognition rule write is refused (fails closed) until it is.
+-- 20261108120000 (the wallet and escrow accounts), which take their locks themselves, and
+-- 20261016120000's commission history (the scope change and the effective-dated trigger, INSERT and
+-- UPDATE only), then drops the scope decisions, the note trigger, their functions, the leg predicate
+-- and the gate.
+-- Nothing was rewritten going up, so nothing is put back; the scope decisions are this migration's
+-- own and go with it. The service calls the gate itself (`lockReadCommitted`): roll the release
+-- back first, or a reward, participation or recognition rule write is refused (fails closed) until
+-- it is.
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';
@@ -129,8 +132,67 @@ BEGIN
   RETURN NULL;
 END; $$ LANGUAGE plpgsql;
 
-DROP TRIGGER "trg_commission_rule_read_committed" ON "commission_rule";
-DROP FUNCTION enforce_commission_rule_read_committed();
+-- 20261016120000's commission history: the instant in the session's setting again, INSERT and UPDATE.
+CREATE OR REPLACE FUNCTION commission_rule_scope_change(
+  organization_id TEXT, business_line "BusinessLine", transaction_type "TransactionType"
+) RETURNS TIMESTAMP(3) AS $$
+DECLARE
+  scope_key BIGINT := commission_rule_scope_key(organization_id, business_line, transaction_type);
+  setting TEXT := 'rasta.commission_rule_scope_' || to_hex(scope_key);
+  decided TEXT := NULLIF(current_setting(setting, true), '');
+BEGIN
+  IF decided IS NULL THEN
+    PERFORM pg_advisory_xact_lock(scope_key);
+    decided := to_char(date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC'),
+                       'YYYY-MM-DD"T"HH24:MI:SS.MS');
+    PERFORM set_config(setting, decided, true);
+  END IF;
+  RETURN decided::TIMESTAMP(3);
+END; $$ LANGUAGE plpgsql VOLATILE;
+
+CREATE OR REPLACE FUNCTION commission_rule_effective_dated() RETURNS TRIGGER AS $$
+DECLARE at TIMESTAMP(3);
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    -- A row naming no scope has no lock; `ck_commission_rule_scope` refuses it.
+    IF NEW."business_line" IS NOT NULL OR NEW."transaction_type" IS NOT NULL THEN
+      PERFORM commission_rule_scope_change(NEW."organization_id", NEW."business_line", NEW."transaction_type");
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF (NEW."organization_id", NEW."business_line", NEW."transaction_type", NEW."rate_basis_points",
+      NEW."min_amount_minor", NEW."max_amount_minor", NEW."valid_from")
+     IS DISTINCT FROM
+     (OLD."organization_id", OLD."business_line", OLD."transaction_type", OLD."rate_basis_points",
+      OLD."min_amount_minor", OLD."max_amount_minor", OLD."valid_from") THEN
+    RAISE EXCEPTION 'commission_rule terms never change: a new rate, scope or start is a new rule'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  at := commission_rule_scope_change(OLD."organization_id", OLD."business_line", OLD."transaction_type");
+  IF NEW."status" IS DISTINCT FROM OLD."status" AND OLD."valid_from" <= at THEN
+    RAISE EXCEPTION 'a commission rule in force keeps its status: end it with valid_to'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF NEW."valid_to" IS DISTINCT FROM OLD."valid_to" THEN
+    IF OLD."valid_to" IS NOT NULL AND OLD."valid_to" <= at THEN
+      RAISE EXCEPTION 'a commission rule that has ended cannot be moved or reopened'
+        USING ERRCODE = 'restrict_violation';
+    END IF;
+    IF NEW."valid_to" IS NOT NULL AND NEW."valid_to" < at THEN
+      RAISE EXCEPTION 'a commission rule is ended from now on, never in the past'
+        USING ERRCODE = 'restrict_violation';
+    END IF;
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+DROP TRIGGER "trg_commission_rule_history_kept" ON "commission_rule";
+DROP TRIGGER "trg_commission_rule_effective_dated" ON "commission_rule";
+CREATE TRIGGER "trg_commission_rule_effective_dated"
+  BEFORE INSERT OR UPDATE ON "commission_rule"
+  FOR EACH ROW EXECUTE FUNCTION commission_rule_effective_dated();
+DROP TABLE "commission_rule_scope_decision";
+DROP FUNCTION commission_rule_scope_decided();
 DROP TRIGGER "trg_ledger_entry_wallet_debits_noted" ON "ledger_entry";
 DROP FUNCTION note_wallet_account_debits();
 DROP FUNCTION wallet_account_debited_later(TEXT);
