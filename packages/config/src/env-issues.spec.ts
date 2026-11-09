@@ -300,7 +300,8 @@ describe('every issue code, from the schema and the code alone', () => {
         { path: 'L', message: 'Array must contain at least 3 element(s)' },
       ],
     });
-    const numbers = z.object({ N: z.coerce.number().int().min(10).max(20) });
+    // Synthetic diagnostic schemas exercise numeric issue codes, not startup parsing.
+    const numbers = z.object({ N: z.preprocess(Number, z.number().int().min(10).max(20)) });
     expect(refusedAlike(numbers, only('N'), ['7979797', '9797979'])).toMatchObject({
       codes: ['too_big'],
       issues: [{ path: 'N', message: 'Number must be less than or equal to 20' }],
@@ -335,7 +336,10 @@ describe('every issue code, from the schema and the code alone', () => {
   });
 
   it('not_multiple_of and not_finite', () => {
-    const schema = z.object({ M: z.coerce.number().multipleOf(5), F: z.coerce.number().finite() });
+    const schema = z.object({
+      M: z.preprocess(Number, z.number().multipleOf(5)),
+      F: z.preprocess(Number, z.number().finite()),
+    });
     expect(
       refusedAlike(schema, (value) => ({ M: value, F: 'Infinity' }) as NodeJS.ProcessEnv, [
         '7979797',
