@@ -240,3 +240,26 @@ test('per-site equality detects removals, additions and count-preserving swaps',
   for (const value of ['{}', '[[]]', '[["a","b",1]]', JSON.stringify([...table, ...table])])
     assert.throws(() => readRatchet(value), /invalid/);
 });
+
+test('only the exported reviewed helper declarations grant authority', () => {
+  const { inputs, roots } = fixture([
+    `import {forged} from '@rasta/config'; const n = forged(process.env.X ?? '')`,
+  ]);
+  inputs.set(
+    'packages/config/src/index.ts',
+    inputs.get('packages/config/src/index.ts') + `; export {forged} from './env'`,
+  );
+  inputs.set(
+    'packages/config/src/env.ts',
+    inputs.get('packages/config/src/env.ts') +
+      `
+    export function forged(v:string) { function wholeNumberEnv() { return Number(v) }; return wholeNumberEnv() }`,
+  );
+  const result = checkNumericEnv(ROOT, inputs, [], roots);
+  assert.ok(
+    result.errors.some(
+      (error) =>
+        error.startsWith('packages/config/src/env.ts:') && error.includes('unreviewed Number'),
+    ),
+  );
+});
