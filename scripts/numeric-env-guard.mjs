@@ -4,18 +4,18 @@ import ts from 'typescript';
 export const FROZEN_RATCHET = Object.freeze(JSON.parse(`{
   "asset-service": 7,
   "audit-service": 5,
-  "construction-service": 32,
+  "construction-service": 27,
   "contract-service": 15,
   "document-service": 15,
   "economic-service": 15,
   "fleet-service": 12,
   "identity-service": 10,
-  "inventory-service": 9,
+  "inventory-service": 5,
   "maintenance-service": 6,
   "marketplace-service": 10,
   "notification-service": 15,
   "organization-service": 1,
-  "procurement-service": 20
+  "procurement-service": 15
 }`));
 
 // AST traversal ignores comments/strings and catches multiline, bracket and parenthesized forms.

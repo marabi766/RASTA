@@ -10,6 +10,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   serviceUrlSchema,
+  wholeNumberEnv,
 } from '@rasta/config';
 import { inventoryOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 
@@ -168,12 +169,11 @@ export const inventoryEnvSchema = baseEnvSchema
       .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('INVENTORY_CONSIGNEE_READER_ROLES')),
 
-    INVENTORY_RESERVATION_MAX_TTL_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(60)
-      .max(366 * 24 * 60 * 60)
-      .prefault(7 * 24 * 60 * 60),
+    INVENTORY_RESERVATION_MAX_TTL_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,8}$/)
+      .prefault(String(7 * 24 * 60 * 60))
+      .pipe(wholeNumberEnv(60, 366 * 24 * 60 * 60)),
 
     INVENTORY_RESERVATION_SWEEP_INTERVAL_SECONDS: z.coerce
       .number()
@@ -233,13 +233,16 @@ export const inventoryEnvSchema = baseEnvSchema
       .max(10_000)
       .prefault(3000),
 
-    INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
-    INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(10)
-      .max(900)
-      .prefault(120),
+    INVENTORY_IDEMPOTENCY_TTL_HOURS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('24')
+      .pipe(wholeNumberEnv(1, 168)),
+    INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('120')
+      .pipe(wholeNumberEnv(10, 900)),
 
     /**
      * The largest offset of any replica's clock (and the database's) from true time, in seconds
@@ -249,7 +252,11 @@ export const inventoryEnvSchema = baseEnvSchema
      * is kept at least `B` past it. Beyond this offset the guarantee is void — alarm on a clock offset
      * above half of it. At its largest (300) B is 607 s.
      */
-    INVENTORY_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).prefault(30),
+    INVENTORY_CLOCK_SKEW_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('30')
+      .pipe(wholeNumberEnv(0, 300)),
   })
   .superRefine((env, ctx) => {
     // A window of the shared bound's size must be accepted on the slowest legal clock:
