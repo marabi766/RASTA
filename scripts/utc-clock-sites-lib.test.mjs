@@ -1222,6 +1222,387 @@ test('r2 F1.3: the scan reads every literal, a SET ROLE with no clock word inclu
   );
 });
 
+// FU-274: accepted on main d3aa0748d (probes recorded in task 1305's evidence).
+const R3_BASE = `CREATE TABLE task (id text, lease_until timestamp(3));
+  CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$UPDATE task SET lease_until = now()$$;
+  CREATE VIEW v AS SELECT lease_until < now() FROM task;`;
+const migrationRefused = (sql) => {
+  const r = replayMigrations([R3_BASE, sql]);
+  assert.ok(r.unmodelled.length + r.doBlocks.length > 0, sql);
+  return r;
+};
+for (const expression of [
+  `U&'UPDATE task SET lease_until = now()' UESCAPE '!'`,
+  `U&'opaque value' UESCAPE '!'`,
+]) {
+  for (const sql of [
+    `SELECT ${expression};`,
+    `SELECT cron.schedule('j', '* * * * *', ${expression});`,
+    `DO $d$ BEGIN PERFORM ${expression}; END $d$;`,
+    `DO $d$ BEGIN PERFORM cron.schedule('j', '* * * * *', ${expression}); END $d$;`,
+  ])
+    test(`FU-274 undecodable string: ${sql}`, () => migrationRefused(sql));
+}
+for (const sql of [
+  `DROP FUNCTION f.x();`,
+  `DROP FUNCTION IF EXISTS f.x;`,
+  `DROP ROUTINE f.x(int);`,
+  `DROP FUNCTION "f".x();`,
+  `DROP VIEW v.x;`,
+  `DROP MATERIALIZED VIEW IF EXISTS v.x;`,
+  `CREATE OR REPLACE VIEW v.x AS SELECT 1;`,
+  `CREATE TABLE p PARTITION OF task.x FOR VALUES IN (1);`,
+  `DROP FUNCTION public.f.x();`,
+  `DROP VIEW public.v.x;`,
+  `CREATE VIEW public.v.x AS SELECT 1;`,
+]) {
+  test(`FU-274 qualified name is never cut: ${sql}`, () => {
+    const r = migrationRefused(sql);
+    assert.equal(r.functions.size, 1, 'public f remains live');
+    assert.match(r.views.get('v').body, /now\(\)/, 'public v retains its clock body');
+    assert.equal(r.tables.has('p'), false);
+  });
+}
+for (const sql of [
+  `DROP FUNCTION public.f();`,
+  `DROP VIEW "public"."v";`,
+  `CREATE OR REPLACE VIEW public.v AS SELECT 1;`,
+  `CREATE TABLE p PARTITION OF public.task FOR VALUES IN (1);`,
+])
+  test(`FU-274 readable qualified name: ${sql}`, () => {
+    assert.deepEqual(replayMigrations([R3_BASE, sql]).unmodelled, []);
+  });
+for (const expression of [
+  `'INSERT' || chr(32) || 'INTO task (id) VALUES (1)'`,
+  `concat_ws(' ', 'INSERT', 'INTO task (id) VALUES (1)')`,
+  `format('%s INTO task (id) VALUES (1)', 'INSERT')`,
+  `'IN' || chr(83) || 'ERT INTO task (id) VALUES (1)'`,
+  `replace('XNSERT INTO task (id) VALUES (1)', 'X', 'I')`,
+  `opaque_builder('pieces', $1)`,
+]) {
+  for (const call of [
+    'dblink_exec',
+    'unknown_executor',
+    'shadow.format',
+    '"select"',
+    'shadow.select',
+    'rasta.pg_catalog.format',
+  ]) {
+    const sql = `SELECT ${call}('c', ${expression});`;
+    test(`FU-274 opaque SQL input: ${sql}`, () => {
+      assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+      migrationRefused(sql);
+      migrationRefused(`DO $$BEGIN PERFORM ${call}('c', ${expression}); END$$;`);
+      migrationRefused(`DO $$<<job>> BEGIN PERFORM ${call}('c', ${expression}); END job$$;`);
+      assert.match(definitionProblems({ body: sql, header: '' }, r2Scope).join(), /R0/);
+    });
+  }
+}
+for (const sql of [
+  `DISCARD ALL;`,
+  `DISCARD PLANS;`,
+  `DISCARD TEMP;`,
+  `DISCARD SEQUENCES;`,
+  `UPDATE pg_settings SET setting = 'shadow' WHERE name = 'search_path';`,
+  `WITH x AS (SELECT 1) UPDATE ONLY (pg_catalog.pg_settings) SET setting = $1;`,
+  `UPDATE "pg_catalog"."pg_settings" SET setting = $1;`,
+  `INSERT INTO pg_catalog.pg_settings (name, setting) VALUES ($1, $2);`,
+  `DELETE FROM ONLY pg_settings WHERE name = $1;`,
+  `MERGE INTO pg_settings USING task ON true WHEN MATCHED THEN UPDATE SET setting = $1;`,
+])
+  test(`FU-274 session change: ${sql}`, () => {
+    assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+    migrationRefused(sql);
+    migrationRefused(`DO $$BEGIN ${sql} END$$;`);
+  });
+for (const sql of [
+  `CREATE EXTENSION dblink;`,
+  `CREATE EXTENSION IF NOT EXISTS pg_cron;`,
+  `CREATE EXTENSION unreviewed_executor;`,
+  `CREATE EXTENSION pg_trgm WITH SCHEMA shadow;`,
+])
+  test(`FU-274 executor boundary: ${sql}`, () => {
+    migrationRefused(sql);
+    assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+  });
+for (const sql of [`CREATE EXTENSION IF NOT EXISTS btree_gist;`, `CREATE EXTENSION pg_trgm;`])
+  test(`FU-274 non-executing extension: ${sql}`, () => {
+    assert.deepEqual(replayMigrations([sql]).unmodelled, []);
+    assert.deepEqual(problemsIn(sql, r2Scope), []);
+  });
+for (const setting of [`role = 'shadow'`, `"role" = 'shadow'`, `unknown_setting = 'shadow'`]) {
+  test(`FU-274 routine header session change: ${setting}`, () => {
+    migrationRefused(`CREATE FUNCTION g() RETURNS int LANGUAGE sql SET ${setting} AS 'SELECT 1';`);
+    migrationRefused(`CREATE FUNCTION g() RETURNS int AS 'SELECT 1' LANGUAGE sql SET ${setting};`);
+  });
+}
+for (const modifier of ['TEMP', 'TEMPORARY', 'GLOBAL TEMPORARY', 'LOCAL TEMP']) {
+  test(`FU-274 production table shadow: ${modifier}`, () => {
+    assert.match(problemsIn(`CREATE ${modifier} TABLE task (id text);`, r2Scope).join(), /R0/);
+  });
+}
+for (const expression of [
+  `'INSERT' || chr(32) || 'INTO task (id) VALUES (1)'`,
+  `concat_ws(' ', 'INSERT', 'INTO task (id) VALUES (1)')`,
+  `format('%s INTO task (id) VALUES (1)', 'INSERT')`,
+])
+  test(`FU-274 labeled body: ${expression}`, () => {
+    migrationRefused(`DO $$<<job>> BEGIN PERFORM dblink_exec('c', ${expression}); END job$$;`);
+  });
+
+test('FU-274 value calls and prose remain readable', () => {
+  for (const sql of [
+    `SELECT pg_catalog.format('%s', concat_ws(' ', 'one', 'two'));`,
+    `SELECT replace('opaque data', 'a', 'b');`,
+    `Discard version changes before retrying`,
+  ])
+    assert.deepEqual(problemsIn(sql, r2Scope), [], sql);
+  assert.deepEqual(
+    replayMigrations([
+      `CREATE FUNCTION g() RETURNS int LANGUAGE sql SET statement_timeout = '1s' AS 'SELECT 1';`,
+    ]).unmodelled,
+    [],
+  );
+});
+test('FU-274 scan reaches opaque input without clock words', () => {
+  assert.match(
+    scanOf(
+      'x-service',
+      R3_BASE,
+      `export const sql = "SELECT unknown_executor('pieces', $1)";`,
+    ).join(),
+    /R0/,
+  );
+});
+
+// r1: the executor may consume text through data flow, outside its argument parentheses.
+const R1_FRAGMENTS = `'SEL' || chr(69) || 'CT 1 FROM task WHERE lease_until < n' || chr(111) || 'w()'`;
+for (const [probe, sql] of [
+  ['VALUES', `SELECT query_to_xml(q.s, true, false, NULL) FROM (VALUES (${R1_FRAGMENTS})) q(s)`],
+  ['subquery', `SELECT query_to_xml(q.s, true, false, NULL) FROM (SELECT ${R1_FRAGMENTS} AS s) q`],
+  ['CTE', `WITH q(s) AS (SELECT ${R1_FRAGMENTS}) SELECT query_to_xml(s, true, false, NULL) FROM q`],
+  ['LATERAL', `SELECT * FROM (VALUES (${R1_FRAGMENTS})) q(s), LATERAL ts_stat(q.s)`],
+  ['parameter', `SELECT query_to_xml($1, true, false, NULL)`],
+  ['direct control', `SELECT query_to_xml(${R1_FRAGMENTS}, true, false, NULL)`],
+]) {
+  test(`FU-274 r1 executor data flow: ${probe}`, () => {
+    assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+    assert.match(definitionProblems({ body: sql, header: '' }, r2Scope).join(), /R0/);
+    migrationRefused(`${sql};`);
+    migrationRefused(`DO $outer$<<job>> BEGIN PERFORM (${sql}); END job$outer$;`);
+  });
+}
+for (const call of [
+  'query_to_xml',
+  'query_to_xmlschema',
+  'query_to_xml_and_xmlschema',
+  'ts_stat',
+  'ts_rewrite',
+  'dblink_exec',
+  'dblink_send_query',
+  'cron.schedule',
+  'cron.schedule_in_database',
+  'pg_background_launch',
+  'pg_catalog."query_to_xml"',
+  '"pg_catalog".ts_stat',
+  '"cron"."schedule"',
+]) {
+  test(`FU-274 r1 executor without literal input: ${call}`, () => {
+    const body = `<<job>> DECLARE q text; BEGIN q := ${R1_FRAGMENTS}; PERFORM ${call}(q); END job`;
+    assert.match(problemsIn(`SELECT ${call}($1)`, r2Scope).join(), /R0/);
+    assert.match(definitionProblems({ body, header: '' }, r2Scope).join(), /R0/);
+    migrationRefused(`DO $outer$${body}$outer$;`);
+    migrationRefused(`DO $outer$<<job>> BEGIN PERFORM ${call}(q); END job$outer$;`);
+  });
+}
+test('FU-274 r1 executor in a headless string uses the same reader', () => {
+  const sql = `SELECT $b$ts_stat($1)$b$`;
+  assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+  migrationRefused(`${sql};`);
+  migrationRefused(`DO $outer$BEGIN PERFORM $b$ts_stat($1)$b$; END$outer$;`);
+});
+
+// Each review body reaches the shared reader through production strings, one-shot migrations,
+// and DO-body strings. Routine DDL refusal alone must not mask a broken string reader.
+for (const [probe, kind, body] of [
+  [
+    'labeled EXECUTE',
+    'FUNCTION f() RETURNS void',
+    `<<l>> BEGIN EXECUTE 'UPDATE task SET lease_until = n' || 'ow()'; END`,
+  ],
+  [
+    'labeled INSERT',
+    'FUNCTION f() RETURNS void',
+    `<<l>> BEGIN INSERT INTO task (id) VALUES (1); END`,
+  ],
+  [
+    'procedure',
+    'PROCEDURE p()',
+    `<<l>> BEGIN EXECUTE 'UPDATE task SET lease_until = n' || 'ow()'; END`,
+  ],
+  [
+    'DECLARE then label',
+    'FUNCTION f() RETURNS void',
+    `DECLARE x int := 1; <<l>> BEGIN EXECUTE 'UPDATE task SET lease_until = n' || 'ow()'; END`,
+  ],
+  [
+    'empty DECLARE',
+    'FUNCTION f() RETURNS void',
+    `DECLARE BEGIN INSERT INTO task (id) VALUES (1); END`,
+  ],
+  [
+    'RETURN QUERY EXECUTE',
+    'FUNCTION f() RETURNS SETOF task',
+    `<<l>> BEGIN RETURN QUERY EXECUTE 'SEL' || chr(69) || 'CT * FROM task'; END`,
+  ],
+  ['BEGIN control', 'FUNCTION f() RETURNS void', `BEGIN INSERT INTO task (id) VALUES (1); END`],
+  [
+    'format EXECUTE',
+    'PROCEDURE p()',
+    `<<l>> DECLARE q text; BEGIN q := format('%s', 'pieces'); EXECUTE q; END`,
+  ],
+]) {
+  test(`FU-274 r1 body reader: ${probe}`, () => {
+    assert.match(
+      problemsIn(`CREATE ${kind} LANGUAGE plpgsql AS $b$${body}$b$`, r2Scope).join(),
+      /R0/,
+    );
+    assert.match(problemsIn(`SELECT $b$${body}$b$`, r2Scope).join(), /R0/);
+    migrationRefused(`SELECT $b$${body}$b$;`);
+    migrationRefused(`DO $outer$<<job>> BEGIN PERFORM $b$${body}$b$; END job$outer$;`);
+    assert.ok(definitionProblems({ body, header: '' }, r2Scope).length > 0);
+  });
+}
+for (const prefix of ['<<l>>', 'DECLARE', 'BEGIN', 'THEN', 'ELSE', 'LOOP', 'RETURN QUERY']) {
+  test(`FU-274 r1 statement start: ${prefix}`, () => {
+    assert.match(problemsIn(`${prefix} EXECUTE $1`, r2Scope).join(), /R0/);
+    assert.match(
+      problemsIn(`SELECT $b$${prefix} INSERT INTO task (id) VALUES (1)$b$`, r2Scope).join(),
+      /R0/,
+    );
+  });
+}
+for (const kind of [
+  'FUNCTION f() RETURNS void',
+  'OR REPLACE FUNCTION f() RETURNS void',
+  'PROCEDURE p()',
+]) {
+  test(`FU-274 r1 production routine DDL: ${kind}`, () => {
+    // No string or clock: routine creation is refused independently of body recognition.
+    assert.match(problemsIn(`CREATE ${kind} LANGUAGE plpgsql AS $1`, r2Scope).join(), /R0/);
+  });
+}
+test('FU-274 r1 source scan reaches both readers without clock words', () => {
+  for (const sql of [
+    `SELECT query_to_xml($1, true, false, NULL)`,
+    `CREATE PROCEDURE p() LANGUAGE plpgsql AS $$<<l>> BEGIN INSERT INTO task (id) VALUES (1); END$$`,
+    `SELECT $$<<l>> BEGIN INSERT INTO task (id) VALUES (1); END$$`,
+  ])
+    assert.match(
+      scanOf('x-service', R3_BASE, `export const sql = ${JSON.stringify(sql)};`).join(),
+      /R0/,
+    );
+});
+
+// r2: every DDL expression crosses the same executor boundary before replay dispatch.
+// Even slots PostgreSQL restricts to immutable expressions must refuse, without type inference.
+const R2_SQL_TEXT = `$q$SELECT 1 FROM task WHERE lease_until < now()$q$`;
+const R2_DDL_SLOTS = [
+  ['policy USING', (e) => `CREATE POLICY p ON task USING (${e})`],
+  ['policy WITH CHECK', (e) => `CREATE POLICY p ON task FOR INSERT WITH CHECK (${e})`],
+  ['ALTER policy USING', (e) => `ALTER POLICY p ON task USING (${e})`],
+  ['ALTER policy WITH CHECK', (e) => `ALTER POLICY p ON task WITH CHECK (${e})`],
+  ['column CHECK', (e) => `CREATE TABLE t2 (id text CHECK (${e}))`],
+  ['table CHECK', (e) => `CREATE TABLE t3 (id text, CONSTRAINT c CHECK (${e}))`],
+  ['ADD CONSTRAINT CHECK', (e) => `ALTER TABLE task ADD CONSTRAINT c CHECK (${e})`],
+  ['ADD COLUMN CHECK', (e) => `ALTER TABLE task ADD COLUMN x text CHECK (${e})`],
+  [
+    'trigger WHEN',
+    (e) => `CREATE TRIGGER tr BEFORE UPDATE ON task FOR EACH ROW WHEN (${e}) EXECUTE FUNCTION f()`,
+  ],
+  ['TYPE USING', (e) => `ALTER TABLE task ALTER COLUMN id TYPE text USING ((${e})::text)`],
+  [
+    'SET DATA TYPE USING',
+    (e) => `ALTER TABLE task ALTER id SET DATA TYPE text USING ((${e})::text)`,
+  ],
+  ['column DEFAULT', (e) => `CREATE TABLE t4 (x boolean DEFAULT (${e}))`],
+  ['SET DEFAULT', (e) => `ALTER TABLE task ALTER COLUMN id SET DEFAULT ((${e})::text)`],
+  ['ADD COLUMN DEFAULT', (e) => `ALTER TABLE task ADD COLUMN x boolean DEFAULT (${e})`],
+  ['GENERATED AS', (e) => `CREATE TABLE t5 (x boolean GENERATED ALWAYS AS (${e}) STORED)`],
+  [
+    'ADD GENERATED',
+    (e) => `ALTER TABLE task ADD COLUMN x boolean GENERATED ALWAYS AS (${e}) STORED`,
+  ],
+  ['index expression', (e) => `CREATE INDEX i ON task ((${e}))`],
+  ['index WHERE', (e) => `CREATE UNIQUE INDEX i ON task (id) WHERE (${e})`],
+  ['domain CHECK', (e) => `CREATE DOMAIN d AS text CHECK (${e})`],
+  ['ALTER domain CHECK', (e) => `ALTER DOMAIN d ADD CONSTRAINT c CHECK (${e})`],
+  ['view expression', (e) => `CREATE VIEW v2 AS SELECT (${e}) AS x`],
+  [
+    'SQL routine expression',
+    (e) => `CREATE FUNCTION g() RETURNS boolean LANGUAGE sql RETURN (${e})`,
+  ],
+  [
+    'partition bound',
+    (e) => `CREATE TABLE child PARTITION OF parent FOR VALUES IN (((${e})::text))`,
+  ],
+];
+const R2_DDL_BASE = `${R3_BASE}; CREATE TABLE parent (id text) PARTITION BY LIST (id);`;
+for (const [slot, ddl] of R2_DDL_SLOTS) {
+  for (const [input, expression] of [
+    ['plain SQL', `query_to_xml(${R2_SQL_TEXT}, true, false, '') IS NOT NULL`],
+    ['fragment SQL', `query_to_xml(${R1_FRAGMENTS}, true, false, '') IS NOT NULL`],
+    ['ts_stat subquery', `EXISTS (SELECT 1 FROM ts_stat(${R2_SQL_TEXT}))`],
+  ]) {
+    test(`FU-274 r2 DDL executor: ${slot} / ${input}`, () => {
+      const r = replayMigrations([R2_DDL_BASE, `${ddl(expression)};`]);
+      assert.equal(r.unmodelled.length, 1);
+      assert.match(r.unmodelled[0], /SQL-text executor in a migration statement/);
+      assert.equal(r.doBlocks.length, 0, 'refused directly, never exempted as a DO body');
+    });
+  }
+}
+for (const call of [
+  'query_to_xmlschema',
+  'query_to_xml_and_xmlschema',
+  'ts_rewrite',
+  'dblink',
+  'dblink_exec',
+  'dblink_send_query',
+  'pg_background_launch',
+  'cron.schedule',
+  'cron.schedule_in_database',
+  'pg_catalog."query_to_xml"',
+  '"pg_catalog".ts_stat',
+  '"cron"."schedule"',
+]) {
+  test(`FU-274 r2 DDL executor spelling: ${call}`, () => {
+    // No SQL/clock in the argument: recognition must not depend on reading its value.
+    const sql = `CREATE POLICY p ON task USING (${call}(id) IS NOT NULL);`;
+    assert.match(
+      replayMigrations([R2_DDL_BASE, sql]).unmodelled.join(),
+      /SQL-text executor in a migration statement/,
+    );
+  });
+}
+test('FU-274 r2 ordinary DDL expressions and executor names as data remain readable', () => {
+  const r = replayMigrations([
+    R2_DDL_BASE,
+    `CREATE POLICY p ON task USING (length(id) > 0) WITH CHECK (id <> 'query_to_xml($1)');
+     ALTER POLICY p ON task USING (id <> 'ts_stat($1)');
+     CREATE TABLE t2 (id text DEFAULT 'dblink_exec($1)' CHECK (length(id) > 0));
+     ALTER TABLE task ADD CONSTRAINT c CHECK (id <> 'cron.schedule($1)');
+     ALTER TABLE task ALTER COLUMN id TYPE text USING lower(id);
+     CREATE TRIGGER tr BEFORE UPDATE ON task FOR EACH ROW WHEN (NEW.id <> 'pg_background_launch($1)')
+       EXECUTE FUNCTION f();
+     CREATE INDEX i ON task ((lower(id))) WHERE length(id) > 0;
+     COMMENT ON TABLE task IS 'query_to_xml($1)';`,
+  ]);
+  assert.deepEqual(r.unmodelled, []);
+  assert.deepEqual(r.doBlocks, []);
+  assert.deepEqual(r.triggers.get('f'), ['task']);
+});
+
 test('the repository passes', () => {
   assert.deepEqual(utcClockProblems(REPOSITORY), []);
 });
