@@ -11,7 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +36,7 @@ import {
   integrationPartitionStepProblems,
 } from './ci-integration-split-lib.mjs';
 import { workspaceDirectories, workspaceManifestFiles } from './workspace-roots-lib.mjs';
+import * as economicCoverage from './economic-coverage.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TEXT = readFileSync(resolve(ROOT, '.github/workflows/ci.yml'), 'utf8');
@@ -509,7 +510,13 @@ test('FU-111: every split job waits for the type check only, not for the whole q
   assert.equal(QUALITY_GATE_JOB, 'quality-types');
   const workflow = real();
   for (const id of splitJobs(workflow)) {
-    assert.deepEqual(workflow.jobs[id].needs, QUALITY_GATE_JOB, id);
+    assert.deepEqual(
+      workflow.jobs[id].needs,
+      id === 'integration-economic-coverage-merge'
+        ? [QUALITY_GATE_JOB, 'integration-economic-coverage']
+        : QUALITY_GATE_JOB,
+      id,
+    );
     const without = real();
     without.jobs[id].needs = 'quality-lint';
     fails(without, new RegExp(`^${id} must need ${QUALITY_GATE_JOB}$`));
@@ -569,6 +576,8 @@ test('FU-111: exactly these jobs wait for the type-check gate, and none for anot
     'integration-coverage',
     'integration-coverage-critical',
     'integration-economic',
+    'integration-economic-coverage',
+    'integration-economic-coverage-merge',
     'integration-security',
     'integration-suites',
     'migration-guards',
@@ -941,7 +950,9 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'integration-contract': 23,
       'integration-security': 35,
       'integration-coverage-critical': 35,
-      'integration-coverage': 92,
+      'integration-coverage': 84,
+      'integration-economic-coverage': 16,
+      'integration-economic-coverage-merge': 6,
       'integration-backup-drill': 8,
       'migration-reversibility-chain': 17,
       'migration-guards': 18,
@@ -1557,4 +1568,136 @@ test('FU-185 F1b: asset unit command fails when its Jest config matches zero spe
     assert.match(result.stdout + result.stderr, /No tests found/);
     assert.equal(result.status, 1, result.stdout + result.stderr);
   });
+});
+
+test('economic coverage refuses missing, duplicate, failed and skipped shard inventories', () => {
+  const result = (file) => ({
+    success: true,
+    numFailedTestSuites: 0,
+    numFailedTests: 0,
+    numPendingTestSuites: 0,
+    numPendingTests: 0,
+    numPassedTests: 1,
+    numTotalTests: 1,
+    numPassedTestSuites: 1,
+    numTotalTestSuites: 1,
+    testResults: [{ name: resolve(ROOT, 'services/economic-service', file), status: 'passed' }],
+  });
+  const valid = ['a', 'b', 'c'].map(result);
+  const check = (results) => economicCoverage.validateResults(results, ['a', 'b', 'c']);
+  assert.doesNotThrow(() => check(valid));
+  assert.throws(() => check(valid.slice(1)), /Missing/);
+  assert.throws(() => check([valid[0], valid[1], valid[1]]), /missing or duplicated/);
+  for (const key of [
+    'success',
+    'numFailedTestSuites',
+    'numFailedTests',
+    'numPendingTestSuites',
+    'numPendingTests',
+  ]) {
+    const bad = structuredClone(valid);
+    bad[0][key] = key === 'success' ? false : 1;
+    assert.throws(() => check(bad), /failed, skipped or empty/);
+  }
+  const empty = structuredClone(valid);
+  empty[0].testResults = [];
+  assert.throws(() => check(empty), /empty/);
+});
+
+test('economic coverage merged maps use real Jest thresholds, including missing sources', async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'economic-coverage-'));
+  const file = resolve(ROOT, 'services/economic-service/src/probe.ts');
+  const map = (hits) => ({
+    [file]: {
+      path: file,
+      statementMap: { 0: { start: { line: 1, column: 0 }, end: { line: 1, column: 1 } } },
+      fnMap: {
+        0: {
+          name: 'probe',
+          decl: { start: { line: 1, column: 0 }, end: { line: 1, column: 1 } },
+          loc: { start: { line: 1, column: 0 }, end: { line: 1, column: 1 } },
+          line: 1,
+        },
+      },
+      branchMap: {
+        0: {
+          type: 'if',
+          line: 1,
+          loc: { start: { line: 1, column: 0 }, end: { line: 1, column: 1 } },
+          locations: [{ start: { line: 1, column: 0 }, end: { line: 1, column: 1 } }],
+        },
+      },
+      s: { 0: hits },
+      f: { 0: hits },
+      b: { 0: [hits] },
+    },
+  });
+  try {
+    await economicCoverage.mergeCoverage([map(1), map(0), map(0)], dir);
+    assert.ok(existsSync(resolve(dir, 'coverage-final.json')));
+    await assert.rejects(
+      economicCoverage.mergeCoverage([map(0), map(0), map(0)], dir),
+      /threshold.*90%/,
+    );
+    await assert.rejects(
+      economicCoverage.mergeCoverage([map(1), {}, map(1)], dir),
+      /different source/,
+    );
+    await assert.rejects(economicCoverage.mergeCoverage([{}, {}, {}], dir), /Empty/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('economic coverage topology refuses dropped legs and artifact bypasses', () => {
+  for (const mutate of [
+    (w) => w.jobs['integration-economic-coverage'].strategy.matrix.shard.pop(),
+    (w) => (w.jobs['integration-economic-coverage'].strategy['fail-fast'] = true),
+    (w) => w.jobs['integration-economic-coverage-merge'].needs.pop(),
+    (w) =>
+      (w.jobs['integration-economic-coverage'].steps.at(-1).with['if-no-files-found'] = 'warn'),
+    (w) =>
+      (w.jobs['integration-economic-coverage'].steps.at(-1).with['include-hidden-files'] = false),
+    (w) => (w.jobs['integration-economic-coverage-merge'].steps.at(-2).with.pattern = '*'),
+  ]) {
+    const workflow = real();
+    mutate(workflow);
+    fails(workflow, /economic coverage/);
+  }
+  assert.deepEqual(
+    economicCoverage.slowest([
+      { file: 'fast', ms: 1 },
+      { file: 'slow', ms: 100 },
+    ]),
+    [
+      { file: 'slow', ms: 100 },
+      { file: 'fast', ms: 1 },
+    ],
+  );
+});
+
+test('economic coverage deadline kills its child and reports active and slow suites', async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'economic-deadline-'));
+  writeFileSync(
+    resolve(dir, 'progress.json'),
+    JSON.stringify({
+      active: 'active.int-spec.ts',
+      suites: [{ file: 'slow.int-spec.ts', ms: 100 }],
+    }),
+  );
+  const lines = [];
+  const log = console.log;
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true });
+  try {
+    console.log = (...args) => lines.push(args.join(' '));
+    await assert.rejects(
+      economicCoverage.supervise(child, dir, performance.now(), 50),
+      /deadline.*active suite: active.int-spec.ts/,
+    );
+    assert.match(lines.join('\n'), /Slowest economic suites:.*slow.int-spec.ts/);
+    assert.equal(child.signalCode, 'SIGKILL');
+  } finally {
+    console.log = log;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

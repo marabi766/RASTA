@@ -5,7 +5,7 @@ import { runUnscoped } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
 import { INVALID_CURSOR_MESSAGE } from '../src/shared/cursor';
 import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, databaseUrl, id, ownerDatabaseUrl } from './helpers';
+import { aroundCommissionHistory, cleanup, databaseUrl, id, ownerDatabaseUrl } from './helpers';
 
 /**
  * Commission by business line (ADR-045; COM-011; docs/23 D-057), over HTTP
@@ -303,8 +303,9 @@ describe('commission by business line (ADR-045)', () => {
 
   it('keeps a type-only rule from before business lines to the transactions without a line', async () => {
     // As the migration leaves every existing rule: a type, no line (D-057).
-    const legacy = await runUnscoped('the suite seeds a rule from before ADR-045', () =>
-      harness.prisma.client.commissionRule.create({
+    // A minute in the past, so planted around the database's refusal (#1016 r1 F1).
+    const legacy = await aroundCommissionHistory((tx) =>
+      tx.commissionRule.create({
         data: {
           id: id('CMR'),
           organizationId: unpriced,

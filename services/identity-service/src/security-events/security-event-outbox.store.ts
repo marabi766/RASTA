@@ -190,9 +190,8 @@ function toRow(raw: RawSecurityEventRow): OutboxRow {
 }
 
 /**
- * A positive safe integer for `SET LOCAL statement_timeout`, which accepts no
- * bind parameter. Derived from validated configuration, never request input,
- * and coerced so nothing but digits reaches the statement (S-05).
+ * A positive safe integer in milliseconds, bound to transaction-local
+ * `set_config`. Retains the existing configuration validation (S-05).
  */
 function statementTimeoutOf(timeoutMs: number): number {
   const bound = Math.max(1, Math.floor(timeoutMs));
@@ -257,7 +256,10 @@ export class SecurityEventOutboxStore implements OutboxStore {
     const client = this.prisma.client;
 
     const [, rows] = await client.$transaction([
-      client.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`),
+      client.$executeRawUnsafe(
+        "SELECT pg_catalog.set_config('statement_timeout', $1, true)",
+        `${bound}ms`,
+      ),
       client.$queryRawUnsafe<{ id: string; occurrence_count: number; created: boolean }[]>(
         CAPTURE_SQL,
         draft.id,

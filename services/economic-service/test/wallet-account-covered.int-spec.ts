@@ -23,7 +23,7 @@ import {
 jest.setTimeout(120_000);
 
 const REFUSED = new RegExp(WALLET_ACCOUNT_COVERED_REFUSAL);
-const ONLY_RC = /A wallet or escrow account is debited only under READ COMMITTED/;
+const ONLY_RC = /A guard that locks and then reads runs only under READ COMMITTED/;
 
 type Raw = Pick<PrismaClient, '$executeRawUnsafe' | '$queryRawUnsafe'>;
 

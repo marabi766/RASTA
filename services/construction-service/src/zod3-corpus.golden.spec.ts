@@ -185,7 +185,7 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
     constructionEnvSchema,
     {
       SERVICE_NAME: 'Sample',
-      PORT: 1,
+      PORT: '1',
       DATABASE_URL: 'postgresql://one:two@localhost:5432/one',
       KAFKA_BROKERS: 'Sample',
       KAFKA_CLIENT_ID: 'ORG-SAMPLE',
@@ -201,7 +201,7 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
     constructionEnvSchema,
     {
       SERVICE_NAME: 'Sample',
-      PORT: 1,
+      PORT: '1',
       DATABASE_URL: 'postgresql://one:two@localhost:5432/one',
       KAFKA_BROKERS: 'Sample',
       KAFKA_CLIENT_ID: 'ORG-SAMPLE',

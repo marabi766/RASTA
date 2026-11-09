@@ -61,7 +61,7 @@
       "projection": "root-scripts-reached-by-quality-jobs/v2",
       "fields": {
         "description": "sha256:8c8e905db502598858eb35a825d2042be6e68086e120ed325b5585781cbd5b9a",
-        "devDependencies": "sha256:e9c77ece343b3a15a7f42b539ae53b29f94d3b20b590c7d722d5d9fbca526bbf",
+        "devDependencies": "sha256:1d132fd909af42685c2e519f7ea2060eac5280fb6e6002cd78369f40b2ef74bb",
         "engines": "sha256:0ace372fd69efef9540d297c68dda0ed6d3355c3834d62a91328eb85a2e55d9e",
         "license": "sha256:869946cbbdda3db169b1d9332d09905ce77f667f3cd51271555c46de7f377a11",
         "name": "sha256:007a725b76302f8113413d00305855b5d9d3fbbcc06acca7b7b6a130b7a45b41",
@@ -174,7 +174,7 @@
         "test:seed-guard": "sha256:ebc5824fb8cc7971fb60d3c0a0080afebef63a989b4d6dd20ea8affe3cc14628",
         "test:seed-guard:db": "sha256:db6ef2f7428e1e7c49207dc7ea6ba560224f628cea83cb27f3b2631b81d3c1ac",
         "test:service-boundaries-lib": "sha256:c103d0181c29753e666160581e8efb6b04aa1e49e63ae73069685750923cba63",
-        "test:service-env-turbo": "sha256:9f4cdbd18c20d9f5d91eb10eeded6a05750ee6790f67a7274961dc3de436937b",
+        "test:service-env-turbo": "sha256:d4de8801ae44ddb0f5269a72cfb5fa0e8bbc2fc0b81a523a05eb21922f5b070d",
         "test:session-statement-timeout": "sha256:dffece8b5ccaa3ad70728b9734d4f2f834e6adb25396024a0e54161853854c03",
         "test:strict-query-parser-wiring": "sha256:096eed642093e4b3981c4642d48de186fcafa6287b8e3040127c15ddd96489bf",
         "test:supplier-privilege-split": "sha256:7ec77b5058dd00823f550e753c1717c154c52a3d1ab21491b8eccdde9d59507a",

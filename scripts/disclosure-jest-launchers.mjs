@@ -1,5 +1,14 @@
 // Closed reviewed registry: source/helper drift requires review of the declared launch boundaries.
 export const JEST_LAUNCHERS = {
+  'scripts/economic-coverage.mjs': {
+    kind: 'economic-coverage',
+    reaches:
+      'Fixed economic Jest binary, both projects, native 1/3..3/3 shards in band. Merge independently lists the complete inventory and uses installed Jest CoverageReporter with unchanged package thresholds. No forwarded configuration.',
+    sha256: {
+      'scripts/economic-coverage.mjs':
+        '44646468bfcdfa7f7caad65cc00d2f12662a447218110b9da22beaed1b542f41',
+    },
+  },
   'scripts/ci-tool-download.test.mjs': {
     kind: 'non-jest',
     workflowSteps: {
@@ -27,9 +36,9 @@ export const JEST_LAUNCHERS = {
       'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
     sha256: {
       'scripts/verify-migration-reversible-lib.test.mjs':
-        'dc9985598eb7b2ecdfb748d798989ff11572dacda52121439ef846f5693eb00b',
+        'ab2597a5acbea53c710fdc3ea7851890da0f2313644b02a3be15085fe4a75b2d',
       'scripts/verify-migration-reversible-lib.mjs':
-        'c756d4c7debca08c83978189332dd904e5c731d6b72d0449fbef65f89eee153b',
+        '63493a71ac71f82237f89c2fdde77911516cb98396b21581e1459c7074da5a6a',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },
@@ -211,12 +220,14 @@ export const JEST_LAUNCHERS = {
   'scripts/ci-integration-split.test.mjs': {
     kind: 'empty-unit-probe',
     reaches:
-      'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
+      'Spawns git/pnpm fixtures, asset Jest in band, and a bounded Node timer probe. The asset zero-match probe preserves setupFilesAfterEnv; economic helper tests use the installed CoverageReporter without executing suites. No CLI argument reaches a child.',
     sha256: {
+      'scripts/economic-coverage.mjs':
+        '44646468bfcdfa7f7caad65cc00d2f12662a447218110b9da22beaed1b542f41',
       'scripts/ci-integration-split.test.mjs':
-        '0bb9440a4ec8bdd191707c8853a32315d0ba2c8cf4d5bf468830c4388d49d14a',
+        '570d992f035ae9f6e8813330dfb709902af1dd973120e2f0b851b04ce9b13e0b',
       'scripts/ci-integration-split-lib.mjs':
-        '04916b838e43eaff29e95e14960b0e95f058b7401c9e68f3c1d3211c844f495c',
+        'c0fcee9186064ba5885571134295acd019abb4a608dba1435eefeb9d07f5ddbb',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },

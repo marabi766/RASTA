@@ -181,19 +181,19 @@ describe('amendments and milestones (CON-003 PR 3, Q-100)', () => {
 });
 
 describe('the clock-skew margin of the D-050 window', () => {
-  it('defaults to 300 seconds and accepts 0 and a decimal', () => {
+  it('defaults to 300 seconds and accepts 0 and leading zeros', () => {
     expect(load().CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS).toBe(300);
     expect(
       load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: '0' })
         .CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
     ).toBe(0);
     expect(
-      load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: '12.5' })
+      load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: '05' })
         .CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
-    ).toBe(12.5);
+    ).toBe(5);
   });
 
-  it.each(['-1', 'abc', '', ' ', 'NaN', 'Infinity', '1e3', '999999999'])(
+  it.each(['-1', 'abc', '', ' ', 'NaN', 'Infinity', '1e3', '999999999', '12.5', ' 5 ', '86401'])(
     'refuses to start with %j (fail closed)',
     (bad) => {
       expect(() => load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: bad })).toThrow();

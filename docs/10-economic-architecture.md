@@ -218,6 +218,21 @@ GROUP BY journal_id, currency
 HAVING SUM(CASE WHEN direction='DEBIT' THEN amount_minor ELSE -amount_minor END) <> 0;
 ```
 
+```sql
+-- ۴. هنگام Commit هیچ حساب WALLET یا ESCROW زیر صفر جمع نمی‌شود (FU-228، FU-268)
+CREATE CONSTRAINT TRIGGER trg_ledger_entry_wallet_covered
+  AFTER INSERT ON ledger_entry DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW WHEN (NEW.direction = 'DEBIT')
+  EXECUTE FUNCTION assert_wallet_account_covered();
+```
+
+**ناوردا (FU-228، FU-268).** هنگام Commit، Σ(CREDIT − DEBIT) هر حساب `WALLET` و `ESCROW` ≥ ۰ است، هر که بنویسد؛ Projection
+‏`wallet` فقط وقتی سنجیده می‌شود که بازنویسی شود، این نگهبان خود دفتر کل را می‌پرسد. بررسی همهٔ حساب‌هایی را که تراکنش Debit
+کرده به ترتیب شناسه قفل می‌کند (دو تراکنش با ترتیب وارونه Deadlock نمی‌سازند) و هر حساب را یک بار، با آخرین Leg ‏Debit آن، جمع
+می‌زند. **نگهبانی که قفل می‌گیرد و سپس می‌خواند فقط زیر READ COMMITTED کار می‌کند:** REPEATABLE READ و SERIALIZABLE از Snapshot
+پیش از انتظار می‌خوانند. پس هر قفل Advisory از راه `read_committed_xact_lock` گرفته می‌شود که هر سطح دیگر را با `23001` رد
+می‌کند، و Verifier ‏Migration تابعی را که خودش قفل Advisory بگیرد نمی‌پذیرد. Runbook: `docs/runbooks/wallet-account-covered.md`.
+
 ---
 
 ## ۱۰٫۵ چرخه Hold / Release

@@ -53,6 +53,21 @@ const PRETTIER = ['--parser', '--stdin-filepath'];
 
 /** @type {Readonly<Record<string, { accepts?: Record<string, string>, positionals?: string[], other?: string[] }>>} */
 export const CLI_CONTRACT = Object.freeze({
+  'scripts/economic-coverage.mjs': {
+    positionals: ['enum'],
+    other: [
+      '--listTests',
+      '--json',
+      '--runInBand',
+      '--coverage',
+      '--shard',
+      '--coverageThreshold',
+      '--coverageReporters',
+      '--coverageDirectory',
+      '--outputFile',
+      '--reporters',
+    ],
+  },
   // --- apps -----------------------------------------------------------------
   'apps/web/e2e/contract-fixture.ts': { other: ['-X', '-f', '-q', '-v'] },
   // The launcher that starts each Playwright server and proves it is the port's only holder
@@ -475,6 +490,8 @@ export const CLI_CONTRACT = Object.freeze({
   // Jest/pnpm command lines inspected as source text; this module reads no process argv.
   'scripts/disclosure-jest-launches.mjs': {
     other: [
+      '--coverage',
+      '--shard',
       '--filter',
       '--json',
       '--project',
