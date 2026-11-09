@@ -55,3 +55,6 @@ infrastructure/docker/kafka/.tls/
 # RUN-006: local overrides of the bootstrap-only Kafka credentials (the
 # committed bootstrap.env.example holds the development defaults).
 infrastructure/docker/kafka/bootstrap.env
+
+# CI economic coverage shard artifacts
+.economic-coverage/
