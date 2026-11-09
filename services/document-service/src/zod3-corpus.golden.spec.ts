@@ -91,7 +91,7 @@ describe('zod 3 diagnostics: an integer refusal with its enclosing refinements (
     const [, schema, input] = CASES[0]!;
     expect(outcome(schema, { ...(input as Record<string, unknown>), PORT })).toContainEqual([
       'PORT',
-      'custom',
+      'invalid_string',
       'Expected a whole number written as digits, such as "10"',
     ]);
   });
