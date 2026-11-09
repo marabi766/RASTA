@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
 import { authoredFiles } from './authored-source-inventory.cjs';
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { BACKOFF, TOOLS, download, transient } from './ci-tool-download.mjs';
 
 const root = new URL('../', import.meta.url).pathname;
@@ -204,7 +205,7 @@ function rangeHarness(t) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-range-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const git = (...args) => {
-    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: fixtureGitEnv() });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout.trim();
   };
@@ -246,7 +247,7 @@ process.exit(r.status || (r.stdout.includes('CI_RANGE_FIXTURE_') ? 2 : 0));
         cwd: dir,
         encoding: 'utf8',
         env: {
-          ...process.env,
+          ...fixtureGitEnv(),
           PATH: `${bin}:${process.env.PATH}`,
           SCAN_BASE: from,
           SCAN_HEAD: head,
