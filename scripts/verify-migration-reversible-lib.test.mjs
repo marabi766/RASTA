@@ -21,8 +21,11 @@ import { authoredFiles } from './authored-source-inventory.cjs';
 import { parse as parseYaml } from 'yaml';
 
 import {
+  ADVISORY_LOCK_GATES,
+  ADVISORY_LOCK_REVIEWED,
   EXPECTED,
   HOLD_UNPROVEN_SINCE_AT_COMMIT,
+  advisoryLockGateScript,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
@@ -1013,6 +1016,32 @@ test('snapshotQuery reads only the named schema and strips its name', () => {
   // Extension members and the ledger are excluded, not compared.
   assert.match(sql, /deptype = 'e'/);
   assert.match(sql, /relname = '_prisma_migrations'/);
+});
+
+test('advisoryLockGateScript refuses every function of the schema that names an advisory lock but a gate (FU-268)', () => {
+  const sql = advisoryLockGateScript('migration_check');
+  assert.deepEqual(ADVISORY_LOCK_GATES, [
+    'read_committed_xact_lock',
+    'read_committed_xact_lock_shared',
+  ]);
+  assert.match(sql, /p\.pronamespace = 'migration_check'::regnamespace/);
+  // Every advisory lock function, session or transaction, try or wait, any spelling.
+  assert.match(sql, /p\.prosrc ~\* 'pg_\(try_\)\?advisory_'/);
+  // A gate is one only by name AND by asking for READ COMMITTED.
+  assert.match(
+    sql,
+    /p\.proname IN \('read_committed_xact_lock', 'read_committed_xact_lock_shared'\)\s+AND position\('current_setting\(''transaction_isolation''\)' IN p\.prosrc\) > 0\s+AND position\('''read committed''' IN p\.prosrc\) > 0/,
+  );
+  assert.match(sql, /deptype = 'e'/);
+  // A reviewed exemption is the exact body only: name and md5 of its source, never a name alone.
+  for (const { name, md5, why } of ADVISORY_LOCK_REVIEWED) {
+    assert.match(md5, /^[0-9a-f]{32}$/);
+    assert.ok(why.length > 40, name);
+    assert.ok(sql.includes(`('${name}', '${md5}')`), name);
+  }
+  assert.match(sql, /\(p\.proname, md5\(p\.prosrc\)\) NOT IN \(/);
+  assert.match(sql, /RAISE EXCEPTION 'functions that take an advisory lock themselves/);
+  assert.throws(() => advisoryLockGateScript('bad"schema'));
 });
 
 test('the builders refuse identifiers that would have to be quoted into SQL', () => {

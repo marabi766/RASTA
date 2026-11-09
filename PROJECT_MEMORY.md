@@ -6121,6 +6121,21 @@ un\` است — تغییر نام آن پوشه رفعش می‌کند.
 
 ---
 
+### FU-228 و FU-268: حساب کیف پول زیر صفر جمع نمی‌شود؛ قفل سپس خواندن فقط زیر READ COMMITTED (2026-11-09)
+
+- **ناوردا:** هنگام Commit، هیچ حساب `WALLET` یا `ESCROW` زیر صفر جمع نمی‌شود (`trg_ledger_entry_wallet_covered`، economic
+  ‏`20261108120000`). بررسی همهٔ حساب‌های Debit‌شدهٔ تراکنش را به ترتیب شناسه قفل می‌کند و هر حساب را یک بار، با آخرین Leg ‏Debit
+  همان تراکنش، جمع می‌زند (`wallet_account_debited_later`، از `xmin`/`cmin`؛ یادداشت نشست `rasta.wallet_covered_accounts` فقط ترتیب
+  قفل است و هیچ جمعی را حذف نمی‌کند).
+- **کلاس قفل سپس خواندن:** نگهبانی که قفل می‌گیرد و سپس می‌خواند فقط زیر READ COMMITTED کار می‌کند. هر قفل Advisory در تابع‌های
+  Migration از راه `read_committed_xact_lock` / `read_committed_xact_lock_shared` (economic و inventory، ‏`20261109120000`) گرفته
+  می‌شود؛ `advisoryLockGateScript` در `verify-migration-reversible` هر تابع دیگری را که خودش قفل Advisory بگیرد، در هر سرویس، رد
+  می‌کند. Runbook: `docs/runbooks/wallet-account-covered.md`.
+- **باز:** قفل‌های Advisory کد TypeScript (چند سرویس) هنوز سطح را نمی‌پرسند؛ پیش‌فرض READ COMMITTED پایگاه داده آن‌ها را درست نگه
+  می‌دارد. پیشنهاد پیگیری در STATUS کار 1341.
+
+---
+
 ## Memory Update Protocol
 
 این فایل باید با هرکدام از این تغییرات به‌روز شود:

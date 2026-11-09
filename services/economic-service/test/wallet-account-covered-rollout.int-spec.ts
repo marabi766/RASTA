@@ -17,7 +17,7 @@ import { ownerDatabaseUrl } from './helpers';
 const COVERED = '20261108120000_wallet_account_covered_at_commit';
 const SERVICE_DIR = join(__dirname, '..');
 const REFUSAL =
-  /1 WALLET or ESCROW account\(s\) already sum below zero; refusing to guard a ledger that is already overdrawn, and changing nothing/;
+  /2 WALLET or ESCROW account\(s\) already sum below zero; refusing to guard a ledger that is already overdrawn, and changing nothing/;
 
 const PRISMA_CLI = (() => {
   const require = createRequire(join(SERVICE_DIR, 'package.json'));
@@ -135,13 +135,15 @@ describe(`${COVERED}: on a ledger in use`, () => {
               ('ACC_ROLLOUT_EXPENSE', $1, 'EXPENSE', 'ROLLOUT-EXPENSE', 'REWARD_EXPENSE', 'IRR', 'itest')`,
       ORG,
     );
-    // Used, and covered: escrow in and out again. Then the wallet: 1000 in, 1500 out.
+    // Both purposes the check counts, each below zero (FU-268 F4): escrow 300 in, 500 out; the
+    // wallet 1000 in, 1500 out.
     await post('ACC_ROLLOUT_EXPENSE', 'ACC_ROLLOUT_ESCROW', 300);
-    await post('ACC_ROLLOUT_ESCROW', 'ACC_ROLLOUT_EXPENSE', 300);
+    await post('ACC_ROLLOUT_ESCROW', 'ACC_ROLLOUT_EXPENSE', 500);
     await post('ACC_ROLLOUT_EXPENSE', 'ACC_ROLLOUT_WALLET', 1000);
     await post('ACC_ROLLOUT_WALLET', 'ACC_ROLLOUT_EXPENSE', 1500);
     const before = await ledger();
     expect(before.find((row) => row.account_id === 'ACC_ROLLOUT_WALLET')?.balance).toBe(-500n);
+    expect(before.find((row) => row.account_id === 'ACC_ROLLOUT_ESCROW')?.balance).toBe(-200n);
 
     const refused = prismaCli(['migrate', 'deploy'], { url });
     expect(refused.ok).toBe(false);
@@ -157,6 +159,7 @@ describe(`${COVERED}: on a ledger in use`, () => {
 
     // The operator's correction, a journal, and the runbook the refusal names.
     await post('ACC_ROLLOUT_EXPENSE', 'ACC_ROLLOUT_WALLET', 500);
+    await post('ACC_ROLLOUT_EXPENSE', 'ACC_ROLLOUT_ESCROW', 200);
     expect(prismaCli(['migrate', 'resolve', '--rolled-back', COVERED], { url }).ok).toBe(true);
     const deployed = prismaCli(['migrate', 'deploy'], { url });
     expect(deployed.ok ? '' : deployed.output).toBe('');
