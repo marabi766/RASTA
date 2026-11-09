@@ -61,7 +61,7 @@
       "projection": "root-scripts-reached-by-quality-jobs/v2",
       "fields": {
         "description": "sha256:8c8e905db502598858eb35a825d2042be6e68086e120ed325b5585781cbd5b9a",
-        "devDependencies": "sha256:e9c77ece343b3a15a7f42b539ae53b29f94d3b20b590c7d722d5d9fbca526bbf",
+        "devDependencies": "sha256:1d132fd909af42685c2e519f7ea2060eac5280fb6e6002cd78369f40b2ef74bb",
         "engines": "sha256:0ace372fd69efef9540d297c68dda0ed6d3355c3834d62a91328eb85a2e55d9e",
         "license": "sha256:869946cbbdda3db169b1d9332d09905ce77f667f3cd51271555c46de7f377a11",
         "name": "sha256:007a725b76302f8113413d00305855b5d9d3fbbcc06acca7b7b6a130b7a45b41",
