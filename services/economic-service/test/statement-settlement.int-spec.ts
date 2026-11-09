@@ -27,6 +27,7 @@ import {
 } from './api-helpers';
 import { StubContractService } from './contract-service.stub';
 import {
+  aroundCommissionHistory,
   asActor,
   cleanup,
   fundWallet,
@@ -755,8 +756,9 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
         transactionType: 'CONSTRUCTION_STATEMENT' | null;
       },
     ) =>
-      runUnscoped('the suite seeds a commission rule for one payee', () =>
-        prisma.client.commissionRule.create({
+      // A minute in the past, so planted around the database's refusal (#1016 r1 F1).
+      aroundCommissionHistory((tx) =>
+        tx.commissionRule.create({
           data: {
             id: id('CMR'),
             organizationId,

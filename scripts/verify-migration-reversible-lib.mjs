@@ -682,6 +682,9 @@ const TRANSACTION_FUNDED_HOLD = '20261106130000_transaction_funded_hold';
 // default, so any rollback below it takes it down first, or the re-deploy would skip it.
 const UTC_CLOCK_DEFAULTS = '20261106140000_utc_clock_defaults';
 const HOLD_FUNDED_AT_COMMIT = '20261107120000_hold_funded_at_commit';
+// FU-268: it redefines guards of 20261016120000, 20261105120000 and 20261107120000 (each now locks
+// through the READ COMMITTED gate), so any rollback below one of them takes it down first.
+const GUARDS_READ_COMMITTED = '20261109120000_guards_read_committed';
 
 /**
  * The `held_at` of every probe row with no hold of its own, cleared with its stamp lifted: what an
@@ -718,6 +721,24 @@ VALUES ('${id}', 'ORG-MIGCHECK-PAYEE', '${transactionId}', ${ruleId ? `'${ruleId
  */
 const COMMISSION_TRIGGER_HERE = `SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
    WHERE t.tgname = 'trg_commission_append_only' AND c.relnamespace = current_schema()::regnamespace`;
+
+/**
+ * `sql`, probe rules written in the past, with `trg_commission_rule_effective_dated` (where it
+ * exists) lifted for this one statement: since 20261109120000 no rule starts in the past and no rule
+ * that has started is deleted (#1016 r1 F1), so the probes plant their history around it.
+ */
+const AROUND_COMMISSION_HISTORY = (sql) => `DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+              WHERE t.tgname = 'trg_commission_rule_effective_dated'
+                AND c.relnamespace = current_schema()::regnamespace) THEN
+    EXECUTE 'ALTER TABLE "commission_rule" DISABLE TRIGGER "trg_commission_rule_effective_dated"';
+    ${sql}
+    EXECUTE 'ALTER TABLE "commission_rule" ENABLE TRIGGER "trg_commission_rule_effective_dated"';
+  ELSE
+    ${sql}
+  END IF;
+END $$;`;
 
 /** `sql`, a probe commission row, with the proof of a settlement's creation (FU-097) out of its way. */
 const WITHOUT_COMMISSION_PROOF = (sql) => {
@@ -760,7 +781,7 @@ BEGIN
     EXECUTE 'ALTER TABLE "commission" ENABLE TRIGGER "trg_commission_append_only"';
   END IF;
 END $$;
-DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_%';
+${AROUND_COMMISSION_HISTORY(`DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_%';`)}
 ${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_%'`)}`;
 
 /**
@@ -778,6 +799,7 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   {
     label: 'commission: down to the schema before business lines (empty)',
     runDownScript: [
+      GUARDS_READ_COMMITTED,
       HOLD_FUNDED_AT_COMMIT,
       UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
@@ -838,21 +860,21 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   },
   {
     label: 'commission: a rule that has been in force keeps its status (D-057)',
-    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+    sql: `${AROUND_COMMISSION_HISTORY(`INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
             "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
           VALUES ('CMR_MIGCHECK_PAST', 'ORG-MIGCHECK-OTHER', 'LOGISTICS', 100,
-            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');
+            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`)}
           UPDATE "commission_rule" SET "status" = 'INACTIVE' WHERE id = 'CMR_MIGCHECK_PAST';`,
     mustFail: 'keeps its status',
   },
   {
     label: 'commission: two active rules of one scope never overlap (D-057)',
-    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+    sql: AROUND_COMMISSION_HISTORY(`INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
             "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
           VALUES ('CMR_MIGCHECK_EARLIER', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 100,
             '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK'),
                  ('CMR_MIGCHECK_OVERLAP', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 500,
-            '2020-01-15', NULL, 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+            '2020-01-15', NULL, 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`),
     mustFail: 'ex_commission_rule_type_only_no_overlap',
   },
   {
@@ -880,7 +902,7 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   },
   {
     label: 'commission: down succeeds over rows without a line, and keeps them',
-    runDownScript: [COMMISSION_BUSINESS_LINES],
+    runDownScript: [GUARDS_READ_COMMITTED, COMMISSION_BUSINESS_LINES],
   },
   {
     label: 'commission: every row as it was, the rule still named, the type NOT NULL again',
@@ -904,7 +926,8 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
     sql: [
       `INSERT INTO "commission_rule" ("id", "organization_id", "business_line", "rate_basis_points",
          "valid_from", "status", "created_by", "updated_at", "updated_by")
-       VALUES ('CMR_MIGCHECK_LINE', 'ORG-MIGCHECK-PAYEE', 'PARTS', 100, now(), 'ACTIVE',
+       VALUES ('CMR_MIGCHECK_LINE', 'ORG-MIGCHECK-PAYEE', 'PARTS', 100,
+         commission_rule_scope_change('ORG-MIGCHECK-PAYEE', 'PARTS', NULL), 'ACTIVE',
          'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
       TRANSACTION_MIGCHECK('TXN_MIGCHECK_LINE', 'PARTS'),
       WITHOUT_COMMISSION_PROOF(
@@ -943,7 +966,10 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
     label: 'commission: clear the line rows, and down again',
     sql: COMMISSION_MIGCHECK_CLEANUP,
   },
-  { label: 'commission: down (no line anywhere)', runDownScript: [COMMISSION_BUSINESS_LINES] },
+  {
+    label: 'commission: down (no line anywhere)',
+    runDownScript: [GUARDS_READ_COMMITTED, COMMISSION_BUSINESS_LINES],
+  },
   {
     label: 'commission: two active type-only rules for one organization and type, overlapping',
     sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
@@ -1156,6 +1182,7 @@ const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_disput
  */
 const RESOLVED_DISPUTE_DOWNS = [
   // These probes move a transaction to SETTLED with no settlement behind it.
+  GUARDS_READ_COMMITTED,
   HOLD_FUNDED_AT_COMMIT,
   UTC_CLOCK_DEFAULTS,
   TRANSACTION_FUNDED_HOLD,
@@ -1606,6 +1633,7 @@ const SETTLEMENT_REVERSAL_STEPS = [
   {
     label: 'settlement reversal: the proof of creation goes first, these probes are bare rows',
     runDownScript: [
+      GUARDS_READ_COMMITTED,
       HOLD_FUNDED_AT_COMMIT,
       UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
@@ -1670,6 +1698,7 @@ const SETTLEMENT_REVERSAL_STEPS = [
   {
     label: 'settlement reversal: the proof of creation goes again, before the probe rows do',
     runDownScript: [
+      GUARDS_READ_COMMITTED,
       HOLD_FUNDED_AT_COMMIT,
       UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
@@ -1889,6 +1918,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
   {
     label: 'creation proof: down over them refuses nothing, and leaves every row',
     runDownScript: [
+      GUARDS_READ_COMMITTED,
       HOLD_FUNDED_AT_COMMIT,
       UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
@@ -1926,6 +1956,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
 ];
 
 const HOLD_DECISION_DOWNS = [
+  GUARDS_READ_COMMITTED,
   HOLD_FUNDED_AT_COMMIT,
   UTC_CLOCK_DEFAULTS,
   TRANSACTION_FUNDED_HOLD,
@@ -1975,7 +2006,7 @@ export const HOLD_UNPROVEN_SINCE_AT_COMMIT = `h."placed_journal_id" IS NOT NULL 
 const FUNDED_FROM_ELSEWHERE_STEPS = [
   {
     label: 'funded from elsewhere: down to the predicate before',
-    runDownScript: [HOLD_FUNDED_AT_COMMIT],
+    runDownScript: [GUARDS_READ_COMMITTED, HOLD_FUNDED_AT_COMMIT],
   },
   {
     label: 'funded from elsewhere: a hold whose journal credits escrow from PAYMENT_CLEARING',
@@ -2125,6 +2156,7 @@ const HOLD_DECISION_STEPS = [
   {
     label: 'hold decisions: down',
     runDownScript: [
+      GUARDS_READ_COMMITTED,
       HOLD_FUNDED_AT_COMMIT,
       UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
@@ -2201,7 +2233,10 @@ const HOLD_DECISION_STEPS = [
             END IF;
           END $$;`,
   },
-  { label: 'funded holds: the newest rollback first', runDownScript: [HOLD_FUNDED_AT_COMMIT] },
+  {
+    label: 'funded holds: the newest rollback first',
+    runDownScript: [GUARDS_READ_COMMITTED, HOLD_FUNDED_AT_COMMIT],
+  },
   {
     label:
       'funded holds: the rollback refuses while a row stamped HELD has no hold of its own (FU-182)',
@@ -2886,6 +2921,8 @@ export const EXPECTED = {
       'payment_refund_decline',
       // The instant line rules began to price (docs/23 D-057).
       'commission_pricing_cutover',
+      // The instant each rule change was decided at, which no session sets (#1016 r1 F1).
+      'commission_rule_scope_decision',
       // The participation rule's versions (ADR-047, docs/24 Q-139).
       'participation_rule',
       // The levels-and-badges versions (COM-012, docs/24 Q-140).
@@ -2977,6 +3014,13 @@ export const EXPECTED = {
       'trg_journal_hold_funding_final',
       // A wallet or escrow account never sums below zero at commit (FU-228).
       'trg_ledger_entry_wallet_covered',
+      // ...checked in account id order, once per account (FU-268).
+      'trg_ledger_entry_wallet_debits_noted',
+      // A commission scope decision is the database's, and kept; rules are never truncated
+      // (#1016 r1 F1).
+      'trg_commission_rule_scope_decided',
+      'trg_commission_rule_scope_decision_kept',
+      'trg_commission_rule_history_kept',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -3034,6 +3078,12 @@ export const EXPECTED = {
       'reject_hold_journal_leg',
       'reject_hold_journal_reversal',
       'assert_wallet_account_covered',
+      // FU-268: the lock-then-read gate, and the wallet check's lock order and once-per-account.
+      'read_committed_xact_lock',
+      'read_committed_xact_lock_shared',
+      'note_wallet_account_debits',
+      'wallet_account_debited_later',
+      'commission_rule_scope_decided',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',
@@ -3998,6 +4048,8 @@ export const EXPECTED = {
       'return_disposition_guard',
       'return_shipment_dispatch_fence',
       'return_dispatch_withdrawal_guard',
+      // FU-268: the fence takes its lock through the READ COMMITTED gate.
+      'read_committed_xact_lock',
     ],
     indexes: [
       'ux_warehouse_org_id',
@@ -4632,6 +4684,116 @@ export function assertionScript(expected, present, schema) {
   ].join('\n');
 
   return `DO $$\nBEGIN\n${checks}\nEND\n$$;`;
+}
+
+// -----------------------------------------------------------------------------
+// Lock, then read: only under READ COMMITTED (FU-268)
+//
+// A guard that takes a transaction lock and then reads what a writer holding
+// the same lock may just have committed protects nothing under REPEATABLE READ
+// or SERIALIZABLE: their reads use the transaction's first snapshot, from
+// before the wait (#936 r1 F1, #983 r1 F3). So nothing stored in the database
+// names an advisory lock but the gates, `read_committed_xact_lock` and
+// `read_committed_xact_lock_shared`, which refuse every other isolation level
+// once they hold the lock. Read from the catalogue after the deploy, in every
+// schema: every routine's whole definition (`pg_get_functiondef`, so a
+// SQL-standard body too) and every view, rule, default, constraint, policy,
+// trigger and index as PostgreSQL prints it back.
+//
+// What it cannot read it refuses (#1016 r1 F2): a `U&"…"` name or a UESCAPE,
+// whose spelling is not the name PostgreSQL reads, and SQL text a routine
+// executes (EXECUTE, query_to_xml, ts_stat, dblink, pg_background, cron), whose
+// names it cannot see. A comment counts as text, so it can only refuse. A gate
+// is one only as reviewed: by signature, attributes and the md5 of its body, in
+// whichever schema holds it (the deployed `public` beside `migration_check` is
+// the same gate). A routine with a gate's name that is not that gate is refused
+// even if it locks nothing: a guard calling the name would get no lock and no
+// check. There is no other exemption. Extension members are the extension's.
+// -----------------------------------------------------------------------------
+
+/** The reviewed gates: what each review read (economic and inventory 20261109120000). */
+export const ADVISORY_LOCK_GATES = [
+  {
+    signature: 'read_committed_xact_lock(lock_key bigint)',
+    md5: '31d208b4fd46ad6f26fb7ed4674693c9',
+  },
+  {
+    signature: 'read_committed_xact_lock(lock_key integer, lock_subkey integer)',
+    md5: '59691e094f935c798ff9c6eac023df63',
+  },
+  {
+    signature: 'read_committed_xact_lock_shared(lock_key bigint)',
+    md5: '999ff87c73fb2252697b136d50c0df3f',
+  },
+];
+
+/** Text that names an advisory lock, or that this cannot read. */
+const ADVISORY_OR_UNREADABLE = String.raw`pg_(try_)?advisory_|u&"|\muescape\M|\m(query_to_xml\w*|ts_stat|ts_rewrite|dblink\w*|pg_background_\w*)\M|\mcron\s*\.`;
+
+export function advisoryLockGateScript(schema) {
+  assertSchemaName(schema);
+  const gates = ADVISORY_LOCK_GATES.map(({ signature, md5 }) => `('${signature}', '${md5}')`).join(
+    ', ',
+  );
+  const names = [...new Set(ADVISORY_LOCK_GATES.map(({ signature }) => signature.split('(')[0]))]
+    .map((name) => `'${name}'`)
+    .join(', ');
+  // Not the catalogues', not an extension's.
+  const own = (classid, objid) =>
+    `NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend e WHERE e.classid = '${classid}'::regclass
+                    AND e.objid = ${objid} AND e.deptype = 'e')`;
+  return `DO $$
+DECLARE offenders TEXT;
+BEGIN
+  WITH gate AS (
+    SELECT p.oid, (p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',
+                   pg_catalog.md5(p.prosrc)) IN (${gates})
+             AND p.prokind = 'f' AND NOT p.prosecdef AND NOT p.proretset AND p.proconfig IS NULL
+             AND p.provolatile = 'v' AND p.prorettype = 'pg_catalog.void'::regtype
+             AND p.prolang = (SELECT l.oid FROM pg_catalog.pg_language l WHERE l.lanname = 'plpgsql') AS reviewed
+      FROM pg_catalog.pg_proc p
+  ), rel AS (
+    SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+       AND ${own('pg_catalog.pg_class', 'c.oid')}
+  ), stored(what, def, routine) AS (
+    SELECT 'function ' || p.oid::regprocedure::text,
+           CASE WHEN p.proname IN (${names}) THEN 'pg_advisory_ (a gate''s name, not the reviewed gate)'
+                ELSE pg_catalog.pg_get_functiondef(p.oid) END, true
+      FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+      JOIN gate g ON g.oid = p.oid
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prokind <> 'a'
+       AND ${own('pg_catalog.pg_proc', 'p.oid')} AND NOT g.reviewed
+    UNION ALL
+    SELECT 'rule ' || r.rulename || ' on ' || r.ev_class::regclass::text, pg_catalog.pg_get_ruledef(r.oid), false
+      FROM pg_catalog.pg_rewrite r WHERE r.ev_class IN (SELECT oid FROM rel)
+    UNION ALL
+    SELECT 'default of ' || a.adrelid::regclass::text, pg_catalog.pg_get_expr(a.adbin, a.adrelid), false
+      FROM pg_catalog.pg_attrdef a WHERE a.adrelid IN (SELECT oid FROM rel)
+    UNION ALL
+    SELECT 'constraint ' || c.conname, pg_catalog.pg_get_constraintdef(c.oid), false
+      FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_namespace n ON n.oid = c.connamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+       AND (c.conrelid IN (SELECT oid FROM rel) OR (c.conrelid = 0 AND ${own('pg_catalog.pg_type', 'c.contypid')}))
+    UNION ALL
+    SELECT 'policy ' || p.polname || ' on ' || p.polrelid::regclass::text,
+           COALESCE(pg_catalog.pg_get_expr(p.polqual, p.polrelid), '') || ' ' ||
+           COALESCE(pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid), ''), false
+      FROM pg_catalog.pg_policy p WHERE p.polrelid IN (SELECT oid FROM rel)
+    UNION ALL
+    SELECT 'trigger ' || t.tgname || ' on ' || t.tgrelid::regclass::text, pg_catalog.pg_get_triggerdef(t.oid), false
+      FROM pg_catalog.pg_trigger t WHERE NOT t.tgisinternal AND t.tgrelid IN (SELECT oid FROM rel)
+    UNION ALL
+    SELECT 'index ' || i.indexrelid::regclass::text, pg_catalog.pg_get_indexdef(i.indexrelid), false
+      FROM pg_catalog.pg_index i WHERE i.indrelid IN (SELECT oid FROM rel)
+  )
+  SELECT string_agg(what, ', ' ORDER BY what) INTO offenders FROM stored
+   WHERE def ~* '${ADVISORY_OR_UNREADABLE}' OR (routine AND def ~* '\\mexecute\\M');
+  IF offenders IS NOT NULL THEN
+    RAISE EXCEPTION 'names an advisory lock outside the reviewed READ COMMITTED gates, or SQL this cannot read (FU-268, #1016 r1 F2): %', offenders;
+  END IF;
+END
+$$;`;
 }
 
 // -----------------------------------------------------------------------------

@@ -535,7 +535,10 @@ test('the required runtime function list: every line, the last one too; malforme
   for (const [, signature] of requiredRuntimeFunctions) {
     const types = signature.slice(signature.indexOf('(') + 1, -1).split(',');
     for (const type of types) {
-      assert.ok(/^(text|integer|boolean|public\."[A-Za-z]+")$/.test(type), `${signature}: ${type}`);
+      assert.ok(
+        /^(text|integer|bigint|boolean|public\."[A-Za-z]+")$/.test(type),
+        `${signature}: ${type}`,
+      );
     }
   }
 });
