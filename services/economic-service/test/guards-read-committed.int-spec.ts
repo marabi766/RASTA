@@ -176,27 +176,27 @@ describe('lock-then-read guards hold under every isolation level (real database)
       [
         'trg_commission_rule_read_committed (a rule change)',
         insertRule,
-        /A commission rule changes only under READ COMMITTED/,
+        /A guard that locks and then reads runs only under READ COMMITTED/,
       ],
       [
         'commission_pricing_scope_lock (a pricing)',
         scope('commission_pricing_scope_lock'),
-        /A commission is priced only under READ COMMITTED/,
+        /A guard that locks and then reads runs only under READ COMMITTED/,
       ],
       [
         'trg_wallet_hold_reference_bound (a hold for anything else)',
         insertOtherHold,
-        /A hold for anything else is written only under READ COMMITTED/,
+        /A guard that locks and then reads runs only under READ COMMITTED/,
       ],
       [
         'trg_transaction_id_unclaimed (a transaction)',
         (tx, w) => insertTransaction(tx, `TXN_${ulid()}`, w.organizationId),
-        /A transaction is written only under READ COMMITTED/,
+        /A guard that locks and then reads runs only under READ COMMITTED/,
       ],
       [
         'trg_ledger_entry_wallet_covered (a wallet debit)',
         (tx, w) => spend(tx, w, 1n),
-        /A wallet or escrow account is debited only under READ COMMITTED/,
+        /A guard that locks and then reads runs only under READ COMMITTED/,
       ],
     ];
 
@@ -237,16 +237,14 @@ describe('lock-then-read guards hold under every isolation level (real database)
             },
             { isolationLevel },
           ),
-        ).rejects.toThrow(/A commission rule changes only under READ COMMITTED/);
+        ).rejects.toThrow(/A guard that locks and then reads runs only under READ COMMITTED/);
       },
     );
 
     it('a NULL key takes no lock, so the gate refuses it', async () => {
       await expect(
-        runtime.$queryRawUnsafe(
-          `SELECT read_committed_xact_lock(NULL::bigint, 'never', 'itest_guard')::text AS r`,
-        ),
-      ).rejects.toThrow(/itest_guard: no key, so no lock/);
+        runtime.$queryRawUnsafe(`SELECT read_committed_xact_lock(NULL::bigint)::text AS r`),
+      ).rejects.toThrow(/An advisory lock with no key locks nothing/);
     });
 
     it('no function of the schema takes an advisory lock but the gate', async () => {

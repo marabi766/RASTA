@@ -134,9 +134,9 @@ DROP FUNCTION enforce_commission_rule_read_committed();
 DROP TRIGGER "trg_ledger_entry_wallet_debits_noted" ON "ledger_entry";
 DROP FUNCTION note_wallet_account_debits();
 DROP FUNCTION wallet_account_debited_later(TEXT);
-DROP FUNCTION read_committed_xact_lock(BIGINT, TEXT, TEXT);
-DROP FUNCTION read_committed_xact_lock(INTEGER, INTEGER, TEXT, TEXT);
-DROP FUNCTION read_committed_xact_lock_shared(BIGINT, TEXT, TEXT);
+DROP FUNCTION read_committed_xact_lock(BIGINT);
+DROP FUNCTION read_committed_xact_lock(INTEGER, INTEGER);
+DROP FUNCTION read_committed_xact_lock_shared(BIGINT);
 
 DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261109120000_guards_read_committed';
 

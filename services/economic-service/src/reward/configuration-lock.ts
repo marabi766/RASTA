@@ -9,10 +9,5 @@ export async function lockRewardConfiguration(
   tx: ExtendedPrismaClient,
   mode: 'read' | 'write',
 ): Promise<void> {
-  await lockReadCommitted(
-    tx,
-    REWARD_CONFIGURATION_LOCK,
-    'reward_configuration',
-    mode === 'write' ? 'exclusive' : 'shared',
-  );
+  await lockReadCommitted(tx, REWARD_CONFIGURATION_LOCK, mode === 'write' ? 'exclusive' : 'shared');
 }

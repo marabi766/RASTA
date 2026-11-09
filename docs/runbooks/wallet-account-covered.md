@@ -5,7 +5,7 @@
 
 - Deploy ‏`20261108120000_wallet_account_covered_at_commit` با «N WALLET or ESCROW account(s) already sum below zero; refusing to guard a ledger that is already overdrawn, and changing nothing» شکست می‌خورد؛
 - همان Deploy با `statement timeout` ‏(`57014`) روی دفتر کلی بزرگ شکست می‌خورد؛
-- نوشتنی با `restrict_violation` ‏(`23001`) و متنی که به «only under READ COMMITTED» ختم می‌شود رد می‌شود؛
+- نوشتنی با `restrict_violation` ‏(`23001`) و متن «A guard that locks and then reads runs only under READ COMMITTED» رد می‌شود؛
 - نوشتن دستی با «At commit, a wallet or escrow account never sums below zero» رد می‌شود (از راه سرویس: `422 INSUFFICIENT_BALANCE`).
 
 **دامنه:** economic-service، همهٔ حساب‌های با `purpose` برابر `WALLET` یا `ESCROW`؛ بخش ۲ inventory-service را هم دربر می‌گیرد (حصار Return Dispatch).
@@ -25,17 +25,20 @@
   با ترتیب نوشتن وارونه Deadlock نمی‌سازند. **یک بار برای هر حساب:** فقط آخرین Leg ‏Debit هر حساب در همان تراکنش جمع می‌زند
   (`wallet_account_debited_later`، از ستون‌های سیستمی `xmin` و `cmin`؛ هیچ تنظیم نشست جمعی را حذف نمی‌کند).
 
-| نگهبان                                | Migration                                     | متن رد                                                          |
-| ------------------------------------- | --------------------------------------------- | --------------------------------------------------------------- |
-| `trg_ledger_entry_wallet_covered`     | economic ‏`20261108120000`، ‏`20261109120000` | A wallet or escrow account is debited only under READ COMMITTED |
-| `trg_wallet_hold_funded_at_commit`    | economic ‏`20261107120000`                    | A hold naming a journal is written only under READ COMMITTED    |
-| `trg_journal_hold_funding_final`      | economic ‏`20261107120000`                    | A FUNDS_HELD journal is reversed only under READ COMMITTED      |
-| `trg_wallet_hold_reference_bound`     | economic ‏`20261109120000`                    | A hold for anything else is written only under READ COMMITTED   |
-| `trg_transaction_id_unclaimed`        | economic ‏`20261109120000`                    | A transaction is written only under READ COMMITTED              |
-| `commission_rule_scope_change`        | economic ‏`20261109120000`                    | A commission rule changes only under READ COMMITTED             |
-| `commission_pricing_scope_lock`       | economic ‏`20261109120000`                    | A commission is priced only under READ COMMITTED                |
-| `tg_return_dispatch_withdrawal_guard` | inventory ‏`20261109120000`                   | A dispatch is withdrawn only under READ COMMITTED               |
-| `tg_return_shipment_dispatch_fence`   | inventory ‏`20261109120000`                   | A return shipment is recorded only under READ COMMITTED         |
+همهٔ آن‌ها با یک متن رد می‌شوند: «A guard that locks and then reads runs only under READ COMMITTED» (`23001`)؛ CONTEXT خطا نام
+نگهبان را می‌گوید.
+
+| نگهبان                                                        | Migration                                     |
+| ------------------------------------------------------------- | --------------------------------------------- |
+| `trg_ledger_entry_wallet_covered`                             | economic ‏`20261108120000`، ‏`20261109120000` |
+| `trg_wallet_hold_funded_at_commit`                            | economic ‏`20261107120000`، ‏`20261109120000` |
+| `trg_journal_hold_funding_final`                              | economic ‏`20261107120000`، ‏`20261109120000` |
+| `trg_wallet_hold_reference_bound`                             | economic ‏`20261109120000`                    |
+| `trg_transaction_id_unclaimed`                                | economic ‏`20261109120000`                    |
+| `trg_commission_rule_read_committed` (هر نوشتن قاعدهٔ کارمزد) | economic ‏`20261109120000`                    |
+| `commission_pricing_scope_lock`                               | economic ‏`20261109120000`                    |
+| `tg_return_dispatch_withdrawal_guard`                         | inventory ‏`20261109120000`                   |
+| `tg_return_shipment_dispatch_fence`                           | inventory ‏`20261109120000`                   |
 
 ---
 

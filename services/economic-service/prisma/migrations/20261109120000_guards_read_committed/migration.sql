@@ -48,50 +48,56 @@ SET LOCAL lock_timeout = '3s';
 
 -- ---- the gate ----
 
-CREATE FUNCTION read_committed_xact_lock(lock_key BIGINT, refusal TEXT, guard TEXT)
+CREATE FUNCTION read_committed_xact_lock(lock_key BIGINT)
 RETURNS VOID AS $$
 BEGIN
   IF lock_key IS NULL THEN
-    RAISE EXCEPTION USING MESSAGE = guard || ': no key, so no lock', ERRCODE = 'null_value_not_allowed';
+    RAISE EXCEPTION 'An advisory lock with no key locks nothing'
+      USING ERRCODE = 'null_value_not_allowed';
   END IF;
   PERFORM pg_catalog.pg_advisory_xact_lock(lock_key);
   -- After the lock, as before: a refused level still waits its turn, then reads nothing.
   IF pg_catalog.current_setting('transaction_isolation') IS DISTINCT FROM 'read committed' THEN
-    RAISE EXCEPTION USING MESSAGE = refusal, ERRCODE = 'restrict_violation', CONSTRAINT = guard;
+    RAISE EXCEPTION 'A guard that locks and then reads runs only under READ COMMITTED'
+      USING ERRCODE = 'restrict_violation';
   END IF;
 END; $$ LANGUAGE plpgsql VOLATILE;
 
-CREATE FUNCTION read_committed_xact_lock(lock_key INTEGER, lock_subkey INTEGER, refusal TEXT, guard TEXT)
+CREATE FUNCTION read_committed_xact_lock(lock_key INTEGER, lock_subkey INTEGER)
 RETURNS VOID AS $$
 BEGIN
   IF lock_key IS NULL OR lock_subkey IS NULL THEN
-    RAISE EXCEPTION USING MESSAGE = guard || ': no key, so no lock', ERRCODE = 'null_value_not_allowed';
+    RAISE EXCEPTION 'An advisory lock with no key locks nothing'
+      USING ERRCODE = 'null_value_not_allowed';
   END IF;
   PERFORM pg_catalog.pg_advisory_xact_lock(lock_key, lock_subkey);
   -- After the lock, as before: a refused level still waits its turn, then reads nothing.
   IF pg_catalog.current_setting('transaction_isolation') IS DISTINCT FROM 'read committed' THEN
-    RAISE EXCEPTION USING MESSAGE = refusal, ERRCODE = 'restrict_violation', CONSTRAINT = guard;
+    RAISE EXCEPTION 'A guard that locks and then reads runs only under READ COMMITTED'
+      USING ERRCODE = 'restrict_violation';
   END IF;
 END; $$ LANGUAGE plpgsql VOLATILE;
 
-CREATE FUNCTION read_committed_xact_lock_shared(lock_key BIGINT, refusal TEXT, guard TEXT)
+CREATE FUNCTION read_committed_xact_lock_shared(lock_key BIGINT)
 RETURNS VOID AS $$
 BEGIN
   IF lock_key IS NULL THEN
-    RAISE EXCEPTION USING MESSAGE = guard || ': no key, so no lock', ERRCODE = 'null_value_not_allowed';
+    RAISE EXCEPTION 'An advisory lock with no key locks nothing'
+      USING ERRCODE = 'null_value_not_allowed';
   END IF;
   PERFORM pg_catalog.pg_advisory_xact_lock_shared(lock_key);
   -- After the lock, as before: a refused level still waits its turn, then reads nothing.
   IF pg_catalog.current_setting('transaction_isolation') IS DISTINCT FROM 'read committed' THEN
-    RAISE EXCEPTION USING MESSAGE = refusal, ERRCODE = 'restrict_violation', CONSTRAINT = guard;
+    RAISE EXCEPTION 'A guard that locks and then reads runs only under READ COMMITTED'
+      USING ERRCODE = 'restrict_violation';
   END IF;
 END; $$ LANGUAGE plpgsql VOLATILE;
 
 -- The runtime role calls them through the guards below, which run as the writer
 -- (runtime-function-grants.txt names them too).
-GRANT EXECUTE ON FUNCTION read_committed_xact_lock(BIGINT, TEXT, TEXT) TO rasta_economic;
-GRANT EXECUTE ON FUNCTION read_committed_xact_lock(INTEGER, INTEGER, TEXT, TEXT) TO rasta_economic;
-GRANT EXECUTE ON FUNCTION read_committed_xact_lock_shared(BIGINT, TEXT, TEXT) TO rasta_economic;
+GRANT EXECUTE ON FUNCTION read_committed_xact_lock(BIGINT) TO rasta_economic;
+GRANT EXECUTE ON FUNCTION read_committed_xact_lock(INTEGER, INTEGER) TO rasta_economic;
+GRANT EXECUTE ON FUNCTION read_committed_xact_lock_shared(BIGINT) TO rasta_economic;
 
 -- ---- 20261016120000's commission scope locks, through the gate ----
 
@@ -99,10 +105,8 @@ CREATE OR REPLACE FUNCTION commission_pricing_scope_lock(
   organization_id TEXT, business_line "BusinessLine", transaction_type "TransactionType"
 ) RETURNS VOID AS $$
 BEGIN
-  PERFORM read_committed_xact_lock_shared(commission_rule_scope_key(NULL, business_line, transaction_type),
-    'A commission is priced only under READ COMMITTED', 'commission_pricing_scope_lock');
-  PERFORM read_committed_xact_lock_shared(commission_rule_scope_key(organization_id, business_line, transaction_type),
-    'A commission is priced only under READ COMMITTED', 'commission_pricing_scope_lock');
+  PERFORM read_committed_xact_lock_shared(commission_rule_scope_key(NULL, business_line, transaction_type));
+  PERFORM read_committed_xact_lock_shared(commission_rule_scope_key(organization_id, business_line, transaction_type));
 END; $$ LANGUAGE plpgsql VOLATILE;
 
 -- A change of a scope's rules: `commission_rule_scope_change` (its body stays as 20261016120000
@@ -121,8 +125,7 @@ BEGIN
   -- A row naming no scope has no lock; `ck_commission_rule_scope` refuses it.
   IF subject."business_line" IS NOT NULL OR subject."transaction_type" IS NOT NULL THEN
     PERFORM read_committed_xact_lock(
-      commission_rule_scope_key(subject."organization_id", subject."business_line", subject."transaction_type"),
-      'A commission rule changes only under READ COMMITTED', 'trg_commission_rule_read_committed');
+      commission_rule_scope_key(subject."organization_id", subject."business_line", subject."transaction_type"));
   END IF;
   RETURN NEW;
 END; $$ LANGUAGE plpgsql;
@@ -161,8 +164,7 @@ BEGIN
     END IF;
   ELSE
     -- Then the read: taken from here, a transaction inserted first has committed, or waits.
-    PERFORM read_committed_xact_lock(20261105, hashtext(NEW."reference"),
-      'A hold for anything else is written only under READ COMMITTED', 'trg_wallet_hold_reference_bound');
+    PERFORM read_committed_xact_lock(20261105, hashtext(NEW."reference"));
     IF EXISTS (SELECT 1 FROM "transaction" t WHERE t."id" = NEW."reference") THEN
       RAISE EXCEPTION 'A hold for anything else names no transaction'
         USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
@@ -173,8 +175,7 @@ END; $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION enforce_transaction_id_unclaimed() RETURNS TRIGGER AS $$
 BEGIN
-  PERFORM read_committed_xact_lock(20261105, hashtext(NEW."id"),
-    'A transaction is written only under READ COMMITTED', 'trg_transaction_id_unclaimed');
+  PERFORM read_committed_xact_lock(20261105, hashtext(NEW."id"));
   IF EXISTS (SELECT 1 FROM "wallet_hold" h WHERE h."reference" = NEW."id") THEN
     RAISE EXCEPTION 'A transaction takes no id a hold has already named'
       USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_transaction_id_unclaimed';
@@ -185,7 +186,9 @@ END; $$ LANGUAGE plpgsql;
 -- ---- 20261107120000's hold journal guards: their inline refusal, now the gate's ----
 
 CREATE OR REPLACE FUNCTION assert_wallet_hold_funded_at_commit() RETURNS TRIGGER AS $$
-DECLARE pointer TEXT;
+DECLARE
+  pointer TEXT;
+  lock_key BIGINT;
 BEGIN
   -- The row as it stands at commit, not as this event saw it: a later write may have resolved it.
   SELECT h."placed_journal_id" INTO pointer FROM "wallet_hold" h
@@ -194,8 +197,8 @@ BEGIN
     RETURN NULL;
   END IF;
   IF pointer IS NOT NULL THEN
-    PERFORM read_committed_xact_lock(hashtextextended('wallet_hold_journal:' || pointer, 0),
-      'A hold naming a journal is written only under READ COMMITTED', 'trg_wallet_hold_funded_at_commit');
+    lock_key := hashtextextended('wallet_hold_journal:' || pointer, 0);
+    PERFORM read_committed_xact_lock(lock_key);
   END IF;
   IF NOT wallet_hold_funded(NEW."id") THEN
     RAISE EXCEPTION 'At commit, a hold that names a journal or is resolved is funded by it: the payer''s own wallet into its own escrow'
@@ -205,11 +208,12 @@ BEGIN
 END; $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION reject_hold_journal_reversal() RETURNS TRIGGER AS $$
+DECLARE lock_key BIGINT;
 BEGIN
   -- Only a FUNDS_HELD journal funds a hold (`wallet_hold_funded`); the lock is the one above.
   IF EXISTS (SELECT 1 FROM "journal" j WHERE j."id" = NEW."reverses_id" AND j."journal_type" = 'FUNDS_HELD') THEN
-    PERFORM read_committed_xact_lock(hashtextextended('wallet_hold_journal:' || NEW."reverses_id", 0),
-      'A FUNDS_HELD journal is reversed only under READ COMMITTED', 'trg_journal_hold_funding_final');
+    lock_key := hashtextextended('wallet_hold_journal:' || NEW."reverses_id", 0);
+    PERFORM read_committed_xact_lock(lock_key);
   END IF;
   IF EXISTS (SELECT 1 FROM "wallet_hold" h WHERE h."placed_journal_id" = NEW."reverses_id") THEN
     RAISE EXCEPTION 'A journal a hold names is never reversed: the hold goes back by its refund'
@@ -257,6 +261,7 @@ CREATE OR REPLACE FUNCTION assert_wallet_account_covered() RETURNS TRIGGER AS $$
 DECLARE
   balance NUMERIC;
   account TEXT;
+  lock_key BIGINT;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM "ledger_account" a
                   WHERE a."id" = NEW."account_id" AND a."purpose" IN ('WALLET', 'ESCROW')) THEN
@@ -269,8 +274,8 @@ BEGIN
       || NEW."account_id") x
      ORDER BY 1
   LOOP
-    PERFORM read_committed_xact_lock(hashtextextended('wallet_account_covered:' || account, 0),
-      'A wallet or escrow account is debited only under READ COMMITTED', 'trg_ledger_entry_wallet_covered');
+    lock_key := hashtextextended('wallet_account_covered:' || account, 0);
+    PERFORM read_committed_xact_lock(lock_key);
   END LOOP;
   IF wallet_account_debited_later(NEW."id") THEN
     RETURN NULL;

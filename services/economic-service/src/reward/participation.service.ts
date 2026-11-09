@@ -159,7 +159,7 @@ export class ParticipationService {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
-      await lockReadCommitted(tx, PARTICIPATION_RULE_LOCK_KEY, 'participation_rule');
+      await lockReadCommitted(tx, PARTICIPATION_RULE_LOCK_KEY);
       const previous = await this.ruleInForce(tx);
       assertReplacing(previous?.version ?? 0, dto.expectedCurrentVersion);
 

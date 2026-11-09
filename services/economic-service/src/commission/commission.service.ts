@@ -633,8 +633,7 @@ async function lockScopeForChange(tx: ExtendedPrismaClient, scope: ScopeOfRule):
   // returns at once.
   await tx.$queryRaw`SELECT read_committed_xact_lock(commission_rule_scope_key(
     ${scope.organizationId}, ${scope.businessLine}::"BusinessLine",
-    ${scope.transactionType}::"TransactionType"),
-    'A commission rule changes only under READ COMMITTED', 'commission_rule_scope_change')::text`;
+    ${scope.transactionType}::"TransactionType"))::text`;
   const [row] = await tx.$queryRaw<{ at: Date }[]>`
     SELECT commission_rule_scope_change(
       ${scope.organizationId}, ${scope.businessLine}::"BusinessLine",
