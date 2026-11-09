@@ -417,6 +417,24 @@ export const CLI_CONTRACT = Object.freeze({
       '-p',
     ],
   },
+  // Fixed curl/tar flags; the installer accepts only a mode and reviewed tool name.
+  'scripts/ci-tool-download.mjs': {
+    positionals: ['enum', 'enum'],
+    other: [
+      '--connect-timeout',
+      '--fail',
+      '--location',
+      '--max-time',
+      '--output',
+      '--proto',
+      '--proto-redir',
+      '--show-error',
+      '--silent',
+      '--write-out',
+      '-C',
+      '-xzf',
+    ],
+  },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
   // scan), and zstd's (-q -T0 -c to pack; -q -d -c --memory to unpack).
   'scripts/ci-trivy-db-lib.mjs': {
