@@ -789,6 +789,15 @@ function scanOf(service, migration, source = '', extra = {}, collect = utcClockP
     for (const [name, text] of migrations)
       write(`services/${service}/prisma/migrations/${name}/migration.sql`, text);
     write(`services/${service}/prisma/schema.prisma`, 'model Anything {\n  id String @id\n}\n');
+    // Generated declarations prove Sql versus scalar types, but are not authored sinks.
+    write('.gitignore', '**/generated/prisma/index.d.ts\n');
+    write(`services/${service}/src/generated/prisma/index.d.ts`, `export namespace Prisma {
+      class Sql { strings: string[]; values: unknown[]; }
+      function sql(strings: TemplateStringsArray, ...values: unknown[]): Sql;
+      function join(values: readonly unknown[], separator?: string, prefix?: string, suffix?: string): Sql;
+      function raw(value: string): Sql;
+      const empty: Sql;
+    }`);
     write(`services/${service}/src/temporal/saga-start.store.ts`, source);
     for (const [path, text] of Object.entries(extra)) write(path, text);
     execFileSync('git', ['init', '-q'], { cwd: root, env: fixtureGitEnv() });
@@ -1993,4 +2002,71 @@ test('joined fragment with no keyword is SQL in its outer SELECT', () => {
 
 test('String.raw interpolations retain cooked JavaScript values', () => {
   assert.deepEqual(sinkTextsOf('db.$queryRawUnsafe(String.raw`${`\\u0053ELECT 1`} WHERE 1 = 1`);'), ['SELECT 1 WHERE 1 = 1']);
+});
+
+// r2: each proof has a refusal counterpart using the same typed Prisma fixture.
+for (const [name, source, pattern] of [
+  ['literal raw join arguments', `${prismaImport} const SEP = ' OR '; const PRE = '('; const POST = ')';
+    db.$queryRaw(P.sql\`SELECT 1 WHERE \${P.join([P.sql\`id = 1\`, P.sql\`id = 2\`], SEP, PRE, POST)}\`);`, /WHERE \(id = 1 OR id = 2\)/],
+  ['array scalar spread', `${prismaImport} function run(ids: string[]) {
+    db.$queryRaw(P.sql\`SELECT \${P.join([...ids], ',', '(', ')')}\`); }`, /SELECT \(.*\)/],
+  ['push scalar spread', `${prismaImport} function run(ids: string[]) {
+    const parts = []; parts.push(...ids); db.$queryRaw(P.sql\`SELECT \${P.join(parts)}\`); }`, /SELECT /],
+  ['unescaped scalar const list', `${prismaImport} const ids = ['a', 'b'];
+    db.$queryRaw(P.sql\`SELECT \${P.join(ids, ' OR ')}\`);`, / OR /],
+  ['this parameter forwarding', "function run(this: void, q: string) { db.$queryRawUnsafe(q); } run('SELECT 1');", /SELECT 1/],
+  ['this parameter builder', "function build(this: void, q: string) { return q; } db.$queryRawUnsafe(build('SELECT 1'));", /SELECT 1/],
+  ['this parameter safe refs', `${prismaImport} function consume(this: void, p: P.Sql) { db.$queryRaw(p); }
+    const part = P.sql\`SELECT 1\`; consume(part);`, /SELECT 1/],
+  ['private direct forwarding', "class Gate { private run(q: string) { db.$queryRawUnsafe(q); } go() { this.run('SELECT 1'); } }", /SELECT 1/],
+]) test(`r2 proof: ${name}`, () => {
+  const texts = sinkTextsOf(source);
+  assert.ok(texts.length && texts.every((text) => typeof text === 'string'), JSON.stringify(texts));
+  assert.match(texts.join('\n'), pattern);
+});
+test('r2 proof: this parameter adapter dispatch', () => {
+  const extra = { ...roleFiles, 'services/x-service/src/role.ts':
+    roleFiles['services/x-service/src/role.ts'].replace('check(client:', 'check(this: void, client:') };
+  assert.deepEqual(scanOf('x-service', sinkSchema, adapter, extra), []);
+});
+for (const [name, source] of [
+  ['runtime raw separator', `${prismaImport} function run(sep: string) {
+    db.$queryRaw(P.sql\`SELECT \${P.join([1, 2], sep)}\`); }`],
+  ['runtime raw prefix', `${prismaImport} function run(pre: string) {
+    db.$queryRaw(P.sql\`SELECT \${P.join([1], ',', pre)}\`); }`],
+  ['runtime raw suffix', `${prismaImport} function run(post: string) {
+    db.$queryRaw(P.sql\`SELECT \${P.join([1], ',', '', post)}\`); }`],
+  ['array spread raw separator', `${prismaImport} function run(ids: string[]) {
+    db.$queryRaw(P.sql\`SELECT \${P.join([...ids], ' OR at < now() OR ')}\`); }`],
+  ['push spread raw separator', `${prismaImport} function run(ids: string[]) {
+    const parts = []; parts.push(...ids); db.$queryRaw(P.sql\`SELECT \${P.join(parts, ' OR at < now() OR ')}\`); }`],
+  ['array spread Sql elements', `${prismaImport} function run(ids: P.Sql[]) {
+    db.$queryRaw(P.sql\`SELECT \${P.join([...ids])}\`); }`],
+  ['push spread Sql elements', `${prismaImport} function run(ids: P.Sql[]) {
+    const parts = []; parts.push(...ids); db.$queryRaw(P.sql\`SELECT \${P.join(parts)}\`); }`],
+  ['escaped scalar const list', `${prismaImport} const ids = ['a']; extend(ids);
+    db.$queryRaw(P.sql\`SELECT \${P.join(ids, ' OR at < now() OR ')}\`);`],
+  ['aliased scalar const list', `${prismaImport} const ids = ['a']; const alias = ids; alias.push('b');
+    db.$queryRaw(P.sql\`SELECT \${P.join(ids, ' OR at < now() OR ')}\`);`],
+  ['assigned scalar const list', `${prismaImport} const ids = ['a']; Object.assign(ids, ['b', 'c']);
+    db.$queryRaw(P.sql\`SELECT \${P.join(ids, ' OR at < now() OR ')}\`);`],
+  ['this parameter runtime forwarding', "function run(this: void, q: string, r: string) { db.$queryRawUnsafe(q); } run(runtime, 'SELECT 1');"],
+  ['this parameter runtime builder', "function build(this: void, q: string, r: string) { return q; } db.$queryRawUnsafe(build(runtime, 'SELECT 1'));"],
+  ['this parameter escaped fragment', `${prismaImport} function leak(this: void, p: P.Sql) { expose(p); }
+    const part = P.sql\`SELECT 1\`; leak(part); db.$queryRaw(part);`],
+  ['spread forwarding arguments', "function run(q: string) { db.$queryRawUnsafe(q); } run(...['SELECT 1']);"],
+  ['rest forwarding parameter', "function run(...q: string[]) { db.$queryRawUnsafe(q[0]); } run('SELECT 1');"],
+  ['dynamic private caller', "class Gate { private run(q: string) { db.$queryRawUnsafe(q); } a() { this.run('SELECT 1'); } b(k: 'run') { this[k](runtime); } }"],
+  ['decorated private method', "class Gate { @OnEvent('query') private run(q: string) { db.$queryRawUnsafe(q); } a() { this.run('SELECT 1'); } }"],
+  ['tagged forwarding caller', "function run(q: string) { db.$queryRawUnsafe(q); } run`SELECT 1`;"],
+]) test(`r2 refusal: ${name}`, () => assert.ok(sinkTextsOf(source).includes(null)));
+for (const [name, args, expected] of [
+  ['separator', "[1, 2], ' OR at < now() OR '", / OR at < now\(\) OR /],
+  ['prefix', "[1], ',', 'now() + '", /now\(\) \+ /],
+  ['suffix', "[1], ',', '', ' + now()'", / \+ now\(\)/],
+]) test(`r2 raw ${name} retains SQL text`, () => {
+  const source = `${prismaImport} db.$queryRaw(P.sql\`UPDATE task SET at = \${P.join(${args})}\`);`;
+  assert.match(sinkTextsOf(source).join(), expected);
+  const migration = 'CREATE TABLE task (id text, at timestamp(3));';
+  assert.match(scanOf('x-service', migration, source).join(), /R1/);
 });
