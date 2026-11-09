@@ -25,32 +25,32 @@
   "jobs": {
     "quality-guards": {
       "name": "Static guards and CI wiring (part of Lint, types and unit tests)",
-      "runs-on": "ubuntu-latest",
+      "runs-on": "ubuntu-24.04",
       "timeout-minutes": 20
     },
     "quality-lint": {
       "name": "Format check and lint (part of Lint, types and unit tests)",
-      "runs-on": "ubuntu-latest",
+      "runs-on": "ubuntu-24.04",
       "timeout-minutes": 20
     },
     "quality-types": {
       "name": "Type check (part of Lint, types and unit tests)",
-      "runs-on": "ubuntu-latest",
+      "runs-on": "ubuntu-24.04",
       "timeout-minutes": 15
     },
     "quality-unit": {
       "name": "Unit tests (part of Lint, types and unit tests)",
-      "runs-on": "ubuntu-latest",
+      "runs-on": "ubuntu-24.04",
       "timeout-minutes": 25
     },
     "quality-build": {
       "name": "Build and built entry points (part of Lint, types and unit tests)",
-      "runs-on": "ubuntu-latest",
+      "runs-on": "ubuntu-24.04",
       "timeout-minutes": 20
     },
     "quality": {
       "name": "Lint, types and unit tests",
-      "runs-on": "ubuntu-latest",
+      "runs-on": "ubuntu-24.04",
       "timeout-minutes": 5,
       "needs": ["quality-guards", "quality-lint", "quality-types", "quality-unit", "quality-build"],
       "if": "${{ always() }}"
