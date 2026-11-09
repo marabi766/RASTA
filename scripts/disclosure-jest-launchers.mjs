@@ -1,5 +1,22 @@
 // Closed reviewed registry: source/helper drift requires review of the declared launch boundaries.
 export const JEST_LAUNCHERS = {
+  'scripts/ci-tool-download.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Node tests spawn curl/Git and the pinned Gitleaks binary, plus the exact pinned Secret scan shell in isolated Git fixtures; downloads are mocked except a loopback curl probe. No Jest, pnpm or Turbo child.',
+    sha256: {
+      'scripts/ci-tool-download.test.mjs':
+        'b4b9eabb969edade717d0d6b77b7767d77fd2bf537da5bc4b3f46baded4a7951',
+      'scripts/ci-tool-download.mjs':
+        'ee68f2a2fa8840b19acb90edf7f97829d41a3cc27c6128024d94ca3e748e5c02',
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
+      'scripts/authored-source-inventory.cjs':
+        '0b5d93cff1bf3868a9de93166d3d669d97099409e6affac231993066f749e65a',
+      '.github/workflows/ci.yml':
+        '0bc24d222833fa76091b7037c82e628b033623e87c3037ee8c0398a3181ff7da',
+    },
+  },
   'scripts/verify-migration-reversible-lib.test.mjs': {
     kind: 'non-jest',
     reaches:

@@ -608,14 +608,6 @@ jobs:
     timeout-minutes: 33
     permissions:
       contents: read
-      security-events: write
-      # Gitleaks enumerates a pull request's commits through the API to decide
-      # what to scan, so on a `pull_request` event it needs to read them. Until
-      # the first PR-triggered run this job had only ever run on a push to
-      # main, where that call is never made — so the missing permission
-      # surfaced as `403 Resource not accessible by integration` and looked
-      # exactly like a secret finding. It was not one.
-      pull-requests: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -639,9 +631,16 @@ jobs:
         with:
           tool: gitleaks
 
+      - name: Test pinned Gitleaks scan topologies
+        run: |
+          set -euo pipefail
+          GITLEAKS_TEST_BINARY="$(command -v gitleaks)"
+          export GITLEAKS_TEST_BINARY
+          node --test scripts/ci-tool-download.test.mjs
+
       - name: Secret scan
-        # Include every introduced commit and each merge's changes against ALL
-        # parents, including content introduced during conflict resolution.
+        # Keep every introduced commit; remerge diffs isolate merge-only content
+        # without re-attributing approved base findings to the merge's identity.
         env:
           SCAN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           SCAN_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -654,7 +653,12 @@ jobs:
             SCAN_COUNT="$(git rev-list --count "$SCAN_BASE..$SCAN_HEAD")"
             test "$SCAN_COUNT" -gt 0
           fi
-          gitleaks detect --redact --exit-code=2 --log-opts="--full-history --diff-merges=separate $SCAN_BASE..$SCAN_HEAD" --report-format=sarif --report-path=results.sarif
+          # Git cannot produce remerge diffs for octopus merges. Refuse them.
+          OCTOPUS_COUNT="$(git rev-list --min-parents=3 --count "$SCAN_BASE..$SCAN_HEAD")"
+          test "$OCTOPUS_COUNT" -eq 0
+          # Gitleaks 8.30.1 can exit zero on Git errors; prove patches are readable.
+          git log -p -U0 --full-history --diff-merges=remerge "$SCAN_BASE..$SCAN_HEAD" >/dev/null
+          gitleaks detect --verbose --redact --exit-code=2 --log-opts="--full-history --diff-merges=remerge $SCAN_BASE..$SCAN_HEAD" --report-format=sarif --report-path=results.sarif
 
       - name: Dependency audit
         # High and critical fail. The repo holds no production secrets, but it

@@ -85,19 +85,42 @@ for (const result of [
     assert.equal(existsSync(`${h.archive}.partial`), false);
   });
 }
-test('corrupt cache is refused without fetching a replacement', (t) => {
+test('corrupt cache is discarded and replaced only with verified bytes', (t) => {
   const h = harness(t, [{ status: 0 }]);
   writeFileSync(h.archive, 'corrupt cache');
+  download(tool, h.archive, h.deps);
+  assert.equal(h.calls(), 1);
+  assert.equal(readFileSync(h.archive, 'utf8'), bytes);
+});
+test('corrupt cache and corrupt replacement leave no usable archive', (t) => {
+  const h = harness(t, [{ status: 0, body: 'corrupt replacement' }]);
+  writeFileSync(h.archive, 'corrupt cache');
   assert.throws(() => download(tool, h.archive, h.deps), /checksum mismatch/);
-  assert.equal(h.calls(), 0);
+  assert.equal(h.calls(), 1);
+  assert.equal(existsSync(h.archive), false);
+  assert.equal(existsSync(`${h.archive}.partial`), false);
 });
 test('only recognized network results retry', () => {
-  for (const code of [5, 6, 7, 18, 28, 52, 55, 56])
-    for (const http of ['000', '200', '206', '301', '302', '307', '308'])
-      assert.equal(transient(code, http), true);
-  for (const http of ['408', '429', '500', '502', '503', '504'])
-    assert.equal(transient(22, http), true);
-  for (const code of [1, 23, 35, 60, null]) assert.equal(transient(code, '000'), false);
+  const transport = [5, 6, 7, 16, 18, 28, 35, 52, 55, 56, 80, 92, 95, 96];
+  const retryHttp = ['408', '429', '500', '502', '503', '504'];
+  for (const code of [...Array(101).keys(), null, undefined, 999])
+    for (const http of [
+      '000',
+      '200',
+      '206',
+      '301',
+      '302',
+      '307',
+      '308',
+      '403',
+      '404',
+      ...retryHttp,
+    ])
+      assert.equal(
+        transient(code, http),
+        transport.includes(code) || (code === 22 && retryHttp.includes(http)),
+      );
+  for (const http of retryHttp) assert.equal(transient(22, http), true);
   for (const http of ['301', '302', '403', '404']) assert.equal(transient(22, http), false);
 });
 test('real curl: retry a failed redirect target, refuse a redirected 404', async (t) => {
@@ -186,8 +209,18 @@ test('every workflow and composite rejects release downloads outside the helper'
   }
   assert.match(
     jobs.security.steps.find((s) => s.name === 'Secret scan').run,
-    /--redact --exit-code=2 --log-opts="--full-history --diff-merges=separate \$SCAN_BASE\.\.\$SCAN_HEAD"/,
+    /--verbose --redact --exit-code=2 --log-opts="--full-history --diff-merges=remerge \$SCAN_BASE\.\.\$SCAN_HEAD"/,
   );
+  assert.deepEqual(jobs.security.permissions, { contents: 'read' });
+  const topologyAt = jobs.security.steps.findIndex(
+    (s) => s.name === 'Test pinned Gitleaks scan topologies',
+  );
+  assert.ok(topologyAt > jobs.security.steps.findIndex((s) => s.with?.tool === 'gitleaks'));
+  assert.match(
+    jobs.security.steps[topologyAt].run,
+    /GITLEAKS_TEST_BINARY="\$\(command -v gitleaks\)"/,
+  );
+  assert.match(jobs.security.steps[topologyAt].run, /export GITLEAKS_TEST_BINARY/);
 });
 test('coverage refuses reintroduced Go/Gitleaks installers and raw release fetches', () => {
   for (const source of [
@@ -254,8 +287,64 @@ process.exit(r.status || (r.stdout.includes('CI_RANGE_FIXTURE_') ? 2 : 0));
         },
       },
     );
-  return { git, commit, base, scan, bin };
+  return { git, commit, base, scan, bin, dir };
 }
+test(
+  'configured scanner is the pinned Gitleaks version',
+  { skip: !process.env.GITLEAKS_TEST_BINARY },
+  () => {
+    const result = spawnSync(process.env.GITLEAKS_TEST_BINARY, ['version'], { encoding: 'utf8' });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim(), TOOLS.gitleaks.version);
+  },
+);
+for (const firstParent of ['feature', 'main']) {
+  test(`approved main finding is not re-attributed when merging with ${firstParent} first`, (t) => {
+    const h = rangeHarness(t);
+    h.git('checkout', '-b', 'feature');
+    h.commit('feature');
+    h.git('checkout', 'main');
+    const approved = h.commit('approved', 'CI_RANGE_FIXTURE_APPROVED');
+    const base = h.commit('.gitleaksignore', `${approved}:approved:range-fixture:1\n`);
+    if (process.env.GITLEAKS_TEST_BINARY) assert.equal(h.scan(h.base, base).status, 0);
+    h.git('checkout', firstParent);
+    h.git('merge', '--no-ff', firstParent === 'feature' ? 'main' : 'feature', '-m', 'merge');
+    const result = h.scan(base, h.git('rev-parse', 'HEAD'));
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  });
+}
+test('conflict resolution introducing a secret fails with a redacted location', (t) => {
+  const h = rangeHarness(t);
+  h.git('checkout', '-b', 'side');
+  h.commit('base', 'side conflict');
+  h.git('checkout', 'main');
+  const base = h.commit('base', 'main conflict');
+  const merge = spawnSync('git', ['merge', '--no-ff', 'side', '-m', 'conflict'], {
+    cwd: h.dir,
+    env: fixtureGitEnv(),
+  });
+  assert.equal(merge.status, 1);
+  const head = h.commit('base', 'CI_RANGE_FIXTURE_RESOLUTION');
+  const result = h.scan(base, head);
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  if (process.env.GITLEAKS_TEST_BINARY) {
+    assert.match(result.stdout, /File:\s+(?:b\/)?base/);
+    assert.match(result.stdout, /Line:\s+1/);
+    assert.ok(!result.stdout.includes('CI_RANGE_FIXTURE_RESOLUTION'));
+  }
+});
+test('octopus merge content is refused because Git cannot remerge it', (t) => {
+  const h = rangeHarness(t);
+  for (const branch of ['side-a', 'side-b']) {
+    h.git('checkout', '-b', branch, h.base);
+    h.commit(branch);
+  }
+  h.git('checkout', 'main');
+  h.commit('main-work');
+  h.git('merge', '--no-ff', '--no-commit', 'side-a', 'side-b');
+  const head = h.commit('merge-only', 'CI_RANGE_FIXTURE_OCTOPUS');
+  assert.notEqual(h.scan(h.base, head).status, 0);
+});
 test('scan includes a second-parent secret even when removed before the merge', (t) => {
   const h = rangeHarness(t);
   h.git('checkout', '-b', 'side');
@@ -294,23 +383,41 @@ test('scan refuses unreadable or malformed refs and permits a valid clean range'
     assert.notEqual(h.scan(h.base, bad).status, 0);
   }
 });
-test('scan refuses a failed range read even if Git emitted a positive count', (t) => {
-  const h = rangeHarness(t);
-  const head = h.commit('clean');
-  writeFileSync(
-    join(h.bin, 'git'),
-    `#!/usr/bin/env node
-if (process.argv[2] === 'rev-list') { process.stdout.write('1\\n'); process.exit(128); }
+test(
+  'pinned scanner exits zero on an invalid range, but workflow refuses it',
+  { skip: !process.env.GITLEAKS_TEST_BINARY },
+  (t) => {
+    const h = rangeHarness(t);
+    const bad = '0'.repeat(40);
+    const result = spawnSync(
+      process.env.GITLEAKS_TEST_BINARY,
+      ['detect', '--redact', `--log-opts=${bad}..${h.base}`],
+      { cwd: h.dir, encoding: 'utf8', env: fixtureGitEnv() },
+    );
+    assert.equal(result.status, 0); // Pinned upstream behavior: preflight is mandatory.
+    assert.match(result.stderr, /Invalid revision range/);
+    assert.notEqual(h.scan(bad, h.base).status, 0);
+  },
+);
+for (const failure of ['rev-list', 'log']) {
+  test(`scan refuses a failed ${failure} read even if Git emitted a positive count`, (t) => {
+    const h = rangeHarness(t);
+    const head = h.commit('clean');
+    writeFileSync(
+      join(h.bin, 'git'),
+      `#!/usr/bin/env node
+if (process.argv[2] === '${failure}') { process.stdout.write('1\\n'); process.exit(128); }
 const { spawnSync } = require('node:child_process');
 const r = spawnSync('git', process.argv.slice(2), {
   env: { ...process.env, PATH: process.env.PATH.split(':').slice(1).join(':') }, stdio: 'inherit',
 });
 process.exit(r.status ?? 1);
 `,
-    { mode: 0o755 },
-  );
-  assert.notEqual(h.scan(h.base, head).status, 0);
-});
+      { mode: 0o755 },
+    );
+    assert.notEqual(h.scan(h.base, head).status, 0);
+  });
+}
 test('push ranges cannot cancel or displace one another; PR updates may supersede', () => {
   assert.deepEqual(parse(read('.github/workflows/ci.yml')).concurrency, {
     group: "ci-${{ github.event_name == 'push' && github.run_id || github.ref }}",

@@ -24,7 +24,7 @@ export const BACKOFF = [5, 15, 30];
 export function transient(code, http) {
   return (
     // Transport failure: http can still describe an earlier redirect hop.
-    [5, 6, 7, 18, 28, 52, 55, 56].includes(code) ||
+    [5, 6, 7, 16, 18, 28, 35, 52, 55, 56, 80, 92, 95, 96].includes(code) ||
     // Only an HTTP failure (22) makes the final response authoritative.
     (code === 22 && ['408', '429', '500', '502', '503', '504'].includes(http))
   );
@@ -35,12 +35,11 @@ export function download(
   { curl = spawnSync, sleep = (s) => spawnSync('sleep', [String(s)]) } = {},
 ) {
   const verify = (file) => {
-    if (createHash('sha256').update(readFileSync(file)).digest('hex') !== tool.sha256)
-      throw new Error('tool archive checksum mismatch; refusing without retry');
+    return createHash('sha256').update(readFileSync(file)).digest('hex') === tool.sha256;
   };
   if (existsSync(archive)) {
-    verify(archive);
-    return;
+    if (verify(archive)) return;
+    rmSync(archive); // Immutable remote cache may stay corrupt; never extract its bytes.
   }
   const partial = `${archive}.partial`;
   try {
@@ -70,7 +69,8 @@ export function download(
         { encoding: 'utf8', timeout: 155_000, maxBuffer: 1024 * 1024 },
       );
       if (result.status === 0) {
-        verify(partial); // Never classify validation failures as network errors.
+        if (!verify(partial))
+          throw new Error('tool archive checksum mismatch; refusing without retry');
         renameSync(partial, archive);
         return;
       }
