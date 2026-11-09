@@ -261,6 +261,7 @@ describe('the revocation list settings', () => {
     it.each([
       ['0', 0],
       ['10', 10],
+      ['05', 5],
       ['60', 60],
     ])('takes %p as stated, in production too', (value, expected) => {
       expect(
@@ -272,7 +273,7 @@ describe('the revocation list settings', () => {
       ).toBe(expected);
     });
 
-    it.each(['61', '-1', '1.5', '', ' 10', '10s', '1e1', '0x0a', '100'])(
+    it.each(['61', '-1', '1.5', '', ' 10', '10s', '1e1', '0x0a', '100', '005'])(
       'refuses %p: whole seconds from 0 to 60 only',
       (value) => {
         expect(() => withMode({ KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: value })).toThrow(
@@ -419,4 +420,16 @@ describe('strict decimal integer environment settings', () => {
       expect(JSON.stringify(refusal)).not.toContain('private-sentinel-79');
     }
   });
+});
+
+describe('reviewed CIDR prefix bounds', () => {
+  it.each(['10.0.0.0/05', '10.0.0.0/32', '::/128', '::/001'])(
+    'accepts %s including existing leading zeros',
+    (entry) =>
+      expect(() => loadGatewayEnv({ ...BASE, GATEWAY_TRUSTED_PROXIES: entry })).not.toThrow(),
+  );
+  it.each(['10.0.0.0/0', '::/0', '10.0.0.0/33', '::/129', '::/0001', '::/+1', '::/1.5', '::/ 5'])(
+    'refuses %s',
+    (entry) => expect(() => loadGatewayEnv({ ...BASE, GATEWAY_TRUSTED_PROXIES: entry })).toThrow(),
+  );
 });

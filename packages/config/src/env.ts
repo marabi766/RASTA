@@ -282,6 +282,29 @@ export function wholeNumberEnv(min: number, max: number) {
     .pipe(z.number().int().min(min).max(max));
 }
 
+/** Digits only, with explicit finite safe-integer bounds; callers choose any trimming. */
+export function parseWholeNumber(
+  text: string,
+  { min, max }: { min: number; max: number },
+): number | null {
+  if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min < 0 || min > max) {
+    throw new RangeError('Invalid whole-number bounds');
+  }
+  if (!/^[0-9]+$/.test(text)) return null;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : null;
+}
+
+/** A bounded bigint setting; neither whitespace nor an empty value is a number. */
+export function wholeBigintEnv(min: bigint, max: bigint) {
+  if (min < 0n || min > max) throw new RangeError('Invalid whole-bigint bounds');
+  return z
+    .string()
+    .regex(/^[0-9]+$/, WHOLE_NUMBER_EXPECTED)
+    .transform(BigInt)
+    .pipe(z.bigint().min(min).max(max));
+}
+
 /**
  * Services that own a database.
  *
