@@ -10,10 +10,11 @@ import { gatewayEnvSchema } from './config/env';
  * integer under a refinement (`~/worker6/session/039/corpus`: `sweep.cjs`
  * inventory, `mkgolden.cjs`).
  *
- * Each `ZOD3` value was recorded by running this file unchanged on main
+ * The original values were recorded by running this file unchanged on main
  * `5c88ae21` (zod 3.25.76), where `legacyParse` does not exist and
  * `outcome` reads zod 3's own issues (`~/worker2/session/t109/scripts/record.sh`);
- * never written by a test run here.
+ * FU-276 now expects type refusals for programmatic numeric inputs; the sibling
+ * case uses decimal strings so its boolean and cross-field checks remain reachable.
  */
 
 type Issue = { path: readonly PropertyKey[]; code: string; message: string };
@@ -29,23 +30,20 @@ function outcome(schema: { safeParse(input: unknown): unknown }, input: unknown)
   return issues.map((issue) => [issue.path.map(String).join('.'), issue.code, issue.message]);
 }
 
-/** Recorded under zod 3 on main 5c88ae21; never written by a test run. */
-const ZOD3: Record<string, unknown> = {
+/** Expected diagnostics after the deliberate FU-276 startup-parser tightening. */
+const EXPECTED: Record<string, unknown> = {
   'gatewayEnvSchema m0 PORT=0.5': [
-    ['PORT', 'invalid_type', 'Expected integer, received float'],
-    ['PORT', 'too_small', 'Number must be greater than or equal to 1'],
+    ['PORT', 'invalid_type', 'Expected string, received number'],
     ['REDIS_URL', 'custom', 'Redis URL must be a valid URL'],
   ],
   'gatewayEnvSchema m0 PORT=Infinity': [
-    ['PORT', 'invalid_type', 'Expected integer, received float'],
-    ['PORT', 'too_big', 'Number must be less than or equal to 65535'],
+    ['PORT', 'invalid_type', 'Expected string, received number'],
     ['REDIS_URL', 'custom', 'Redis URL must be a valid URL'],
   ],
   'gatewayEnvSchema sibling: an issue added inside a transform (booleanEnv) and a cross-field refinement':
     [
       ['OTEL_TRACES_ENABLED', 'custom', 'Expected a boolean such as "true" or "false"'],
       ['REDIS_URL', 'custom', 'Redis URL must be a valid URL'],
-      ['GATEWAY_UPSTREAM_TIMEOUT_MS', 'invalid_type', 'Expected integer, received float'],
       ['GATEWAY_RATE_LIMIT_FAIL_OPEN', 'custom', 'Expected a boolean such as "true" or "false"'],
       [
         'GATEWAY_TRUSTED_PROXIES',
@@ -129,14 +127,14 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
       LOG_LEVEL: 'error',
       SERVICE_NAME: 'Sample',
       SERVICE_VERSION: 'Sample',
-      PORT: 1,
+      PORT: '1',
       // #381's two required settings, valid: the case is about PORT and its refinement.
       GATEWAY_REVOCATION_LIST: 'off',
       KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: '10',
       OTEL_EXPORTER_OTLP_ENDPOINT: 'https://example.test',
       OTEL_TRACES_ENABLED: 'Sample',
       OTEL_SERVICE_NAMESPACE: 'Sample',
-      SHUTDOWN_TIMEOUT_MS: 1000,
+      SHUTDOWN_TIMEOUT_MS: '1000',
       REDIS_URL: 'x',
       REDIS_KEY_PREFIX: 'Sample',
       OIDC_ISSUER_URL: 'https://example.test',
@@ -144,7 +142,7 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
       OIDC_AUDIENCE: 'ORG-SAMPLE',
       INTERNAL_TOKEN_SECRET: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
       INTERNAL_TOKEN_ISSUER: 'Sample',
-      INTERNAL_TOKEN_TTL_SECONDS: 30,
+      INTERNAL_TOKEN_TTL_SECONDS: '30',
       IDENTITY_SERVICE_URL: 'https://example.test',
       ORGANIZATION_SERVICE_URL: 'https://example.test',
       ASSET_SERVICE_URL: 'https://example.test',
@@ -162,14 +160,14 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
       AUDIT_SERVICE_URL: 'https://example.test',
       ANALYTICS_SERVICE_URL: 'https://example.test',
       GATEWAY_CORS_ORIGINS: 'Sample',
-      GATEWAY_RATE_LIMIT_MAX: 1,
-      GATEWAY_RATE_LIMIT_WINDOW_MS: 1000,
-      GATEWAY_TENANT_RATE_LIMIT_MAX: 1,
-      GATEWAY_ANON_RATE_LIMIT_MAX: 1,
-      GATEWAY_UPSTREAM_TIMEOUT_MS: Number.POSITIVE_INFINITY,
-      GATEWAY_TENDER_OPEN_TIMEOUT_MS: 5000,
-      GATEWAY_CIRCUIT_FAILURE_THRESHOLD: 1,
-      GATEWAY_CIRCUIT_RESET_MS: 1000,
+      GATEWAY_RATE_LIMIT_MAX: '1',
+      GATEWAY_RATE_LIMIT_WINDOW_MS: '1000',
+      GATEWAY_TENANT_RATE_LIMIT_MAX: '1',
+      GATEWAY_ANON_RATE_LIMIT_MAX: '1',
+      GATEWAY_UPSTREAM_TIMEOUT_MS: '10000',
+      GATEWAY_TENDER_OPEN_TIMEOUT_MS: '5000',
+      GATEWAY_CIRCUIT_FAILURE_THRESHOLD: '1',
+      GATEWAY_CIRCUIT_RESET_MS: '1000',
       GATEWAY_RATE_LIMIT_FAIL_OPEN: 'Sample',
       GATEWAY_TRUSTED_PROXIES: 'Sample',
     },
@@ -179,6 +177,6 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
 describe('zod 3 diagnostics: an integer refusal with its enclosing refinements (PR #444 r3)', () => {
   it.each(CASES)('%s', (name, schema, input) => {
     const observed = outcome(schema, input);
-    expect(observed).toEqual(ZOD3[name]);
+    expect(observed).toEqual(EXPECTED[name]);
   });
 });

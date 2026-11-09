@@ -279,7 +279,7 @@ export const DATABASE_STATEMENT_TIMEOUT_MS_MAX = 3_600_000;
  */
 const WHOLE_NUMBER_EXPECTED = 'Expected a whole number written as digits, such as "10"';
 
-function wholeNumberEnv(min: number, max: number) {
+export function wholeNumberEnv(min: number, max: number) {
   return z
     .string()
     .regex(/^[0-9]+$/, WHOLE_NUMBER_EXPECTED)
