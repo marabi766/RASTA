@@ -97,7 +97,7 @@ export class RecognitionService {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
-      await lockReadCommitted(tx, RECOGNITION_RULE_LOCK_KEY, 'recognition_rule');
+      await lockReadCommitted(tx, RECOGNITION_RULE_LOCK_KEY);
       const previous = await this.ruleInForce(tx);
       assertReplacing(previous?.version ?? 0, dto.expectedCurrentVersion);
 

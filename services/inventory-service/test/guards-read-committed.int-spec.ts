@@ -74,13 +74,13 @@ describe('the return-dispatch fence holds under every isolation level (real data
     it('a withdrawal is refused', async () => {
       await expect(
         raw.$transaction((tx) => withdrawal(tx, org()), { isolationLevel }),
-      ).rejects.toThrow(/A dispatch is withdrawn only under READ COMMITTED/);
+      ).rejects.toThrow(/A guard that locks and then reads runs only under READ COMMITTED/);
     });
 
     it('a shipment is refused', async () => {
       await expect(
         raw.$transaction((tx) => shipment(tx, org()), { isolationLevel }),
-      ).rejects.toThrow(/A return shipment is recorded only under READ COMMITTED/);
+      ).rejects.toThrow(/A guard that locks and then reads runs only under READ COMMITTED/);
     });
   });
 

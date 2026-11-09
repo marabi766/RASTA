@@ -50,7 +50,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP FUNCTION read_committed_xact_lock(BIGINT, TEXT, TEXT);
+DROP FUNCTION read_committed_xact_lock(BIGINT);
 
 DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261109120000_guards_read_committed';
 

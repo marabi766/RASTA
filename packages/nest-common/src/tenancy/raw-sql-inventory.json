@@ -835,7 +835,7 @@
   {
     "file": "services/economic-service/src/commission/commission.service.ts",
     "line": 634,
-    "hash": "1396e3f9418b3a56685e9f4fa45e03a9c4df2e3c6e76cd8b2053c8a735cdc868",
+    "hash": "378bb1e2322963691eee13f27b84136db47169d73fb511d2ea53dc439b18b3e3",
     "occurrence": 0,
     "decision": "platform-wide: the commission scope's lock through the READ COMMITTED gate (FU-268); the scope includes nullable global rules; no tenant row is read or written"
   },
@@ -960,15 +960,15 @@
   },
   {
     "file": "services/economic-service/src/prisma/read-committed-lock.ts",
-    "line": 22,
-    "hash": "8306b7520e7ab2fe9a9d1ab0c85af308fa0e256a8a86699db5a6242fe505f4c8",
+    "line": 20,
+    "hash": "87f25ba92455577372edc2e94fefaf82f605c0d46066343fc2d10c7723e1a6de",
     "occurrence": 0,
     "decision": "platform-wide: transaction lock through the schema's READ COMMITTED gate (read_committed_xact_lock, FU-268); keyed by a fixed domain slot, no tenant row is read or written"
   },
   {
     "file": "services/economic-service/src/prisma/read-committed-lock.ts",
-    "line": 24,
-    "hash": "dd5382e2a525ad279fd62905d1aa5644ad433be41e868d1e44820f0493497c23",
+    "line": 22,
+    "hash": "576e42b41291d9c16f4e157872619c7deb66c897d69c99e1fcaf21c2c008bcf3",
     "occurrence": 0,
     "decision": "platform-wide: transaction lock through the schema's READ COMMITTED gate (read_committed_xact_lock, FU-268); keyed by a fixed domain slot, no tenant row is read or written"
   },

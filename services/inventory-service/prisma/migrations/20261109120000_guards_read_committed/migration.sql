@@ -13,29 +13,31 @@
 -- guards' path (the FU-266 rule) is refused by `check:utc-clock-sites`; it waits for FU-266.
 SET LOCAL lock_timeout = '3s';
 
-CREATE FUNCTION read_committed_xact_lock(lock_key BIGINT, refusal TEXT, guard TEXT)
+CREATE FUNCTION read_committed_xact_lock(lock_key BIGINT)
 RETURNS VOID AS $$
 BEGIN
   IF lock_key IS NULL THEN
-    RAISE EXCEPTION USING MESSAGE = guard || ': no key, so no lock', ERRCODE = 'null_value_not_allowed';
+    RAISE EXCEPTION 'An advisory lock with no key locks nothing'
+      USING ERRCODE = 'null_value_not_allowed';
   END IF;
   PERFORM pg_catalog.pg_advisory_xact_lock(lock_key);
-  -- After the lock: a refused level still waits its turn, then reads nothing.
+  -- After the lock, as before: a refused level still waits its turn, then reads nothing.
   IF pg_catalog.current_setting('transaction_isolation') IS DISTINCT FROM 'read committed' THEN
-    RAISE EXCEPTION USING MESSAGE = refusal, ERRCODE = 'restrict_violation', CONSTRAINT = guard;
+    RAISE EXCEPTION 'A guard that locks and then reads runs only under READ COMMITTED'
+      USING ERRCODE = 'restrict_violation';
   END IF;
 END; $$ LANGUAGE plpgsql VOLATILE;
 
 -- The runtime role calls it through the guards below, which run as the writer
 -- (runtime-function-grants.txt names it too).
-GRANT EXECUTE ON FUNCTION read_committed_xact_lock(BIGINT, TEXT, TEXT) TO rasta_inventory;
+GRANT EXECUTE ON FUNCTION read_committed_xact_lock(BIGINT) TO rasta_inventory;
 
 CREATE OR REPLACE FUNCTION "return_dispatch_withdrawal_guard"() RETURNS trigger AS $$
+DECLARE lock_key BIGINT;
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    PERFORM read_committed_xact_lock(
-      hashtextextended('return-dispatch|' || NEW."organization_id" || '|' || NEW."return_request_id", 0),
-      'A dispatch is withdrawn only under READ COMMITTED', 'tg_return_dispatch_withdrawal_guard');
+    lock_key := hashtextextended('return-dispatch|' || NEW."organization_id" || '|' || NEW."return_request_id", 0);
+    PERFORM read_committed_xact_lock(lock_key);
     IF EXISTS (SELECT 1 FROM "return_shipment"
                 WHERE "organization_id" = NEW."organization_id"
                   AND "return_request_id" = NEW."return_request_id") THEN
@@ -50,15 +52,15 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION "return_shipment_dispatch_fence"() RETURNS trigger AS $$
+DECLARE lock_key BIGINT;
 BEGIN
   IF TG_OP = 'INSERT' THEN
     IF NEW."dispatch_reservation_id" IS NULL THEN
       RAISE EXCEPTION 'ck_return_shipment_reserved: a return shipment is recorded under the dispatch reservation marketplace gave it'
         USING ERRCODE = 'check_violation';
     END IF;
-    PERFORM read_committed_xact_lock(
-      hashtextextended('return-dispatch|' || NEW."organization_id" || '|' || NEW."return_request_id", 0),
-      'A return shipment is recorded only under READ COMMITTED', 'tg_return_shipment_dispatch_fence');
+    lock_key := hashtextextended('return-dispatch|' || NEW."organization_id" || '|' || NEW."return_request_id", 0);
+    PERFORM read_committed_xact_lock(lock_key);
     IF EXISTS (SELECT 1 FROM "return_dispatch_withdrawal"
                 WHERE "organization_id" = NEW."organization_id"
                   AND "reservation_id" = NEW."dispatch_reservation_id") THEN

@@ -14,13 +14,11 @@ import type { ExtendedPrismaClient } from './prisma.service';
 export async function lockReadCommitted(
   tx: ExtendedPrismaClient,
   key: bigint,
-  guard: string,
   mode: 'exclusive' | 'shared' = 'exclusive',
 ): Promise<void> {
-  const refusal = `${guard} is taken only under READ COMMITTED`;
   if (mode === 'shared') {
-    await tx.$queryRaw`SELECT read_committed_xact_lock_shared(${key}::bigint, ${refusal}, ${guard})::text`;
+    await tx.$queryRaw`SELECT read_committed_xact_lock_shared(${key}::bigint)::text`;
   } else {
-    await tx.$queryRaw`SELECT read_committed_xact_lock(${key}::bigint, ${refusal}, ${guard})::text`;
+    await tx.$queryRaw`SELECT read_committed_xact_lock(${key}::bigint)::text`;
   }
 }
