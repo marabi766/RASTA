@@ -31,6 +31,9 @@
 //     and every migration statement's tokens, including DDL expressions; in DO bodies they go to
 //     review. Inputs need not contain a string; no data-flow proof is attempted. DISCARD and writes
 //     to pg_settings are session changes. Only reviewed non-executing extensions are replayed;
+//   - temporary CREATE modifiers and schemas, and SELECT INTO definitions: refused before
+//     replay dispatch and in production/live SQL. Only explicit PL/pgSQL routines/DO bodies
+//     can use plain SELECT INTO for variables; temporary/table modifiers remain refused.
 //   - types as PostgreSQL reads them (`pg_catalog.timestamp`, `"timestamp"`);
 //   - a pin: grouping, `AT TIME ZONE 'UTC'` or timezone('UTC', …), then date_trunc() or a cast
 //     to plain timestamp, used where nothing converts it back (no coalesce(), CASE branch,
@@ -632,6 +635,7 @@ function readRoutine({ tokens, text }) {
   return {
     key: `${name}(${signature.join(' ')})`,
     name,
+    language: spoken,
     body,
     // Parameters and result: a `timestamp` among them converts a bare clock too.
     header: `${signature.join(' ')} ${tokens
@@ -747,8 +751,6 @@ export function replayMigrations(texts) {
               (isOp(statement.tokens[i + 1], '.') && t.value !== t.value.toLowerCase()))) ||
           (t.type === 'word' && t.value.includes('$')),
       );
-      // Outside its strings and quoted names (blanked), PostgreSQL reads a non-ASCII character
-      // (U+00A0 too, which the lexer and `\s` take for a space) as part of a name.
       if (sessionChange(statement.tokens)) {
         refuse(`a session setting that may move names: ${firstLine(text)}`);
         continue;
@@ -764,12 +766,19 @@ export function replayMigrations(texts) {
         refuse(`a name the replay cannot read whole: ${misread.value}`);
         continue;
       }
+      // Outside its strings and quoted names (blanked), PostgreSQL reads a non-ASCII character
+      // (U+00A0 too, which the lexer and `\s` take for a space) as part of a name.
       if ([...unquotedText(statement)].some((c) => c.codePointAt(0) > 0x7f)) {
         refuse(`a name the replay cannot read whole (not ASCII): ${firstLine(text)}`);
         continue;
       }
       if (unmodelledExtension(statement.tokens)) {
         refuse(`an extension the guard cannot model: ${firstLine(text)}`);
+        continue;
+      }
+      const creation = relationCreationProblem(statement.tokens);
+      if (creation) {
+        refuse(creation);
         continue;
       }
       const nameProblem = replayNameProblem(statement.tokens);
@@ -873,6 +882,8 @@ export function replayMigrations(texts) {
           (language >= 0 && !isWord(statement.tokens[language + 1], 'plpgsql'))
         ) {
           refuse(`a DO block not read: ${firstLine(text)}`);
+        } else if (bodies.some((tokens) => relationCreationProblem(tokens, true))) {
+          refuse(`a temporary definition in a DO block: ${firstLine(text)}`);
         } else if (bodies.some(sessionChange)) {
           refuse(`a session setting that may move names: ${firstLine(text)}`);
         } else if (
@@ -1194,7 +1205,7 @@ const startsStatement = (tokens, i) =>
 
 // A statement begins with one of these at a start the reader recognises.
 const STATEMENT_HEADS = new Set(
-  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare begin start explain declare perform discard'.split(
+  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare begin start explain declare perform discard import'.split(
     ' ',
   ),
 );
@@ -1236,7 +1247,7 @@ function unmodelledExtension(tokens, i = 0) {
 // Calls proven to consume values, never execute them as SQL. An unlisted call receiving a
 // string may execute an opaque expression built from it: do not try to evaluate fragments.
 const VALUE_CALLS = new Set(
-  'timezone date_trunc to_char lower upper coalesce nullif concat concat_ws format chr length octet_length convert_to encode decode substring replace hashtextextended pg_advisory_xact_lock set_config current_setting nextval has_table_privilege extract date_bin min max sum bool_and strpos jsonb_build_object jsonb_populate_record hashtext translate string_agg int4send digest regexp_replace trim btrim count array_agg json_build_object json_agg pg_has_role has_database_privilege has_schema_privilege pg_try_advisory_xact_lock sha256 unnest tsrange greatest least'.split(
+  'timezone date_trunc to_char lower upper coalesce nullif concat concat_ws format chr length octet_length convert_to encode decode substring replace hashtextextended pg_advisory_xact_lock set_config current_setting nextval has_table_privilege has_sequence_privilege extract date_bin min max sum bool_and strpos jsonb_build_object jsonb_populate_record hashtext translate string_agg int4send digest regexp_replace trim btrim count array_agg json_build_object json_agg pg_has_role has_database_privilege has_schema_privilege pg_try_advisory_xact_lock sha256 unnest tsrange greatest least'.split(
     ' ',
   ),
 );
@@ -1305,12 +1316,112 @@ function holdsSql(tokens, i) {
   });
 }
 
+/** The start of the statement/query containing tokens[i], skipping completed parentheses. */
+function statementStart(tokens, i) {
+  let at = i;
+  for (let k = i - 1, depth = 0; k >= 0; k -= 1) {
+    if (isOp(tokens[k], ')')) depth += 1;
+    else if (isOp(tokens[k], '(') && depth-- === 0) break;
+    // BEGIN/LOOP can be SQL column names, so PL/pgSQL start heuristics are not proof here.
+    if (depth === 0 && isOp(tokens[k], ';')) break;
+    at = k;
+  }
+  return at;
+}
+
+/** Prove INSERT/MERGE heads this query; a label `AS insert INTO` is no exception. */
+function writeInto(tokens, i) {
+  if (!isWord(tokens[i - 1], 'insert', 'merge')) return false;
+  let at = statementStart(tokens, i - 1);
+  if (isWord(tokens[at], 'explain')) {
+    at += 1;
+    if (isOp(tokens[at], '(')) at = closing(tokens, at) + 1;
+    else while (isWord(tokens[at], 'analyze', 'verbose')) at += 1;
+  }
+  if (isWord(tokens[at], 'with')) {
+    at += isWord(tokens[at + 1], 'recursive') ? 2 : 1;
+    for (;;) {
+      if (nameOf(tokens[at]) === null) return false;
+      at = isOp(tokens[at + 1], '(') ? closing(tokens, at + 1) + 1 : at + 1;
+      if (!isWord(tokens[at], 'as')) return false;
+      at += isWord(tokens[at + 1], 'not') ? 3 : isWord(tokens[at + 1], 'materialized') ? 2 : 1;
+      if (!isOp(tokens[at], '(')) return false;
+      at = closing(tokens, at) + 1;
+      if (!isOp(tokens[at], ',')) break;
+      at += 1;
+    }
+  }
+  return at === i - 1;
+}
+
+/**
+ * Session-local definitions are never replayed. Inspect tokens, not SQL-looking data, and
+ * refuse the whole CREATE statement if any temporary schema occurs: its object grammar need
+ * not be known. SELECT INTO has no replayed column facts, even when its target is permanent.
+ * Only an explicit LANGUAGE plpgsql routine (or a PL/pgSQL DO) can assign INTO variables.
+ */
+function relationCreationProblem(tokens, plpgsql = false) {
+  // Production inventory also includes prose ("signed into its token"). Every SQL creation
+  // INTO has SELECT/IMPORT; other recognised SQL statements still default to refusal.
+  const sql = tokens.some(
+    (t, i) =>
+      (headsStatement(tokens, i) && !isWord(t, 'with')) ||
+      isWord(t, 'select', 'insert', 'merge', 'update', 'delete', 'import'),
+  );
+  for (const [i, t] of tokens.entries()) {
+    if (isWord(t, 'create')) {
+      // CREATE in a privilege list names no target. No other unrecognised prefix exempts it.
+      const privilege = isWord(tokens[i + 1], 'on') || isOp(tokens[i + 1], ',');
+      let at = i + 1;
+      // Modifiers precede the object kind; never inspect column names as modifiers. Unknown
+      // object kinds after TEMP are refused too, rather than enumerating table/view/sequence.
+      while (
+        isWord(
+          tokens[at],
+          'or',
+          'replace',
+          'global',
+          'local',
+          'unlogged',
+          'recursive',
+          'materialized',
+          'unique',
+          'constraint',
+        )
+      )
+        at += 1;
+      if (isWord(tokens[at], 'temp', 'temporary'))
+        return 'a temporary object that may shadow a replayed relation';
+      let header = true;
+      for (let k = at; k < tokens.length && !isOp(tokens[k], ';'); k += 1) {
+        if (isOp(tokens[k], '(') || isWord(tokens[k], 'as')) header = false;
+        if (header && !privilege && spliced(tokens[k]))
+          return 'a CREATE target the guard cannot classify';
+        if (/^pg_temp(?:_[0-9]+)?$/.test(nameOf(tokens[k]) ?? '') && isOp(tokens[k + 1], '.'))
+          return 'a CREATE using a temporary schema that may shadow a replayed relation';
+      }
+    }
+    // INTO is reserved: outside proven writes or PL/pgSQL variables, unknown means refuse.
+    if (sql && isWord(t, 'into') && !writeInto(tokens, i)) {
+      if (
+        !plpgsql ||
+        isWord(tokens[i + 1], 'temp', 'temporary', 'unlogged', 'table') ||
+        (/^pg_temp(?:_[0-9]+)?$/.test(nameOf(tokens[i + 1]) ?? '') && isOp(tokens[i + 2], '.'))
+      )
+        return 'an INTO whose created relation is not replayed';
+    }
+  }
+  return null;
+}
+
 /**
  * What the guard cannot read in a text, or null (PR #979 r1 F1): it is refused, never read as
  * absent. A U& identifier with UESCAPE, a string it cannot decode, SQL inside a string (DO $$…$$,
  * EXECUTE '…', a scheduled job), a DO or EXECUTE statement, and a search_path change.
  */
-function unreadableIn(tokens) {
+function unreadableIn(tokens, plpgsql = false) {
+  const creation = relationCreationProblem(tokens, plpgsql);
+  if (creation) return creation;
   const executor = sqlTextExecutor(tokens);
   if (executor !== null) return `a SQL-text executor: ${executor}`;
   for (const [i, t] of tokens.entries()) {
@@ -1319,13 +1430,6 @@ function unreadableIn(tokens) {
     const object = isWord(tokens[i + 1], 'or') && isWord(tokens[i + 2], 'replace') ? i + 3 : i + 1;
     if (isWord(t, 'create') && isWord(tokens[object], 'function', 'procedure', 'routine'))
       return 'routine-defining DDL in production SQL';
-    const modifier = isWord(tokens[i + 1], 'global', 'local') ? i + 2 : i + 1;
-    if (
-      isWord(t, 'create') &&
-      isWord(tokens[modifier], 'temp', 'temporary') &&
-      isWord(tokens[modifier + 1], 'table')
-    )
-      return 'a temporary table that may shadow a replayed table';
     if (headsStatement(tokens, i) && isWord(t, 'do', 'execute')) return `a ${t.lower} statement`;
     if (t.type !== 'string') continue;
     if (!stringValues(tokens, i)) return `a string: ${t.value}`;
@@ -1366,9 +1470,9 @@ function namesOutsideFrom(tokens, tables) {
  * What is wrong with one SQL text, given table -> columns. `tables` is every table
  * this text may mean (one service's, or every service's for a shared package).
  */
-export function problemsIn(text, tables) {
+export function problemsIn(text, tables, { plpgsql = false } = {}) {
   const tokens = lexAll(text);
-  const unreadable = unreadableIn(tokens);
+  const unreadable = unreadableIn(tokens, plpgsql);
   if (unreadable) return [`R0 what the guard cannot read: ${unreadable}`];
   const problems = [];
   const clocks = clocksIn(tokens);
@@ -1668,7 +1772,7 @@ export function localVariableProblems(body, header = '') {
 }
 
 /** What is wrong with a live routine or view, whatever its clocks. */
-export function definitionProblems({ body, header }, tables, firesOn = []) {
+export function definitionProblems({ body, header, language }, tables, firesOn = []) {
   const tokens = lex(body);
   const dynamic = tokens.some((t) => isWord(t, 'execute'));
   const ddl = tokens.some((t) => isWord(t, ...LIVE_DDL));
@@ -1682,7 +1786,7 @@ export function definitionProblems({ body, header }, tables, firesOn = []) {
     ),
   );
   return [
-    ...problemsIn(body, tables),
+    ...problemsIn(body, tables, { plpgsql: language === 'plpgsql' }),
     ...localVariableProblems(body, header),
     ...(rowColumns.length > 0 && hasBareClock(body)
       ? [`R1 a bare clock beside timestamp(3) ${rowColumns.join(', ')} of its trigger's table`]
