@@ -1,5 +1,6 @@
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import { parseWholeNumber } from '@rasta/config';
 
 /**
  * Which hops in front of the gateway may state the client's address (L1-03).
@@ -44,10 +45,10 @@ function isAddressOrRange(entry: string): boolean {
   if (prefix === undefined) return true;
 
   if (!/^\d{1,3}$/.test(prefix)) return false;
-  const bits = Number(prefix);
+  const bits = parseWholeNumber(prefix, { min: 0, max: family === 4 ? 32 : 128 });
   // /0 is every address of its family — "trust everyone" spelled as a range,
   // which makes X-Forwarded-For client-controlled again. Refused like `true`.
-  return bits >= 1 && bits <= (family === 4 ? 32 : 128);
+  return bits !== null && bits >= 1;
 }
 
 /**
