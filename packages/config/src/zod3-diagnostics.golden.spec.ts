@@ -9,22 +9,23 @@ import { envEnumProbes } from './env-probe';
  * main `745d0434` (zod 3.25.76) (`~/worker2/session/t109/scripts/record.sh`).
  */
 
-/** Recorded under zod 3 on main 745d0434; never written by a test run. */
-const ZOD3: Record<string, unknown> = {
+/** Zod 3 records, with deliberate FU-287 digit-parser diagnostic changes below. */
+const EXPECTED: Record<string, unknown> = {
   'base nothing set':
-    'Invalid environment configuration:\n  - SERVICE_NAME: Required\n  - PORT: Expected number',
+    'Invalid environment configuration:\n  - SERVICE_NAME: Required\n  - PORT: Required',
   'base PORT 1e999':
-    'Invalid environment configuration:\n  - PORT: Expected integer\n  - PORT: Number must be less than or equal to 65535',
+    'Invalid environment configuration:\n  - PORT: Expected a whole number written as digits, such as "10"',
   'base PORT 0.5':
-    'Invalid environment configuration:\n  - PORT: Expected integer\n  - PORT: Number must be greater than or equal to 1',
-  'base PORT abc': 'Invalid environment configuration:\n  - PORT: Expected number',
+    'Invalid environment configuration:\n  - PORT: Expected a whole number written as digits, such as "10"',
+  'base PORT abc':
+    'Invalid environment configuration:\n  - PORT: Expected a whole number written as digits, such as "10"',
   'base NODE_ENV outside its enum': 'loaded',
   'base LOG_LEVEL empty':
     "Invalid environment configuration:\n  - LOG_LEVEL: Invalid enum value. Expected 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace'",
   'base OTEL endpoint not a URL':
     'Invalid environment configuration:\n  - OTEL_EXPORTER_OTLP_ENDPOINT: URL must be a valid URL',
   'base SHUTDOWN_TIMEOUT_MS 999.5':
-    'Invalid environment configuration:\n  - SHUTDOWN_TIMEOUT_MS: Expected integer\n  - SHUTDOWN_TIMEOUT_MS: Number must be greater than or equal to 1000',
+    'Invalid environment configuration:\n  - SHUTDOWN_TIMEOUT_MS: Expected a whole number written as digits, such as "10"',
   'service a one-value enum missing':
     'Invalid environment configuration:\n  - CURRENCY: Required\n  - TIER: Required',
   'service a one-value enum given another value':
@@ -37,7 +38,7 @@ const ZOD3: Record<string, unknown> = {
 };
 
 function matchesZod3(name: string, observed: unknown): void {
-  expect(observed).toEqual(ZOD3[name]);
+  expect(observed).toEqual(EXPECTED[name]);
 }
 
 const BASE = { SERVICE_NAME: 'zod3-golden', PORT: '3000' };
@@ -52,7 +53,7 @@ function refusal(schema: z.ZodTypeAny, source: NodeJS.ProcessEnv): string {
   return 'loaded';
 }
 
-describe('a refused environment reads as it did under zod 3', () => {
+describe('environment diagnostics retain legacy wording with strict digit parsing', () => {
   it.each([
     ['nothing set', {}],
     ['PORT 1e999', { ...BASE, PORT: '1e999' }],

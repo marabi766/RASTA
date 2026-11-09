@@ -107,7 +107,7 @@
     "test:outbox-purge-turbo-env": "node --test --test-timeout=300000 scripts/outbox-purge-turbo-env.test.mjs",
     "test:construction-turbo-env": "node --test --test-timeout=300000 scripts/construction-turbo-env.test.mjs",
     "test:database-turbo-env": "node --test --test-timeout=300000 scripts/database-turbo-env.test.mjs",
-    "test:service-env-turbo": "node --test --test-timeout=300000 scripts/service-env-turbo.test.mjs scripts/service-env-withheld-base.test.mjs",
+    "test:service-env-turbo": "node --test --test-timeout=300000 scripts/service-env-turbo.test.mjs scripts/service-env-withheld-base.test.mjs scripts/numeric-env-guard.test.mjs",
     "test:session-statement-timeout": "node --test --test-timeout=300000 scripts/session-statement-timeout.test.mjs",
     "test:marketplace-saga-drain-check": "node --test --test-timeout=300000 scripts/marketplace-saga-drain-check.test.mjs",
     "test:boot-guard": "node --test --test-timeout=300000 scripts/service-boot-guard.test.mjs",
