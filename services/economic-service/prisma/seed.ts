@@ -128,20 +128,27 @@ async function seedPlatformAccounts(): Promise<void> {
  * being read as anything else, and it is returned by the API on every rule.
  */
 async function seedSampleRules(): Promise<void> {
-  await prisma.commissionRule.upsert({
-    where: { id: 'CMR_SAMPLE_MARKETPLACE' },
-    create: {
-      id: 'CMR_SAMPLE_MARKETPLACE',
-      organizationId: null,
-      transactionType: 'MARKETPLACE_ORDER',
-      rateBasisPoints: 200,
-      validFrom: new Date('2020-01-01T00:00:00.000Z'),
-      status: 'ACTIVE',
-      label: SAMPLE_LABEL,
-      createdBy: 'seed',
-      updatedBy: 'seed',
-    },
-    update: { label: SAMPLE_LABEL },
+  // From the instant the database decides, never backdated: `trg_commission_rule_effective_dated`
+  // refuses a rule that starts in the past (#1016 r1 F1), so demo facts before the seed stay unpriced.
+  await prisma.$transaction(async (tx) => {
+    const [decided] = await tx.$queryRaw<{ at: Date }[]>`
+      SELECT commission_rule_scope_change(NULL, NULL, 'MARKETPLACE_ORDER') AT TIME ZONE 'UTC' AS at`;
+    if (!decided) throw new Error('The database did not report the change instant');
+    await tx.commissionRule.upsert({
+      where: { id: 'CMR_SAMPLE_MARKETPLACE' },
+      create: {
+        id: 'CMR_SAMPLE_MARKETPLACE',
+        organizationId: null,
+        transactionType: 'MARKETPLACE_ORDER',
+        rateBasisPoints: 200,
+        validFrom: decided.at,
+        status: 'ACTIVE',
+        label: SAMPLE_LABEL,
+        createdBy: 'seed',
+        updatedBy: 'seed',
+      },
+      update: { label: SAMPLE_LABEL },
+    });
   });
   console.log(`    - commission rule MARKETPLACE_ORDER @ 200bp  [${SAMPLE_LABEL}]`);
 

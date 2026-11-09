@@ -453,8 +453,16 @@ CI نخستین اجرای واقعی است:
   خود این PR کنار رفت و یک جا تصمیم می‌گیرد: `answerOutcome` در `proxy.service.ts` چنین ردی را `release` می‌داند — نه موفقیت،
   نه شکست؛ جای Probe ـِ HALF_OPEN را آزاد می‌کند و وضعیت شکست را دست نمی‌زند — فقط وقتی سرویس identity، وضعیت `503`، بدنه
   پاکت معتبر پلتفرم (`apiErrorSchema`) و کد یکی از این دو باشد. Timeout، خطای اتصال، بدنه‌ی ناقص و هر 5xx دیگر شکست است
-  (`circuit-answers.spec.ts`). **تفاوت با نسخه‌ی بازبینی‌شده‌ی #381 r4:** `main` دیگر `correlationId` همین درخواست و نبودِ
-  `details` و کلید اضافه را شرط نمی‌کند؛ این فقط حفاظت از بار است، نه مجوز، و در STATUS همین PR به‌عنوان کار پیگیری پیشنهاد شده است.
+  (`circuit-answers.spec.ts`). FU-276 restores the r4 conditions: the envelope must match the forwarded request's
+  `correlationId`, with no `details` key (including an empty array) and no keys beyond `code`, `message`, `correlationId`,
+  `traceId`, `timestamp`, and `path`. Raw keys are checked before response sanitization; the exemption only releases a
+  circuit permit, without clearing failures or closing a recovery probe.
+
+- **FU-276 metrics and configuration.** With the revocation list off, its three list/feed gauges are absent. Attaching
+  an observation source registers them; unknown staleness and lag remain `-1`, distinct from a caught-up empty list.
+  Every numeric gateway setting, including inherited port, shutdown timeout and internal-token TTL, requires decimal
+  digits within its bounds at startup. Empty text, whitespace, signs, fractions, exponent/base notation and unsafe
+  integers are refused. Defaults remain unchanged; millisecond durations are capped at Node's maximum timer delay.
 
 ### ۴. راه‌اندازی، بازسازی و آمادگی
 

@@ -1,14 +1,31 @@
 // Closed reviewed registry: source/helper drift requires review of the declared launch boundaries.
 export const JEST_LAUNCHERS = {
+  'scripts/ci-tool-download.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Node tests spawn curl/Git and the pinned Gitleaks binary, plus the exact pinned Secret scan shell in isolated Git fixtures; downloads are mocked except a loopback curl probe. No Jest, pnpm or Turbo child.',
+    sha256: {
+      'scripts/ci-tool-download.test.mjs':
+        'aaaf4ec48683f22fb34d1609bdb3eac9c77c510f34bb4bab7b2e7f32c6df9a3a',
+      'scripts/ci-tool-download.mjs':
+        'ee68f2a2fa8840b19acb90edf7f97829d41a3cc27c6128024d94ca3e748e5c02',
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
+      'scripts/authored-source-inventory.cjs':
+        '0b5d93cff1bf3868a9de93166d3d669d97099409e6affac231993066f749e65a',
+      '.github/workflows/ci.yml':
+        '4bbc0648e214f0f8ff33d3b5dde45a20a62480ad3d0731fde93a2ab5dd80e4aa',
+    },
+  },
   'scripts/verify-migration-reversible-lib.test.mjs': {
     kind: 'non-jest',
     reaches:
       'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
     sha256: {
       'scripts/verify-migration-reversible-lib.test.mjs':
-        'b746f126efdce219c78b29c89fb223e15b297e968dc0d72e895d67256b9a8b96',
+        'ab2597a5acbea53c710fdc3ea7851890da0f2313644b02a3be15085fe4a75b2d',
       'scripts/verify-migration-reversible-lib.mjs':
-        'adb9462c3da0d4eade4b73d3bb6e14f6d18d71f0a6cdde8e96150ce9224ff721',
+        'c8d5170bc695d946917c1191015517a3b18451227ad75d6291cbd95bc564dd50',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },

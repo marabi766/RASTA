@@ -4,6 +4,7 @@ export {
   baseEnvSchema,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
   booleanEnv,
+  wholeNumberEnv,
   queryBoolean,
   queryBooleanDefault,
   databaseEnvSchema,

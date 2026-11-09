@@ -415,6 +415,35 @@ export async function bareObligation(prisma: PrismaService, organizationId: stri
   return id;
 }
 
+/**
+ * Runs `write` as the owner with `trg_commission_rule_effective_dated` lifted, in one transaction
+ * that restores it on every exit path: a rule planted in the past (legacy, or one that got around
+ * the guard) and the suite's own rules removed. The runtime role can do neither (#1016 r1 F1).
+ */
+export async function aroundCommissionHistory<T>(
+  write: (
+    tx: Pick<PrismaClient, '$executeRawUnsafe' | '$queryRawUnsafe' | 'commissionRule'>,
+  ) => Promise<T>,
+): Promise<T> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    return await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE commission_rule DISABLE TRIGGER trg_commission_rule_effective_dated',
+      );
+      const result = await write(tx);
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE commission_rule ENABLE TRIGGER trg_commission_rule_effective_dated',
+      );
+      return result;
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
 export async function cleanup(
   prisma: PrismaService,
   organizationIds: readonly string[],
@@ -812,12 +841,16 @@ export async function cleanup(
     //
     // So the disjunct stays and is bound to the run instead, which is what
     // `ITEST_ACTOR` exists for (`author`, above).
-    await client.$executeRawUnsafe(
-      `DELETE FROM commission_rule
-        WHERE organization_id LIKE ANY($1::text[])
-           OR created_by LIKE $2`,
-      orgs,
-      author,
+    // A rule that has started is history at the database (#1016 r1 F1): this run's own go with
+    // the guard lifted, as the owner, in one transaction.
+    await aroundCommissionHistory((tx) =>
+      tx.$executeRawUnsafe(
+        `DELETE FROM commission_rule
+          WHERE organization_id LIKE ANY($1::text[])
+             OR created_by LIKE $2`,
+        orgs,
+        author,
+      ),
     );
     await client.$executeRawUnsafe(
       `DELETE FROM reward_rule

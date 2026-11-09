@@ -28,17 +28,24 @@
 همهٔ آن‌ها با یک متن رد می‌شوند: «A guard that locks and then reads runs only under READ COMMITTED» (`23001`)؛ CONTEXT خطا نام
 نگهبان را می‌گوید.
 
-| نگهبان                                                        | Migration                                     |
-| ------------------------------------------------------------- | --------------------------------------------- |
-| `trg_ledger_entry_wallet_covered`                             | economic ‏`20261108120000`، ‏`20261109120000` |
-| `trg_wallet_hold_funded_at_commit`                            | economic ‏`20261107120000`، ‏`20261109120000` |
-| `trg_journal_hold_funding_final`                              | economic ‏`20261107120000`، ‏`20261109120000` |
-| `trg_wallet_hold_reference_bound`                             | economic ‏`20261109120000`                    |
-| `trg_transaction_id_unclaimed`                                | economic ‏`20261109120000`                    |
-| `trg_commission_rule_read_committed` (هر نوشتن قاعدهٔ کارمزد) | economic ‏`20261109120000`                    |
-| `commission_pricing_scope_lock`                               | economic ‏`20261109120000`                    |
-| `tg_return_dispatch_withdrawal_guard`                         | inventory ‏`20261109120000`                   |
-| `tg_return_shipment_dispatch_fence`                           | inventory ‏`20261109120000`                   |
+| نگهبان                                                         | Migration                                     |
+| -------------------------------------------------------------- | --------------------------------------------- |
+| `trg_ledger_entry_wallet_covered`                              | economic ‏`20261108120000`، ‏`20261109120000` |
+| `trg_wallet_hold_funded_at_commit`                             | economic ‏`20261107120000`، ‏`20261109120000` |
+| `trg_journal_hold_funding_final`                               | economic ‏`20261107120000`، ‏`20261109120000` |
+| `trg_wallet_hold_reference_bound`                              | economic ‏`20261109120000`                    |
+| `trg_transaction_id_unclaimed`                                 | economic ‏`20261109120000`                    |
+| `trg_commission_rule_effective_dated` (هر نوشتن قاعدهٔ کارمزد) | economic ‏`20261109120000`                    |
+| `commission_pricing_scope_lock`                                | economic ‏`20261109120000`                    |
+| `tg_return_dispatch_withdrawal_guard`                          | inventory ‏`20261109120000`                   |
+| `tg_return_shipment_dispatch_fence`                            | inventory ‏`20261109120000`                   |
+
+**قاعده‌های کارمزد (#1016 r1 F1).** هر نوشتن قاعده (INSERT، COPY، شاخهٔ INSERT در ON CONFLICT، UPDATE و DELETE) در
+`trg_commission_rule_effective_dated` با لحظه‌ای سنجیده می‌شود که پایگاه داده پس از گرفتن قفل دامنه در
+`commission_rule_scope_decision` ثبت کرده است؛ هیچ نشستی آن را تعیین نمی‌کند و تنظیم `rasta.commission_rule_scope_<key>` دیگر
+خوانده نمی‌شود. رد می‌شوند: قاعده‌ای که پیش از آن لحظه شروع شود («never in the past»)، حذف قاعده‌ای که شروع شده («never
+deleted»)، تغییر وضعیت قاعدهٔ در حال اجرا، تغییر یا حذف یک تصمیم («never changed or removed») و TRUNCATE. همه `23001` هستند و
+تراکنش برگشته است. قاعدهٔ نادرست را با `valid_to` پایان بده و قاعدهٔ تازه بساز.
 
 ---
 
@@ -103,6 +110,6 @@ Migration چیزی نمی‌سازد و چیزی را اصلاح نمی‌کند
 ## بازگشت
 
 `down.sql` ‏Migration ‏`20261109120000_guards_read_committed` (در هر دو سرویس) بدنه‌های پیشین را بایت به بایت برمی‌گرداند.
-economic-service خودش دروازه را صدا می‌زند (`lockReadCommitted`، `lockScopeForChange`)، پس **اول نسخهٔ سرویس را برگردان**، بعد
-`down.sql` را اجرا کن؛ وگرنه تغییر قاعدهٔ کارمزد و نوشتن قاعده‌های پاداش، مشارکت و شناسایی تا بازگشت سرویس رد می‌شوند (بسته
+economic-service خودش دروازه را صدا می‌زند (`lockReadCommitted`)، پس **اول نسخهٔ سرویس را برگردان**، بعد
+`down.sql` را اجرا کن؛ وگرنه نوشتن قاعده‌های پاداش، مشارکت و شناسایی تا بازگشت سرویس رد می‌شوند (بسته
 شکست می‌خورد). پس از آن، نگهبان‌های فهرست‌شده دوباره بی‌دروازه قفل می‌گیرند و Verifier ‏Migration آن وضعیت را رد می‌کند.

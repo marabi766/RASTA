@@ -833,13 +833,6 @@
     "decision": "platform-wide: financial pricing locks include nullable global scopes and the tenant subject; fixed reviewed database functions coordinate pricing and rule changes"
   },
   {
-    "file": "services/economic-service/src/commission/commission.service.ts",
-    "line": 634,
-    "hash": "378bb1e2322963691eee13f27b84136db47169d73fb511d2ea53dc439b18b3e3",
-    "occurrence": 0,
-    "decision": "platform-wide: the commission scope's lock through the READ COMMITTED gate (FU-268); the scope includes nullable global rules; no tenant row is read or written"
-  },
-  {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
     "line": 55,
     "hash": "5423fd4312b6b7cf7a568855f36d0c649c32188167e2abd547a060c62ed533b9",

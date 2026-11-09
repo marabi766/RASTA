@@ -628,12 +628,6 @@ async function lockScopeForPricing(
  * rule's start or end in the past.
  */
 async function lockScopeForChange(tx: ExtendedPrismaClient, scope: ScopeOfRule): Promise<Date> {
-  // The scope's lock through the READ COMMITTED gate first (FU-268): the rules this change reads
-  // next are read after the wait only under READ COMMITTED. The same lock, so the call below
-  // returns at once.
-  await tx.$queryRaw`SELECT read_committed_xact_lock(commission_rule_scope_key(
-    ${scope.organizationId}, ${scope.businessLine}::"BusinessLine",
-    ${scope.transactionType}::"TransactionType"))::text`;
   const [row] = await tx.$queryRaw<{ at: Date }[]>`
     SELECT commission_rule_scope_change(
       ${scope.organizationId}, ${scope.businessLine}::"BusinessLine",

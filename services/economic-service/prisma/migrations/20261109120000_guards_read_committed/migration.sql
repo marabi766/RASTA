@@ -13,8 +13,9 @@
 --   for anything else and a transaction with the same id could both be written;
 -- - `commission_rule_scope_change` and `commission_pricing_scope_lock` (20261016120000): a pricing
 --   could read the rules from before a change it had waited for. And a change took no lock at all
---   once `rasta.commission_rule_scope_<key>` was set, which any session may set: every write of a
---   scoped rule now takes the scope's lock through the gate (`trg_commission_rule_read_committed`).
+--   once `rasta.commission_rule_scope_<key>` was set, which any session may set, and was decided
+--   at the instant that setting named: the instant now lives where no session writes it, and one
+--   trigger holds every write of a rule to it (below, #1016 r1 F1).
 --
 -- So the lock itself is now the gate. `read_committed_xact_lock` and its shared and two-key forms
 -- refuse a NULL key (which takes no lock) before they lock, and every level but READ COMMITTED
@@ -109,30 +110,127 @@ BEGIN
   PERFORM read_committed_xact_lock_shared(commission_rule_scope_key(organization_id, business_line, transaction_type));
 END; $$ LANGUAGE plpgsql VOLATILE;
 
--- A change of a scope's rules: `commission_rule_scope_change` (its body stays as 20261016120000
--- wrote it: `check:utc-clock-sites` binds its review to that body) takes the scope's lock itself,
--- and skips it once the session holds the decided instant, a setting any session may write. So
--- every write of a scoped rule takes the same lock through the gate first, here, whatever the
--- setting says; the service does the same before it reads (`lockScopeForChange`).
-CREATE FUNCTION enforce_commission_rule_read_committed() RETURNS TRIGGER AS $$
-DECLARE subject RECORD;
+-- ---- 20261016120000's commission history: one boundary, decided at an instant no session sets ----
+--
+-- A change of a scope's rules is decided at one instant, the database clock read once the scope's
+-- lock is held, and the service and the trigger below read that same instant. 20261016120000 kept it
+-- in `rasta.commission_rule_scope_<key>`, a setting any session may write: set it before the rule's
+-- start and a rule in force could be withdrawn (#1016 r1 F1). The instant now lives in
+-- `commission_rule_scope_decision`, one row per transaction and scope, whose trigger takes the lock
+-- through the gate and then writes the transaction's id and the clock itself, whatever the INSERT
+-- said; the row is never updated, deleted or truncated. A transaction reads only its own row
+-- (`pg_current_xact_id()`, 64-bit, never reused), and the row goes with a rolled-back savepoint, as
+-- the lock does. The table grows by one row per scope per rule change (an administrator's act).
+CREATE TABLE "commission_rule_scope_decision" (
+  "transaction_id" xid8         NOT NULL,
+  "scope_key"      BIGINT       NOT NULL,
+  "decided_at"     TIMESTAMP(3) NOT NULL,
+  CONSTRAINT "commission_rule_scope_decision_pkey" PRIMARY KEY ("transaction_id", "scope_key")
+);
+
+CREATE FUNCTION commission_rule_scope_decided() RETURNS TRIGGER AS $$
 BEGIN
-  IF TG_OP = 'INSERT' THEN
-    subject := NEW;
-  ELSE
-    subject := OLD;
+  IF TG_OP IS DISTINCT FROM 'INSERT' THEN
+    RAISE EXCEPTION 'a commission scope decision is never changed or removed'
+      USING ERRCODE = 'restrict_violation';
   END IF;
-  -- A row naming no scope has no lock; `ck_commission_rule_scope` refuses it.
-  IF subject."business_line" IS NOT NULL OR subject."transaction_type" IS NOT NULL THEN
-    PERFORM read_committed_xact_lock(
-      commission_rule_scope_key(subject."organization_id", subject."business_line", subject."transaction_type"));
+  PERFORM read_committed_xact_lock(NEW."scope_key");
+  NEW."transaction_id" := pg_catalog.pg_current_xact_id();
+  NEW."decided_at" := pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp() AT TIME ZONE 'UTC');
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_commission_rule_scope_decided"
+  BEFORE INSERT OR UPDATE OR DELETE ON "commission_rule_scope_decision"
+  FOR EACH ROW EXECUTE FUNCTION commission_rule_scope_decided();
+CREATE TRIGGER "trg_commission_rule_scope_decision_kept"
+  BEFORE TRUNCATE ON "commission_rule_scope_decision"
+  FOR EACH STATEMENT EXECUTE FUNCTION commission_rule_scope_decided();
+
+-- The scope's lock, through the gate, on every call; then this transaction's decided instant.
+CREATE OR REPLACE FUNCTION commission_rule_scope_change(
+  organization_id TEXT, business_line "BusinessLine", transaction_type "TransactionType"
+) RETURNS TIMESTAMP(3) AS $$
+DECLARE
+  scope BIGINT := commission_rule_scope_key(organization_id, business_line, transaction_type);
+  decided TIMESTAMP(3);
+BEGIN
+  PERFORM read_committed_xact_lock(scope);
+  SELECT d."decided_at" INTO decided FROM "commission_rule_scope_decision" d
+   WHERE d."transaction_id" OPERATOR(pg_catalog.=) pg_catalog.pg_current_xact_id()
+     AND d."scope_key" OPERATOR(pg_catalog.=) scope;
+  IF NOT FOUND THEN
+    INSERT INTO "commission_rule_scope_decision" ("scope_key") VALUES (scope)
+      RETURNING "decided_at" INTO decided;
+  END IF;
+  RETURN decided;
+END; $$ LANGUAGE plpgsql VOLATILE;
+
+-- Every write of a rule, at that instant: an INSERT (COPY, the insert branch of ON CONFLICT) starts
+-- now or later, never before (F1 iii: a backdated rule would reprice facts that occurred before
+-- it); a rule that has started is history, so it is never deleted (F1 ii) and keeps its status;
+-- the UPDATE rules are 20261016120000's, unchanged. TRUNCATE is refused outright.
+CREATE OR REPLACE FUNCTION commission_rule_effective_dated() RETURNS TRIGGER AS $$
+DECLARE at TIMESTAMP(3);
+BEGIN
+  IF TG_OP = 'TRUNCATE' THEN
+    RAISE EXCEPTION 'commission rules are history: never truncated'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    -- A row naming no scope has no lock; `ck_commission_rule_scope` refuses it.
+    IF NEW."business_line" IS NULL AND NEW."transaction_type" IS NULL THEN
+      RETURN NEW;
+    END IF;
+    at := commission_rule_scope_change(NEW."organization_id", NEW."business_line", NEW."transaction_type");
+    IF NEW."valid_from" < at THEN
+      RAISE EXCEPTION 'a commission rule starts now or later, never in the past: a backdated rule would reprice what already occurred'
+        USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
+  -- A stored rule always names its scope (`ck_commission_rule_scope`); one that did not has a NULL
+  -- key, which the gate refuses.
+  at := commission_rule_scope_change(OLD."organization_id", OLD."business_line", OLD."transaction_type");
+  IF TG_OP = 'DELETE' THEN
+    IF OLD."valid_from" <= at THEN
+      RAISE EXCEPTION 'a commission rule that has started is history: it is never deleted'
+        USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF (NEW."organization_id", NEW."business_line", NEW."transaction_type", NEW."rate_basis_points",
+      NEW."min_amount_minor", NEW."max_amount_minor", NEW."valid_from")
+     IS DISTINCT FROM
+     (OLD."organization_id", OLD."business_line", OLD."transaction_type", OLD."rate_basis_points",
+      OLD."min_amount_minor", OLD."max_amount_minor", OLD."valid_from") THEN
+    RAISE EXCEPTION 'commission_rule terms never change: a new rate, scope or start is a new rule'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF NEW."status" IS DISTINCT FROM OLD."status" AND OLD."valid_from" <= at THEN
+    RAISE EXCEPTION 'a commission rule in force keeps its status: end it with valid_to'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF NEW."valid_to" IS DISTINCT FROM OLD."valid_to" THEN
+    IF OLD."valid_to" IS NOT NULL AND OLD."valid_to" <= at THEN
+      RAISE EXCEPTION 'a commission rule that has ended cannot be moved or reopened'
+        USING ERRCODE = 'restrict_violation';
+    END IF;
+    IF NEW."valid_to" IS NOT NULL AND NEW."valid_to" < at THEN
+      RAISE EXCEPTION 'a commission rule is ended from now on, never in the past'
+        USING ERRCODE = 'restrict_violation';
+    END IF;
   END IF;
   RETURN NEW;
 END; $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER "trg_commission_rule_read_committed"
-  BEFORE INSERT OR UPDATE ON "commission_rule"
-  FOR EACH ROW EXECUTE FUNCTION enforce_commission_rule_read_committed();
+DROP TRIGGER "trg_commission_rule_effective_dated" ON "commission_rule";
+CREATE TRIGGER "trg_commission_rule_effective_dated"
+  BEFORE INSERT OR UPDATE OR DELETE ON "commission_rule"
+  FOR EACH ROW EXECUTE FUNCTION commission_rule_effective_dated();
+CREATE TRIGGER "trg_commission_rule_history_kept"
+  BEFORE TRUNCATE ON "commission_rule"
+  FOR EACH STATEMENT EXECUTE FUNCTION commission_rule_effective_dated();
 
 -- ---- 20261105120000's hold reference and transaction id, through the gate ----
 
