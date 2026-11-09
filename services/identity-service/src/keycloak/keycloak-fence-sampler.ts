@@ -128,7 +128,10 @@ export function pooledFenceSampleSource(
       own.transaction(
         async (tx) => {
           // Waits on a lock — the down migration's ACCESS EXCLUSIVE — end too.
-          await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = ${wholeMs(budgetMs)}`);
+          await tx.$executeRawUnsafe(
+            "SELECT pg_catalog.set_config('lock_timeout', $1, true)",
+            `${wholeMs(budgetMs)}ms`,
+          );
           return fenceCounts(tx);
         },
         { budgetMs, statementTimeoutMs: wholeMs(budgetMs) },
@@ -136,7 +139,10 @@ export function pooledFenceSampleSource(
     lapseBacklog: (budgetMs) =>
       business.transaction(
         async (tx) => {
-          await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = ${wholeMs(budgetMs)}`);
+          await tx.$executeRawUnsafe(
+            "SELECT pg_catalog.set_config('lock_timeout', $1, true)",
+            `${wholeMs(budgetMs)}ms`,
+          );
           return business.countLapsedMemberships(await business.databaseNow(tx), tx);
         },
         { budgetMs, statementTimeoutMs: wholeMs(budgetMs) },
