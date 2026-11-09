@@ -389,11 +389,16 @@ export class ProxyService {
             const envelope = platformErrorEnvelope(response.status, text, request);
             if (envelope) {
               return {
-                outcome: answerOutcome(request.service, response.status, envelope),
+                outcome: answerOutcome(
+                  request.service,
+                  response.status,
+                  envelope.circuitEnvelope,
+                  headers['x-correlation-id'],
+                ),
                 response: {
                   status: response.status,
                   headers: this.responseHeaders(response),
-                  body: envelope,
+                  body: envelope.body,
                 },
               };
             }
@@ -578,7 +583,7 @@ export class ProxyService {
    */
   private relayedClientError(request: ProxyRequest, response: Response, text: string): ApiError {
     const envelope = platformErrorEnvelope(response.status, text, request);
-    if (envelope) return envelope;
+    if (envelope) return envelope.body;
 
     this.logger.warn(
       `${request.service} answered ${response.status} without a platform error body ` +
@@ -626,13 +631,15 @@ const IDENTITY_EXEMPT_CODES: ReadonlySet<string> = new Set([
  * works (`success`: it may clear failures and close the circuit). A 4xx refused
  * this one request — its input, its rights, its state — and says nothing either
  * way: `release`. So is identity's exempt 503, but only as a complete platform
- * envelope (`envelope`, already parsed and validated) from identity itself.
+ * envelope (`envelope`, validated with no details or extra raw keys) from
+ * identity itself, bound to this request’s correlation id.
  * Every other 5xx is a `failure`.
  */
 export function answerOutcome(
   service: ServiceName,
   status: number,
   envelope: ApiError | null,
+  requestCorrelationId?: string,
 ): CircuitOutcome {
   if (status < 400) return 'success';
   if (status < 500) return 'release';
@@ -640,7 +647,9 @@ export function answerOutcome(
     service === 'identity' &&
     status === HttpStatus.SERVICE_UNAVAILABLE &&
     envelope !== null &&
-    IDENTITY_EXEMPT_CODES.has(envelope.code);
+    IDENTITY_EXEMPT_CODES.has(envelope.code) &&
+    requestCorrelationId !== undefined &&
+    envelope.correlationId === requestCorrelationId;
   return exempt ? 'release' : 'failure';
 }
 
@@ -775,11 +784,20 @@ function transportVerdict(error: unknown): 'upstream' | 'local' | 'unproven' {
  * the path alone and a route-not-found `message` is the request's own
  * (see {@link relayedMessage}).
  */
+const IDENTITY_REFUSAL_KEYS: ReadonlySet<string> = new Set([
+  'code',
+  'message',
+  'correlationId',
+  'traceId',
+  'timestamp',
+  'path',
+]);
+
 function platformErrorEnvelope(
   status: number,
   text: string,
   request: ProxyRequest,
-): ApiError | null {
+): { body: ApiError; circuitEnvelope: ApiError | null } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -790,7 +808,7 @@ function platformErrorEnvelope(
   if (!result.success) return null;
 
   const { code, message, details, correlationId, traceId, timestamp, path } = result.data;
-  return {
+  const body: ApiError = {
     code,
     message: relayedMessage(status, message, request),
     ...(details
@@ -807,6 +825,12 @@ function platformErrorEnvelope(
     timestamp,
     ...(path !== undefined ? { path: requestPath(path) } : {}),
   };
+  // Check the original keys before sanitizing: stripping details or an unknown
+  // key must not turn a non-exempt answer into an expected identity refusal.
+  const exactShape = Object.keys(parsed as Record<string, unknown>).every((key) =>
+    IDENTITY_REFUSAL_KEYS.has(key),
+  );
+  return { body, circuitEnvelope: exactShape ? body : null };
 }
 
 /** What a caller is told when an upstream refused it without a platform error body. */

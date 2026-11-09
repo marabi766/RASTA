@@ -37,32 +37,47 @@ let observed:
     }
   | undefined;
 
+const GAUGE_NAMES = [
+  'rasta_gateway_revocation_list_entries',
+  'rasta_gateway_revocation_feed_staleness_seconds',
+  'rasta_gateway_revocation_feed_lag_records',
+] as const;
+
+/** Off exports no list/feed series; attach a source only when a list is in use. */
 export function observeRevocationList(source: typeof observed): void {
   observed = source;
+  for (const [index, gauge] of [
+    revocationListEntries,
+    revocationFeedStalenessSeconds,
+    revocationFeedLagRecords,
+  ].entries()) {
+    if (source) registry.registerMetric(gauge);
+    else registry.removeSingleMetric(GAUGE_NAMES[index]);
+  }
 }
 
 export const revocationListEntries = new Gauge({
-  name: 'rasta_gateway_revocation_list_entries',
+  name: GAUGE_NAMES[0],
   help: 'Pairs the revocation list holds state for',
-  registers: [registry],
+  registers: [],
   collect() {
     if (observed) this.set(observed.size());
   },
 });
 
 export const revocationFeedStalenessSeconds = new Gauge({
-  name: 'rasta_gateway_revocation_feed_staleness_seconds',
+  name: GAUGE_NAMES[1],
   help: 'Seconds since the revocation list was last shown caught up with the identity topic; -1 before the first time',
-  registers: [registry],
+  registers: [],
   collect() {
     if (observed) this.set(observed.stalenessSeconds() ?? -1);
   },
 });
 
 export const revocationFeedLagRecords = new Gauge({
-  name: 'rasta_gateway_revocation_feed_lag_records',
+  name: GAUGE_NAMES[2],
   help: 'Identity topic records not yet read, against the latest high watermarks read; -1 when unknown',
-  registers: [registry],
+  registers: [],
   collect() {
     if (!observed) return;
     const lag = observed.lag();
