@@ -8,6 +8,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   serviceUrlSchema,
+  wholeBigintEnv,
 } from '@rasta/config';
 import { CLAIM_STATUSES } from '../asset/dto';
 import { INSURANCE_COVERAGES } from '../insurance/ownership';
@@ -61,10 +62,14 @@ export const assetEnvSchema = baseEnvSchema
      */
     INSURANCE_CLAIM_APPROVAL_CEILING_MINOR: z
       .string()
-      .trim()
       .regex(/^\d{0,30}$/, fixed('Must be a non-negative integer in minor units, or empty'))
       .prefault('')
-      .transform((raw) => (raw === '' ? null : BigInt(raw))),
+      .pipe(
+        z.union([
+          z.literal('').transform(() => null),
+          wholeBigintEnv(0n, 999_999_999_999_999_999_999_999_999_999n),
+        ]),
+      ),
 
     /**
      * The most documents one insurance claim holds (docs/24 Q-128, temporary).
