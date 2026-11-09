@@ -2419,7 +2419,10 @@ export const ECONOMIC_DATA_ROLLBACK = {
             DELETE FROM "payment_reconciliation_resolution" WHERE organization_id = 'ORG-MIGCHECK';
             ALTER TABLE "payment_reconciliation_resolution" ENABLE TRIGGER "trg_payment_resolution_append_only";
             DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
-            DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
+            -- Never erased either (FU-230): lifted the same way, for the probe's own rows.
+            ALTER TABLE "payment_intent" DISABLE TRIGGER "trg_payment_intent_terms_fixed";
+            DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';
+            ALTER TABLE "payment_intent" ENABLE TRIGGER "trg_payment_intent_terms_fixed";`,
     },
     ...COMMISSION_BUSINESS_LINES_STEPS,
     ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
@@ -2997,6 +3000,9 @@ export const EXPECTED = {
       'trg_ledger_entry_wallet_debits_noted',
       // A scoped commission rule is written only under READ COMMITTED (FU-268).
       'trg_commission_rule_read_committed',
+      // A payment intent's terms never change once written; it is never erased (FU-230).
+      'trg_payment_intent_terms_fixed',
+      'trg_payment_intent_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -3060,6 +3066,7 @@ export const EXPECTED = {
       'note_wallet_account_debits',
       'wallet_account_debited_later',
       'enforce_commission_rule_read_committed',
+      'reject_payment_intent_rewrite',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',

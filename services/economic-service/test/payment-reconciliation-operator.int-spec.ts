@@ -5,6 +5,7 @@ import {
   asActor,
   cleanup,
   newPrisma,
+  plantPaymentIntent,
   readBalances,
   tenants,
   testEnv,
@@ -829,11 +830,9 @@ describe('the payment reconciliation operator path (real database)', () => {
       const organizationId = `${org.b}-LEGACY`;
       const made = await escalatedUnknown(organizationId, 413n);
       // An intent created before the identity was recorded.
-      await runUnscoped('the suite makes the intent a legacy one', () =>
-        prisma.client.$executeRawUnsafe(
-          `UPDATE payment_intent SET created_by_issuer = NULL, created_by_subject = NULL WHERE id = $1`,
-          made.intentId,
-        ),
+      await plantPaymentIntent(
+        `UPDATE payment_intent SET created_by_issuer = NULL, created_by_subject = NULL WHERE id = $1`,
+        made.intentId,
       );
       const operator = operatorWith();
       const proposed = await as(organizationId, 'USR-ALICE', () =>

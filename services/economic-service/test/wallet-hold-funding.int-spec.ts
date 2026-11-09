@@ -14,6 +14,7 @@ import {
   fundWallet,
   newPrisma,
   ownerDatabaseUrl,
+  plantPaymentIntent,
   tenants,
   testEnv,
   wire,
@@ -860,7 +861,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
 
     it('nor when the intent it names is in another currency', async () => {
       const made = await toppedUp();
-      await owner.$executeRawUnsafe(
+      await plantPaymentIntent(
         `UPDATE payment_intent SET currency = 'USD' WHERE id = $1`,
         made.intentId,
       );
@@ -932,7 +933,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
 
     it('nor does a refund whose intent is in another currency than its wallet', async () => {
       const made = await toppedUp();
-      await owner.$executeRawUnsafe(
+      await plantPaymentIntent(
         `UPDATE payment_intent SET currency = 'USD' WHERE id = $1`,
         made.intentId,
       );

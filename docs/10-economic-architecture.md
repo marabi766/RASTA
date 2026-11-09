@@ -330,6 +330,12 @@ interface PaymentProvider {
 که چرخه `CREATED → AUTHORIZED → CAPTURED | FAILED | REFUNDED` را طی می‌کند. این تضمین
 می‌کند تعویض Provider، مدل دامنه را دست نمی‌زند.
 
+**شرایط یک PaymentIntent پس از نوشتن تغییر نمی‌کند (FU-230).** `trg_payment_intent_terms_fixed` پیش از هر
+UPDATE هر تغییری را رد می‌کند، جز چرخهٔ عمر: `status`، `failure_reason` و زمان‌های `*_at` هر گام. مبلغ، ارز، کیف پول،
+سازمان، Provider، کلید و Hash درخواست و سازنده ثابت‌اند؛ ستونی که بعدها افزوده شود هم ثابت است تا Migrationی خلافش را
+بگوید. `transaction_id` و `provider_reference` یک بار، از تهی، نوشته می‌شوند و دیگر نه تغییر می‌کنند نه پاک می‌شوند.
+DELETE و TRUNCATE هم رد می‌شوند: پرداخت هرگز پاک نمی‌شود.
+
 ---
 
 ## ۱۰٫۷ موتور کارمزد

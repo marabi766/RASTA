@@ -1,15 +1,16 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import {
-  bareObligation,
   asActor,
+  bareObligation,
   cleanup,
   newPrisma,
+  plantPaymentIntent,
   readBalances,
   tenants,
+  testEnv,
   wire,
   type Wiring,
-  testEnv,
 } from './helpers';
 import { PaymentService } from '../src/payment/payment.service';
 import { walletBalanceLimit } from '../src/wallet/wallet.repository';
@@ -745,11 +746,9 @@ describe('payment outcomes that must not be guessed (real database)', () => {
     it('asks the provider under the intent id when no provider reference was recorded', async () => {
       const organizationId = `${org.c}-R2-NOREF`;
       const { result } = await topUp(organizationId, 240n, `R2NOREF-${ulid()}`);
-      await runUnscoped('the suite blanks the reference', () =>
-        prisma.client.paymentIntent.update({
-          where: { id: result.paymentIntentId },
-          data: { providerReference: null },
-        }),
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET provider_reference = NULL WHERE id = $1',
+        result.paymentIntentId,
       );
       const refund = jest.spyOn(provider, 'refund');
 

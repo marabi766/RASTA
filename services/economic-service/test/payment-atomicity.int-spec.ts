@@ -4,11 +4,12 @@ import {
   asActor,
   cleanup,
   newPrisma,
+  plantPaymentIntent,
   readBalances,
   tenants,
+  testEnv,
   wire,
   type Wiring,
-  testEnv,
 } from './helpers';
 import { PaymentService } from '../src/payment/payment.service';
 import { walletBalanceLimit } from '../src/wallet/wallet.repository';
@@ -529,11 +530,9 @@ describe('payment authorisation atomicity (real database)', () => {
     });
 
     // An intent written before the hash existed is never resumed.
-    await runUnscoped('the suite blanks a hash as a pre-migration row', () =>
-      prisma.client.paymentIntent.updateMany({
-        where: { organizationId },
-        data: { requestHash: null },
-      }),
+    await plantPaymentIntent(
+      'UPDATE payment_intent SET request_hash = NULL WHERE organization_id = $1',
+      organizationId,
     );
     await expect(topUpWith(organizationId, 820n, key, 'tok_first')).rejects.toMatchObject({
       code: 'IDEMPOTENCY_KEY_REUSED',

@@ -8,7 +8,7 @@ export const JEST_LAUNCHERS = {
       'scripts/verify-migration-reversible-lib.test.mjs':
         'b746f126efdce219c78b29c89fb223e15b297e968dc0d72e895d67256b9a8b96',
       'scripts/verify-migration-reversible-lib.mjs':
-        '270d034316d68e012be367f2970c661e56895ee160f76b96e6c13d4e730958eb',
+        'adb9462c3da0d4eade4b73d3bb6e14f6d18d71f0a6cdde8e96150ce9224ff721',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },

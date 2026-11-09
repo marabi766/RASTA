@@ -731,7 +731,6 @@ export async function cleanup(
       // Children first: each foreign key here is ON DELETE RESTRICT.
       'payment_reconciliation_task',
       'payment_refund_decline',
-      'payment_intent',
       'idempotency_key',
     ]) {
       await client.$executeRawUnsafe(
@@ -750,6 +749,8 @@ export async function cleanup(
             'wallet_hold DISABLE TRIGGER trg_wallet_hold_reference_bound',
             '"transaction" DISABLE TRIGGER trg_transaction_statement_obligation_fixed',
             '"transaction" DISABLE TRIGGER trg_transaction_terms_fixed',
+            // A payment intent is never erased either (FU-230); its children are gone above.
+            'payment_intent DISABLE TRIGGER trg_payment_intent_terms_fixed',
           ];
           for (const guard of guards) {
             // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
@@ -757,6 +758,10 @@ export async function cleanup(
           }
           await tx.$executeRawUnsafe(
             `DELETE FROM wallet_hold WHERE organization_id LIKE ANY($1::text[])`,
+            orgs,
+          );
+          await tx.$executeRawUnsafe(
+            `DELETE FROM payment_intent WHERE organization_id LIKE ANY($1::text[])`,
             orgs,
           );
           await tx.$executeRawUnsafe(
@@ -938,6 +943,30 @@ export async function coverByHand(accountId: string, amountMinor: bigint): Promi
         amountMinor - account.balance,
         organizationId,
         currency,
+      );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+/**
+ * Writes a payment-intent state the database now refuses: a row from before a column existed, or
+ * one forged to prove a reader refuses it (FU-230). As the owner, with
+ * `trg_payment_intent_terms_fixed` lifted for this one write, in one transaction that restores it.
+ */
+export async function plantPaymentIntent(sql: string, ...params: unknown[]): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE payment_intent DISABLE TRIGGER trg_payment_intent_terms_fixed',
+      );
+      await tx.$executeRawUnsafe(sql, ...params);
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE payment_intent ENABLE TRIGGER trg_payment_intent_terms_fixed',
       );
     });
   } finally {
