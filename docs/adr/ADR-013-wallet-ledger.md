@@ -80,6 +80,7 @@ Hold را آزاد کند، کیف پول تأمین‌کننده را افزا�
 - Reversal مانده را دقیقاً به وضعیت قبل برمی‌گرداند
 - `wallet.ledgerBalance = Σ(ledger_entry)` برای هر کیف پول
 - ۱۰۰ برداشت موازی → هرگز مانده منفی
+- هنگام Commit هیچ حساب `WALLET` یا `ESCROW` زیر صفر جمع نمی‌شود، هر که بنویسد (`trg_ledger_entry_wallet_covered`، FU-228)؛ هر نگهبانی که قفل می‌گیرد و سپس می‌خواند فقط زیر READ COMMITTED کار می‌کند (`read_committed_xact_lock`، FU-268)
 - تسویه بدون تأیید دریافت غیرممکن است
 - Idempotency: ثبت دوباره یک تراکنش → یک اثر
 
