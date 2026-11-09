@@ -358,21 +358,45 @@ export function analyzeNumericEnv(root, files, roots = envRoots(files)) {
       readsEnv(node)
     )
       return false;
-    if (numeric(node) || constant(node)) return true;
+    if (ts.isConditionalExpression(node))
+      return nonEnv(node.whenTrue, seen) && nonEnv(node.whenFalse, seen);
+    if (
+      ts.isBinaryExpression(node) &&
+      [
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+        ts.SyntaxKind.CommaToken,
+      ].includes(node.operatorToken.kind)
+    )
+      return nonEnv(node.left, seen) && nonEnv(node.right, seen);
+    if (!ts.isCallExpression(node) && (numeric(node) || constant(node))) return true;
     if (ts.isCallExpression(node)) {
       if (
         builtin(node.expression) === 'String' &&
         node.arguments.length === 1 &&
-        numeric(node.arguments[0])
+        numeric(node.arguments[0]) &&
+        nonEnv(node.arguments[0], seen)
       )
         return true;
       if (
         ts.isPropertyAccessExpression(node.expression) &&
         node.expression.name.text === 'toString' &&
-        numeric(node.expression.expression)
+        numeric(node.expression.expression) &&
+        nonEnv(node.expression.expression, seen)
       )
         return true;
       const declaration = checker.getResolvedSignature(node)?.declaration;
+      if (reviewed(declaration) && declaration.name?.text === 'parseWholeNumber') return true;
+      if (
+        declaration &&
+        /\/typescript\/lib\/lib\.[^/]+\.d\.ts$/.test(declaration.getSourceFile().fileName) &&
+        ['Array', 'ReadonlyArray', 'String'].includes(declaration.parent?.name?.text) &&
+        ['indexOf', 'lastIndexOf', 'findIndex', 'findLastIndex', 'push', 'unshift'].includes(
+          declaration.name?.getText(),
+        )
+      )
+        return true;
       if (authored(declaration) && declaration.body) {
         const returns = ts.isBlock(declaration.body) ? [] : [declaration.body];
         const collect = (child) => {
@@ -386,6 +410,11 @@ export function analyzeNumericEnv(root, files, roots = envRoots(files)) {
           returns.every((expression) => expression && nonEnv(expression, seen))
         );
       }
+      return (
+        numeric(node) &&
+        node.arguments.every((argument) => nonEnv(argument, seen)) &&
+        !(ts.isPropertyAccessExpression(node.expression) && readsEnv(node.expression.expression))
+      );
     }
     return false;
   };

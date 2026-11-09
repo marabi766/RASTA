@@ -123,6 +123,12 @@ const BAD = [
   `declare const ext: z.ZodObject<{X:z.ZodType<number,string>}>; const schema=z.object({}).merge(ext)`,
   `declare const ext: any; const schema=z.object({X:ext})`,
   `declare const ext: any; const schema=z.object({...ext})`,
+  `function format(v:number){return String(v)}; const n=Number(format(process.env.X as unknown as number))`,
+  `function format(v:number){return v.toString()}; const n=Number(format(process.env.X as unknown as number))`,
+  `function pass(v:number){return v}; const n=Number(pass(process.env.X as unknown as number))`,
+
+  `function pass(v:number){return v ? v : 0}; const n=Number(pass(process.env.X as unknown as number))`,
+  `function pass(v:number){return v || 0}; const n=Number(pass(process.env.X as unknown as number))`,
 ];
 const GOOD = [
   `const n = Number('5'); const v = 5; const m = Number(v)`,
@@ -136,6 +142,7 @@ const GOOD = [
     const text = 'Number(process.env.X)'; const numeric = 42`,
   `const format = (v: number) => String(v); const n = Number(format(42))`,
   `const schema = z.number().transform(v => v * 2)`,
+  `function pass(v:number){return v}; const n=Number(pass(42)); const m=Number(Math.floor(42)); const now=Number(Date.now())`,
 ];
 function fixture(snippets) {
   const inputs = new Map([
