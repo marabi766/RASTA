@@ -99,7 +99,7 @@ describe('an Idempotency-Key in flight: 409 with Retry-After (real HTTP)', () =>
       .post('/v1/orders')
       .set('authorization', `Bearer ${buyer(organizationId)}`)
       .set('idempotency-key', key)
-      .send({ lines: [{ offerId, quantity }] });
+      .send({ lines: [{ offerId, offerVersion: 1, quantity }] });
 
   it('the second of two concurrent requests is told to wait, and the first completes once', async () => {
     const offerId = await publishOffer();
@@ -168,7 +168,9 @@ describe('an Idempotency-Key in flight: 409 with Retry-After (real HTTP)', () =>
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', key)
         .set('content-type', 'application/json')
-        .send(`{"lines":[{"offerId":"${offerId}","quantity":1}],"${name}":{"x":1}}`);
+        .send(
+          `{"lines":[{"offerId":"${offerId}","offerVersion":1,"quantity":1}],"${name}":{"x":1}}`,
+        );
 
       expect(refused.status).toBe(400);
       expect(refused.body.code).toBe('VALIDATION_FAILED');

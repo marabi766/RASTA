@@ -89,8 +89,8 @@ describe('scalar FK policy', () => {
       attempt('update', metadata(['organizationId', 'orderId'], ['id', 'organizationId'])).result,
     ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
   });
-  it('classifies both reviewed cross-party links by name', () => {
-    for (const relation of ['Offer.product', 'OrderLine.offer'])
+  it('classifies every reviewed cross-party link by name', () => {
+    for (const relation of ['Offer.product', 'OrderLine.offer', 'OrderLine.priceHistory'])
       expect(scalarRelationPolicy('marketplace', relation)).toBe('CROSS_PARTY_REVIEWED');
     expect(scalarRelationPolicy('marketplace', 'OrderLine.newRelation')).toBe('UNCLASSIFIED');
     expect(scalarRelationPolicy('asset', 'Asset.newRelation')).toBe('UNCLASSIFIED');
@@ -133,7 +133,7 @@ describe('staged scalar-FK inventory', () => {
       for (const field of match[2]!.matchAll(/^\s*(\w+)\s+[^\n]*@relation\([^\n]*fields:\s*\[/gm))
         relations.push(`${match[1]}.${field[1]}`);
     }
-    expect(relations).toHaveLength(15);
+    expect(relations).toHaveLength(16);
     for (const relation of relations)
       expect(scalarRelationPolicy('marketplace', relation)).not.toBe('UNCLASSIFIED');
   });

@@ -5,6 +5,8 @@ import { firstIssuePerField } from '@/lib/form-issues';
 import { BIDI_CONTROL, toLatinDigits, toPersianDigits } from '@/lib/format';
 import {
   EMPTY_PLACE_ORDER_FORM,
+  OFFER_CHANGED_MESSAGE,
+  offerStampField,
   PLACE_ORDER_FIELDS,
   PLACE_ORDER_LIMITS as LIMITS,
   type PlaceOrderField,
@@ -24,12 +26,16 @@ import { formMessage } from '@/lib/form-issues';
  * is the `Idempotency-Key` — and the service really replays: the same key with
  * the same body returns the original order instead of placing a second one.
  *
- * ## One line, no price
+ * ## One line, no price, the version that was drawn
  *
  * The form places an order for **one offer**. The service accepts up to fifty
  * lines from one supplier, but a cart is deferred (ADR-037 § 3) and a multi-line
  * form would be a cart under another name. The body carries no price: the service
- * prices the order from its own current offers and refuses a body that has one.
+ * prices the order from its own offers and refuses a body that has one. It does
+ * carry the offer's `offerVersion` — the one the page drew, from its signed stamp
+ * (`offer-stamp.ts`) — and the service places the order only at that version
+ * (D-156). An offer repriced since is a definite refusal: {@link placeOrder}
+ * answers `OFFER_CHANGED`, nothing was placed, and the offers are read again.
  *
  * ## Refusals
  *
@@ -62,7 +68,8 @@ export function canPlaceOrder(roles: readonly string[]): boolean {
 export function placeOrderFormValues(form: FormData): PlaceOrderFormValues {
   const values: Record<PlaceOrderField, string> = { ...EMPTY_PLACE_ORDER_FORM };
   for (const field of PLACE_ORDER_FIELDS) {
-    const raw = form.get(field);
+    // The stamp of the offer chosen, of the ones the page drew: `offerId` is read first.
+    const raw = form.get(field === 'offerStamp' ? offerStampField(values.offerId) : field);
     if (typeof raw !== 'string') continue;
     // An id is compared, not read: it is trimmed and nothing else. A quantity
     // is typed on a Persian keyboard as often as not.
@@ -103,12 +110,17 @@ const placeOrderSchema = z.object({
   quantity: quantitySchema,
 });
 
+export interface PlaceOrderLine {
+  readonly offerId: string;
+  readonly quantity: number;
+}
+
 export interface PlaceOrderRequest {
-  readonly lines: readonly { readonly offerId: string; readonly quantity: number }[];
+  readonly lines: readonly (PlaceOrderLine & { readonly offerVersion: number })[];
 }
 
 export type ParsedPlaceOrderForm =
-  | { readonly ok: true; readonly request: PlaceOrderRequest }
+  | { readonly ok: true; readonly line: PlaceOrderLine }
   | { readonly ok: false; readonly fieldErrors: Partial<Record<PlaceOrderField, string>> };
 
 export function parsePlaceOrderForm(values: PlaceOrderFormValues): ParsedPlaceOrderForm {
@@ -121,13 +133,20 @@ export function parsePlaceOrderForm(values: PlaceOrderFormValues): ParsedPlaceOr
   }
 
   const { offerId, quantity } = parsed.data;
-  return { ok: true, request: { lines: [{ offerId, quantity }] } };
+  return { ok: true, line: { offerId, quantity } };
+}
+
+/** The body: the typed line, at the version the page's verified stamp drew — never a posted number. */
+export function placeOrderRequest(line: PlaceOrderLine, offerVersion: number): PlaceOrderRequest {
+  return { lines: [{ offerId: line.offerId, offerVersion, quantity: line.quantity }] };
 }
 
 export const PLACE_ORDER_FIELD_MAPPING: FieldMapping<PlaceOrderField> = {
   paths: {
     'lines[0].offerId': 'offerId',
     'lines[0].quantity': 'quantity',
+    // The version came from the stamp: a refusal of it is a refusal of what the page drew.
+    'lines[0].offerVersion': 'offerStamp',
   },
   messages: {
     'An organization cannot order from itself': 'سازمان شما نمی‌تواند از پیشنهاد خودش سفارش بدهد.',
@@ -139,7 +158,11 @@ export const PLACE_ORDER_FIELD_MAPPING: FieldMapping<PlaceOrderField> = {
       'یادداشت سفارش هنوز ذخیره نمی‌شود؛ بدون یادداشت ثبت کنید.',
     'Missing Idempotency-Key': 'درخواست دوباره ارسال شد؛ صفحه را تازه کنید.',
   },
+  byDetailCode: {
+    OFFER_VERSION_CHANGED: OFFER_CHANGED_MESSAGE,
+  },
   byCode: {
+    OPTIMISTIC_LOCK_FAILED: OFFER_CHANGED_MESSAGE,
     // The minimum or the available quantity, or a rule this portal has no
     // sentence for. Nothing was placed.
     BUSINESS_RULE_VIOLATION:
@@ -157,10 +180,13 @@ export const PLACE_ORDER_FIELD_MAPPING: FieldMapping<PlaceOrderField> = {
 /** What the redirect needs of the placed order: only that it exists. */
 const placedOrderSchema = z.object({ id: z.string().min(1) });
 
-export type PlaceOrderResult = Exclude<
-  WriteResult<z.infer<typeof placedOrderSchema>, PlaceOrderField>,
-  { readonly kind: 'UNAVAILABLE' }
->;
+export type PlaceOrderResult =
+  | Exclude<
+      WriteResult<z.infer<typeof placedOrderSchema>, PlaceOrderField>,
+      { readonly kind: 'UNAVAILABLE' }
+    >
+  /** A definite refusal of the version the page drew (D-156): nothing was placed. */
+  | { readonly kind: 'OFFER_CHANGED'; readonly correlationId: string };
 
 /**
  * The service stores its idempotency response *after* its transaction, so a 5xx
@@ -184,6 +210,10 @@ export async function placeOrder(
   });
   if (result.kind === 'UNAVAILABLE') {
     return { kind: 'UNKNOWN_OUTCOME', correlationId: result.correlationId };
+  }
+  // Only a refusal the mapping placed on the stamp: `lines[0].offerVersion`, a proven 4xx.
+  if (result.kind === 'INVALID' && result.fieldErrors.offerStamp !== undefined) {
+    return { kind: 'OFFER_CHANGED', correlationId: result.correlationId };
   }
   return result;
 }

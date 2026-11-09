@@ -13,16 +13,19 @@
  * drops. It returns when the service keeps it.
  *
  * It sends **no price**. marketplace-service prices an order from its own
- * current offers and refuses a body that carries one (`createOrderSchema` is
- * `.strict()`, ADR-037 § 5). The price a person saw in the table is therefore
- * indicative: the order is priced when it is placed, and the order page shows
- * what it was priced at.
+ * offers and refuses a body that carries one (`createOrderSchema` is
+ * `.strict()`, ADR-037 § 5). What it sends instead is the **version** of the
+ * offer the page drew (D-156): the service places the order only at that
+ * version, so the price a person saw is the price charged, or nothing is
+ * placed. The version is not a field anyone types: `offerStamp` is the signed
+ * stamp the page drew for each offer (`server/offer-stamp.ts`), posted under
+ * {@link offerStampField}, and the action reads the version out of it.
  */
 
 import { toLatinDigits } from './format';
 
 /** `createOrderSchema` — one line per order from this form; the cart is deferred (ADR-037 § 3). */
-export const PLACE_ORDER_FIELDS = ['offerId', 'quantity'] as const;
+export const PLACE_ORDER_FIELDS = ['offerId', 'quantity', 'offerStamp'] as const;
 
 export type PlaceOrderField = (typeof PLACE_ORDER_FIELDS)[number];
 export type PlaceOrderFormValues = Readonly<Record<PlaceOrderField, string>>;
@@ -30,11 +33,26 @@ export type PlaceOrderFormValues = Readonly<Record<PlaceOrderField, string>>;
 export const EMPTY_PLACE_ORDER_FORM: PlaceOrderFormValues = {
   offerId: '',
   quantity: '',
+  offerStamp: '',
 };
+
+/** Where the stamp of offer `offerId` is posted: one per drawn offer, so the one sent is the chosen offer's. */
+export function offerStampField(offerId: string): string {
+  return `offerStamp:${offerId}`;
+}
+
+/**
+ * The refusal of an order whose offer was repriced after the page drew it (D-156):
+ * definite — nothing was placed — and answered by reading the offers again.
+ */
+export const OFFER_CHANGED_MESSAGE =
+  'قیمت این پیشنهاد پس از باز شدن صفحه تغییر کرد و سفارشی ثبت نشد؛ پیشنهاد را دوباره ببینید.';
 
 /** Copied from marketplace-service `createOrderSchema`; the service enforces them again. */
 export const PLACE_ORDER_LIMITS = {
   quantity: { max: 1_000_000 },
+  /** A stamp is under 300 characters; anything longer was not drawn here. */
+  offerStamp: { max: 512 },
 } as const;
 
 /**

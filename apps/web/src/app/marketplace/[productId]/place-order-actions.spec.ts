@@ -3,6 +3,8 @@
  */
 import { CSRF_FIELD } from '@/server/csrf';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
+import { stampOffer } from '@/server/offer-stamp';
+import { offerStampField } from '@/lib/place-order-fields';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_PLACE_ORDER_FORM } from './place-order-form-state';
@@ -59,14 +61,22 @@ const SESSION = {
   issuedAt: 1_900_000_000,
 } satisfies WebSession;
 
-const GOOD = { offerId: 'OFR_SEED_AGGREGATE_D2', quantity: '3' };
+/** The version the page drew for the offer: what the body names, whatever the form says. */
+const DRAWN = 4;
+const GOOD = {
+  offerId: 'OFR_SEED_AGGREGATE_D2',
+  quantity: '3',
+  offerStamp: stampOffer(SESSION, { id: 'OFR_SEED_AGGREGATE_D2', version: DRAWN }),
+};
 
 function formData(
   fields: Record<string, string>,
   options: { csrf?: string | null; submission?: string | null } = {},
 ): FormData {
   const form = new FormData();
-  for (const [key, value] of Object.entries(fields)) form.set(key, value);
+  // A stamp is posted under its offer's own name, as the page draws it.
+  for (const [key, value] of Object.entries(fields))
+    form.set(key === 'offerStamp' ? offerStampField(fields.offerId ?? '') : key, value);
   const csrf = options.csrf === undefined ? SESSION.csrfToken : options.csrf;
   if (csrf !== null) form.set(CSRF_FIELD, csrf);
   const submission =
@@ -161,7 +171,7 @@ describe('placing an order — what the service answers', () => {
 
     expect(placeOrder).toHaveBeenCalledWith(
       SESSION,
-      { lines: [{ offerId: 'OFR_SEED_AGGREGATE_D2', quantity: 3 }] },
+      { lines: [{ offerId: 'OFR_SEED_AGGREGATE_D2', offerVersion: DRAWN, quantity: 3 }] },
       submission,
     );
     expect(landing(redirect.mock.calls[0]![0] as string, SESSION, 'ORD_1', ['PLACED'])).toEqual({
@@ -207,7 +217,7 @@ describe('placing an order — what the service answers', () => {
     expect(state).toMatchObject({
       kind: 'INVALID',
       submissionId: submission,
-      values: { offerId: GOOD.offerId, quantity: '3' },
+      values: { offerId: GOOD.offerId, quantity: '3', offerStamp: GOOD.offerStamp },
       message: 'سفارش با شرایط کنونی این پیشنهاد جور نیست',
     });
     expect(redirect).not.toHaveBeenCalled();
@@ -259,13 +269,13 @@ describe('placing an order — what the service answers', () => {
     );
 
     expect(placeOrder.mock.calls[0]?.[1]).toEqual({
-      lines: [{ offerId: GOOD.offerId, quantity: 3 }],
+      lines: [{ offerId: GOOD.offerId, offerVersion: DRAWN, quantity: 3 }],
     });
     expect(state).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'COR_Z',
       submissionId: submission,
-      values: { offerId: GOOD.offerId, quantity: '3' },
+      values: { offerId: GOOD.offerId, quantity: '3', offerStamp: GOOD.offerStamp },
     });
   });
 
@@ -415,5 +425,84 @@ describe('placing an order — what the service answers', () => {
     await expect(submitPlaceOrder(first, formData(first.values, { submission }))).rejects.toThrow(
       /NEXT_REDIRECT/,
     );
+  });
+});
+
+describe('the offer version is the one the page drew (D-156)', () => {
+  it('sends the stamp’s version, whatever version or bare stamp the form also posts', async () => {
+    const form = formData(GOOD);
+    form.set('offerVersion', '1');
+    form.set('offerStamp', stampOffer(SESSION, { id: GOOD.offerId, version: 1 }));
+    await expect(submitPlaceOrder(IDLE_PLACE_ORDER_FORM, form)).rejects.toThrow(/NEXT_REDIRECT/);
+    expect(placeOrder).toHaveBeenCalledWith(
+      SESSION,
+      { lines: [{ offerId: GOOD.offerId, offerVersion: DRAWN, quantity: 3 }] },
+      expect.any(String),
+    );
+  });
+
+  it.each([
+    ['no stamp', () => ({ offerId: GOOD.offerId, quantity: '3' })],
+    ['an empty stamp', () => ({ ...GOOD, offerStamp: '' })],
+    [
+      'the stamp of another offer the page drew',
+      () => ({ ...GOOD, offerStamp: stampOffer(SESSION, { id: 'OFR_OTHER', version: DRAWN }) }),
+    ],
+    [
+      'a stamp drawn for another login',
+      () => ({
+        ...GOOD,
+        offerStamp: stampOffer(
+          { ...SESSION, csrfToken: 'another-login' },
+          { id: GOOD.offerId, version: DRAWN },
+        ),
+      }),
+    ],
+    ['a stamp that is not one', () => ({ ...GOOD, offerStamp: 'x.y' })],
+  ])('sends nothing for %s', async (_label, fields) => {
+    expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(fields()))).toEqual({
+      kind: 'REFUSED',
+      reason: 'SUBMISSION',
+    });
+    expect(placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('answers a repriced offer as its own definite outcome: nothing placed, read again', async () => {
+    placeOrder.mockResolvedValueOnce({ kind: 'OFFER_CHANGED', correlationId: 'COR_STALE' });
+    expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD))).toEqual({
+      kind: 'OFFER_CHANGED',
+      correlationId: 'COR_STALE',
+    });
+  });
+
+  it('retries an unconfirmed order at the version the first send carried', async () => {
+    const submission = mintSubmissionId(SESSION);
+    placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_1' });
+    const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+    if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
+    expect(first.values.offerStamp).toBe(GOOD.offerStamp);
+
+    await expect(submitPlaceOrder(first, formData(first.values, { submission }))).rejects.toThrow(
+      /NEXT_REDIRECT/,
+    );
+    expect(placeOrder).toHaveBeenNthCalledWith(
+      2,
+      SESSION,
+      { lines: [{ offerId: GOOD.offerId, offerVersion: DRAWN, quantity: 3 }] },
+      submission,
+    );
+  });
+
+  it('keeps an unconfirmed order unconfirmed when its retry is told the offer changed', async () => {
+    const submission = mintSubmissionId(SESSION);
+    placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_1' });
+    const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+    if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
+    // A refusal of the retry says nothing about the first send, which may have committed.
+    placeOrder.mockResolvedValueOnce({ kind: 'OFFER_CHANGED', correlationId: 'COR_2' });
+    expect(await submitPlaceOrder(first, formData(first.values, { submission }))).toEqual({
+      ...first,
+      retryRefused: true,
+    });
   });
 });

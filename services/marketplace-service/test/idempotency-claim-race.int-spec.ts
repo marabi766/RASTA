@@ -126,7 +126,7 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
   it('B retries the insert and owns K; C then replays B — one order, never two', async () => {
     const offerId = await publishOffer();
     const key = apiKey('race-vanish');
-    const body = { lines: [{ offerId, quantity: 1 }] };
+    const body = { lines: [{ offerId, offerVersion: 1, quantity: 1 }] };
     const place = () =>
       request(http)
         .post('/v1/orders')
@@ -226,7 +226,7 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
   it('defence in depth: a key record lost after its order committed cannot place a second order', async () => {
     const offerId = await publishOffer();
     const key = apiKey('race-lost');
-    const body = { lines: [{ offerId, quantity: 1 }] };
+    const body = { lines: [{ offerId, offerVersion: 1, quantity: 1 }] };
     const place = () =>
       request(http)
         .post('/v1/orders')

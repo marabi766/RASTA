@@ -133,13 +133,21 @@ const RAW_STORES: RawStore[] = [
     save: (b, id, correlationId = 'COR') =>
       order.saveUnresolvedOrder(
         'PRD_1',
-        { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId },
+        {
+          submissionId: id,
+          values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
+          correlationId,
+        },
         b,
       ),
     answer: (b, id, correlationId = 'COR_LATE', attempt) =>
       order.answerUnresolvedOrder(
         'PRD_1',
-        { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId },
+        {
+          submissionId: id,
+          values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
+          correlationId,
+        },
         b,
         attempt,
       ),

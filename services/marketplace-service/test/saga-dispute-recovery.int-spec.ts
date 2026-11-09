@@ -212,7 +212,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
     const service = await economicService(after);
     const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '500000' });
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('SDR')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('SDR')),
     );
     const orderId = order.id;
     const run = sagaRun(orderId, service.economic);

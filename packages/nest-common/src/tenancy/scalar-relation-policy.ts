@@ -80,6 +80,8 @@ export type ScalarRelationPolicy =
 const CROSS_PARTY_REVIEWED: Readonly<Record<string, string>> = {
   'Offer.product': 'ADR-037/042: suppliers offer products from the shared catalogue.',
   'OrderLine.offer': 'ADR-037: buyer-owned lines reference the supplier-owned offer purchased.',
+  'OrderLine.priceHistory':
+    'D-156: a buyer-owned line names the supplier-owned price its offer published at that version.',
 };
 const SAME_TENANT = new Set(
   listed(`

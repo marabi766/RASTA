@@ -30,7 +30,7 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
   async function place() {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const placed = await asActor({ organizationId: org.buyer }, () =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('fence')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('fence')),
     );
     return { id: placed.id, organizationId: org.buyer };
   }

@@ -164,6 +164,7 @@ const OFFER: Offer = {
   availableQuantity: 15,
   leadTimeDays: 5,
   minimumQuantity: 2,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 };
 const QUANTITY: Record<Variant, string> = { one: '3', two: '7', edited: '9' };
@@ -176,6 +177,7 @@ const order: Group = {
   page: (id, b = BINDING) => (
     <PlaceOrderForm
       offers={[OFFER]}
+      offerStamps={Object.fromEntries([OFFER].map((o) => [o.id, `stamp-${o.id}`]))}
       csrfToken="csrf"
       submissionId={id}
       newOrderHref="/marketplace/PRD_1"
@@ -198,13 +200,20 @@ const order: Group = {
   hold: (id, b = BINDING) =>
     void orderStore.answerUnresolvedOrder(
       'PRD_HOLD',
-      { submissionId: id, values: { offerId: 'OFR_1', quantity: '1' }, correlationId: 'COR_H' },
+      {
+        submissionId: id,
+        values: { offerId: 'OFR_1', quantity: '1', offerStamp: 'stamp-OFR_1' },
+        correlationId: 'COR_H',
+      },
       b,
       null,
     ),
   release: (id, b = BINDING) => orderStore.clearUnresolvedOrder('PRD_1', id, b),
   remember: (id, b = BINDING) => {
-    const entry = { submissionId: id, values: { offerId: 'OFR_1', quantity: '7' } };
+    const entry = {
+      submissionId: id,
+      values: { offerId: 'OFR_1', quantity: '7', offerStamp: 'stamp-OFR_1' },
+    };
     const saved = orderStore.saveUnresolvedOrder('PRD_1', { ...entry, correlationId: null }, b);
     orderStore.answerUnresolvedOrder(
       'PRD_1',
@@ -943,7 +952,7 @@ describe('order: a retry whose answer is still in doubt goes through the same bo
     expect(JSON.parse(window.sessionStorage.getItem(order.slot())!)).toMatchObject({
       submissionId: K1,
       correlationId: 'COR_RETRY',
-      values: { offerId: 'OFR_1', quantity: '3' },
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
     });
     expect(setAside()).toEqual([]);
   });

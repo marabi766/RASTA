@@ -110,7 +110,7 @@ describe('the idempotent response is stored in the domain transaction (real data
           .post('/v1/orders')
           .set('authorization', `Bearer ${buyer(buyerOrg)}`)
           .set('idempotency-key', key)
-          .send({ lines: [{ offerId, quantity: 2 }] });
+          .send({ lines: [{ offerId, offerVersion: 1, quantity: 2 }] });
       const ordersUnder = () =>
         runUnscoped('the suite counts the orders one key produced', () =>
           harness.prisma.client.order.count({
@@ -158,7 +158,7 @@ describe('the idempotent response is stored in the domain transaction (real data
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('txn-cancel-place'))
-        .send({ lines: [{ offerId, quantity: 1 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
         .expect(201);
       const orderId = placed.body.id as string;
       const key = apiKey('txn-cancel');

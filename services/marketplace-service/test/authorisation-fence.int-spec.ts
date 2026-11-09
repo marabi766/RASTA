@@ -65,7 +65,7 @@ describe('an authorisation against a concurrent dispute (FU-178, D-138)', () => 
     const transactionId = `TXN_${ulid()}`;
     const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '500000' });
     const { id: orderId } = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('FNC')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('FNC')),
     );
     await asBuyer(async () => {
       await wiring.orders.markFundsHeld(orderId, transactionId, sagaStep());

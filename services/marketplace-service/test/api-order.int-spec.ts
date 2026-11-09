@@ -90,7 +90,7 @@ describe('order API', () => {
       .post('/v1/orders')
       .set('authorization', `Bearer ${buyer(buyerOrg)}`)
       .set('idempotency-key', apiKey('api-order'))
-      .send({ lines: [{ offerId, quantity }] })
+      .send({ lines: [{ offerId, offerVersion: 1, quantity }] })
       .expect(201);
   }
 
@@ -106,7 +106,7 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-place'))
-        .send({ lines: [{ offerId, quantity: 2 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 2 }] })
         .expect(201);
 
       expect(response.body.status).toBe('PENDING');
@@ -124,7 +124,7 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-price'))
-        .send({ lines: [{ offerId, quantity: 1, unitPriceMinor: '1' }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1, unitPriceMinor: '1' }] })
         .expect(400);
 
       expect(response.body.code).toBe('VALIDATION_FAILED');
@@ -140,7 +140,10 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', key)
-        .send({ lines: [{ offerId, quantity: 1 }], note: 'please deliver before noon' })
+        .send({
+          lines: [{ offerId, offerVersion: 1, quantity: 1 }],
+          note: 'please deliver before noon',
+        })
         .expect(400);
 
       expect(response.body.code).toBe('VALIDATION_FAILED');
@@ -158,7 +161,7 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-note-empty'))
-        .send({ lines: [{ offerId, quantity: 1 }], note: '' })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }], note: '' })
         .expect(201);
     });
 
@@ -168,7 +171,7 @@ describe('order API', () => {
       const response = await request(http)
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
-        .send({ lines: [{ offerId, quantity: 1 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
         .expect(400);
 
       expect(response.body.code).toBe('VALIDATION_FAILED');
@@ -181,7 +184,7 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', 'short')
-        .send({ lines: [{ offerId, quantity: 1 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
         .expect(400);
     });
 
@@ -191,7 +194,7 @@ describe('order API', () => {
       await request(http)
         .post('/v1/orders')
         .set('idempotency-key', apiKey('api-anon'))
-        .send({ lines: [{ offerId, quantity: 1 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
         .expect(401);
     });
 
@@ -202,7 +205,7 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${supplier(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-wrongrole'))
-        .send({ lines: [{ offerId, quantity: 1 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
         .expect(403);
     });
 
@@ -213,7 +216,7 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${auditor(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-auditor'))
-        .send({ lines: [{ offerId, quantity: 1 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
         .expect(403);
     });
 
@@ -222,7 +225,7 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-missing'))
-        .send({ lines: [{ offerId: 'OFR_DOES_NOT_EXIST', quantity: 1 }] })
+        .send({ lines: [{ offerId: 'OFR_DOES_NOT_EXIST', offerVersion: 1, quantity: 1 }] })
         .expect(404);
     });
 
@@ -233,7 +236,7 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-toomany'))
-        .send({ lines: [{ offerId, quantity: 9 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 9 }] })
         .expect(422);
 
       expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
@@ -302,7 +305,9 @@ describe('order API', () => {
         return { result, logs, sagaStarts: starts.calls() };
       }
 
-      async function refusedPlacement(lines: { offerId: string; quantity: number }[]) {
+      async function refusedPlacement(
+        lines: { offerId: string; offerVersion: number; quantity: number }[],
+      ) {
         const key = apiKey('api-amount-bound');
         const offerIds = lines.map((line) => line.offerId);
         const before = await effects(key, offerIds);
@@ -361,7 +366,7 @@ describe('order API', () => {
       it('refuses the largest price times two with 422 and its closed reason, and changes nothing', async () => {
         const offerId = await publishOffer({ price: MAX, quantity: 2 });
         const { response, before, after, logs, sagaStarts } = await refusedPlacement([
-          { offerId, quantity: 2 },
+          { offerId, offerVersion: 1, quantity: 2 },
         ]);
 
         expect(response.status).toBe(422);
@@ -393,8 +398,8 @@ describe('order API', () => {
         const first = await publishOffer({ price: MAX, quantity: 1 });
         const second = await publishOffer({ price: '1', quantity: 1 });
         const { response, before, after, sagaStarts } = await refusedPlacement([
-          { offerId: first, quantity: 1 },
-          { offerId: second, quantity: 1 },
+          { offerId: first, offerVersion: 1, quantity: 1 },
+          { offerId: second, offerVersion: 1, quantity: 1 },
         ]);
 
         expect(response.status).toBe(422);
@@ -416,7 +421,7 @@ describe('order API', () => {
     it('replays the original response for the same key and body', async () => {
       const offerId = await publishOffer({ quantity: 10 });
       const key = apiKey('api-replay');
-      const body = { lines: [{ offerId, quantity: 2 }] };
+      const body = { lines: [{ offerId, offerVersion: 1, quantity: 2 }] };
 
       const first = await request(http)
         .post('/v1/orders')
@@ -441,6 +446,134 @@ describe('order API', () => {
       expect(offer?.availableQuantity).toBe(8);
     });
 
+    describe('only at the offer version the buyer read (D-156)', () => {
+      async function reprice(offerId: string, price: string) {
+        const response = await request(http)
+          .patch(`/v1/offers/${offerId}`)
+          .set('idempotency-key', apiKey('reprice'))
+          .set('authorization', `Bearer ${supplier(supplierOrg)}`)
+          .send({ unitPriceMinor: price })
+          .expect(200);
+        return response.body.version as number;
+      }
+
+      const available = async (offerId: string) =>
+        (
+          await runUnscoped('the suite reads what the refusal left', () =>
+            harness.prisma.client.offer.findUniqueOrThrow({ where: { id: offerId } }),
+          )
+        ).availableQuantity;
+
+      const ordersOf = () =>
+        runUnscoped('the suite counts the buyer’s orders', () =>
+          harness.prisma.client.order.count({ where: { organizationId: buyerOrg } }),
+        );
+
+      it('refuses a line naming no version with 400, rather than pricing at "current"', async () => {
+        const offerId = await publishOffer();
+        const before = await ordersOf();
+        const response = await request(http)
+          .post('/v1/orders')
+          .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+          .set('idempotency-key', apiKey('api-noversion'))
+          .send({ lines: [{ offerId, quantity: 1 }] })
+          .expect(400);
+        expect(response.body.code).toBe('VALIDATION_FAILED');
+        expect(await ordersOf()).toBe(before);
+      });
+
+      it('refuses a stale version with 409 OFFER_VERSION_CHANGED, saying neither price nor version', async () => {
+        const offerId = await publishOffer({ price: '250000', quantity: 5 });
+        expect(await reprice(offerId, '987654')).toBe(2);
+        const before = await ordersOf();
+        const key = apiKey('api-stale');
+
+        const response = await request(http)
+          .post('/v1/orders')
+          .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+          .set('idempotency-key', key)
+          .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
+          .expect(409);
+        expect(response.body).toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+          details: [{ path: 'lines[0].offerVersion', code: 'OFFER_VERSION_CHANGED' }],
+        });
+        // Fixed words only: neither price, nor the version the offer is at now.
+        const said = 'The offer has changed since it was read; read it again before ordering';
+        expect(response.body.message).toBe(said);
+        expect(response.body.details).toEqual([
+          { path: 'lines[0].offerVersion', code: 'OFFER_VERSION_CHANGED', message: said },
+        ]);
+        // Nothing else that could carry a figure: the route, the time, the correlation id.
+        expect(Object.keys(response.body).sort()).toEqual([
+          'code',
+          'correlationId',
+          'details',
+          'message',
+          'path',
+          'timestamp',
+        ]);
+        expect(response.body.path).toBe('/v1/orders');
+        expect(await ordersOf()).toBe(before);
+        expect(await available(offerId)).toBe(5);
+
+        // A refusal keeps no answer under its key (the claim is released): the
+        // same key at the version read again places the order, at that price.
+        const fresh = await request(http)
+          .post('/v1/orders')
+          .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+          .set('idempotency-key', key)
+          .send({ lines: [{ offerId, offerVersion: 2, quantity: 1 }] })
+          .expect(201);
+        expect(fresh.body.lines[0]).toMatchObject({ offerVersion: 2, unitPriceMinor: '987654' });
+      });
+
+      it('answers a stranger to an unpublished offer 404 whatever version it names', async () => {
+        const offerId = await publishOffer();
+        await request(http)
+          .patch(`/v1/offers/${offerId}`)
+          .set('idempotency-key', apiKey('withdraw'))
+          .set('authorization', `Bearer ${supplier(supplierOrg)}`)
+          .send({ status: 'WITHDRAWN' })
+          .expect(200);
+        for (const offerVersion of [1, 2]) {
+          const response = await request(http)
+            .post('/v1/orders')
+            .set('authorization', `Bearer ${buyer(strangerOrg)}`)
+            .set('idempotency-key', apiKey('api-hidden'))
+            .send({ lines: [{ offerId, offerVersion, quantity: 1 }] })
+            .expect(404);
+          expect(JSON.stringify(response.body)).not.toContain('offerVersion');
+        }
+      });
+
+      it('replays the original order after a reprice; the same key at the new version is 409 IDEMPOTENCY_KEY_REUSED', async () => {
+        const offerId = await publishOffer({ price: '250000', quantity: 10 });
+        const key = apiKey('api-replay-reprice');
+        const body = { lines: [{ offerId, offerVersion: 1, quantity: 2 }] };
+        const send = (payload: object) =>
+          request(http)
+            .post('/v1/orders')
+            .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+            .set('idempotency-key', key)
+            .send(payload);
+
+        const first = await send(body).expect(201);
+        expect(await reprice(offerId, '300000')).toBe(2);
+
+        // The stored answer, not a re-execution: no stale-version refusal, no second order.
+        const replay = await send(body).expect(201);
+        expect(replay.body).toEqual(first.body);
+        expect(await available(offerId)).toBe(8);
+
+        const reused = await send({ lines: [{ offerId, offerVersion: 2, quantity: 2 }] }).expect(
+          409,
+        );
+        expect(reused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+        expect(await available(offerId)).toBe(8);
+      });
+    });
+
     it('refuses the same key with a different body with 409', async () => {
       const first = await publishOffer();
       const second = await publishOffer();
@@ -450,14 +583,14 @@ describe('order API', () => {
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', key)
-        .send({ lines: [{ offerId: first, quantity: 1 }] })
+        .send({ lines: [{ offerId: first, offerVersion: 1, quantity: 1 }] })
         .expect(201);
 
       const conflict = await request(http)
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', key)
-        .send({ lines: [{ offerId: second, quantity: 1 }] })
+        .send({ lines: [{ offerId: second, offerVersion: 1, quantity: 1 }] })
         .expect(409);
 
       expect(conflict.body.code).toBe('IDEMPOTENCY_KEY_REUSED');

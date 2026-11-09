@@ -8,7 +8,7 @@ export const JEST_LAUNCHERS = {
       'scripts/verify-migration-reversible-lib.test.mjs':
         'dc9985598eb7b2ecdfb748d798989ff11572dacda52121439ef846f5693eb00b',
       'scripts/verify-migration-reversible-lib.mjs':
-        '26ee9c5f070bc28ef9c899eed52d768d3918091e71a85a62e20a8bace0667250',
+        '2c826fb3ff96ea6153408d6d9a293034495e7768ad2632a8531744f3bb51f6eb',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },
@@ -193,9 +193,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        'cff9ff454c17c800a3e969608e0a328031a0b7c5af9f29673a4bcf35b013c4d1',
+        '0bb9440a4ec8bdd191707c8853a32315d0ba2c8cf4d5bf468830c4388d49d14a',
       'scripts/ci-integration-split-lib.mjs':
-        'b1a79b66cbfb09abd7b11fa13e6652d36cb74c4512c8b00e3828a56c9278bab9',
+        '04916b838e43eaff29e95e14960b0e95f058b7401c9e68f3c1d3211c844f495c',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },

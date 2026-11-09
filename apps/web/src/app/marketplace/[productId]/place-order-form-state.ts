@@ -35,6 +35,12 @@ export type PlaceOrderFormState =
    */
   | { readonly kind: 'HELD' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
+  /**
+   * The offer was repriced after this page drew it (D-156): a definite refusal,
+   * nothing was placed, and the form is not offered again until the offers are
+   * read again — its stamps name the old price.
+   */
+  | { readonly kind: 'OFFER_CHANGED'; readonly correlationId: string }
   /** The offer is gone, or not published — the service says 404 for both. */
   | {
       readonly kind: 'NOT_FOUND';

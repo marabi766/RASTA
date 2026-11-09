@@ -91,11 +91,26 @@ test.describe('placing an order through the live stack', () => {
     return ((await response.json()) as { items: { id: string }[] }).items.map((o) => o.id);
   }
 
+  /**
+   * The version of `offerId` this buyer reads now (D-156: an order names it) —
+   * or 1 for an offer it cannot read, which is answered 404 before any version
+   * is looked at.
+   */
+  async function versionOf(request: APIRequestContext, token: string, offerId: string) {
+    const response = await request.get(gatewayUrl(`/v1/products/${PRODUCT}/offers`), {
+      headers: headers(token),
+    });
+    expect(response.status()).toBe(200);
+    const items = ((await response.json()) as { items: { id: string; version: number }[] }).items;
+    return items.find((offer) => offer.id === offerId)?.version ?? 1;
+  }
+
   /** What the service says to an order for these offers, reduced to what must not differ. */
   async function answerTo(request: APIRequestContext, token: string, offerId: string) {
+    const offerVersion = await versionOf(request, token, offerId);
     const response = await request.post(gatewayUrl('/v1/orders'), {
       headers: headers(token, `e2e-${randomUUID()}`),
-      data: { lines: [{ offerId, quantity: MINIMUM }] },
+      data: { lines: [{ offerId, offerVersion, quantity: MINIMUM }] },
     });
     const body = (await response.json()) as { code?: string; message?: string };
     return { status: response.status(), code: body.code, message: body.message };
@@ -190,10 +205,11 @@ test.describe('placing an order through the live stack', () => {
     const context = await browser.newContext();
     const session = await installLiveSession(context, 'orgAdmin');
     const key = `e2e-${randomUUID()}`;
+    const offerVersion = await versionOf(request, session.accessToken, OTHER_OFFER);
     const send = () =>
       request.post(gatewayUrl('/v1/orders'), {
         headers: headers(session.accessToken, key),
-        data: { lines: [{ offerId: OTHER_OFFER, quantity: MINIMUM }] },
+        data: { lines: [{ offerId: OTHER_OFFER, offerVersion, quantity: MINIMUM }] },
       });
 
     const first = await send();

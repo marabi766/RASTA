@@ -19,7 +19,7 @@ import {
   type OfferSupplierState,
 } from '@/lib/offer-supplier-standing';
 import { formatMoney, toPersianDigits } from '@/lib/format';
-import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
+import type { Offer, OffersPage, Product, ReadResult } from '@/server/marketplace';
 import type { SupplierSummary } from '@/server/suppliers';
 
 import { PlaceOrderForm } from './PlaceOrderForm';
@@ -71,6 +71,8 @@ export interface OffersScreenProps {
   readonly ordering?: {
     readonly csrfToken: string;
     readonly mintSubmissionId: () => string;
+    /** Signs the version of an offer as this page draws it (`server/offer-stamp.ts`, D-156). */
+    readonly stampOffer: (offer: Offer) => string;
     readonly organizationId: string | null;
     /** One-way tags of this login, so a form can recognise its own remembered order (`submissionBinding`). */
     readonly binding: Binding;
@@ -228,6 +230,9 @@ function OrderSection({
       ) : (
         <PlaceOrderForm
           offers={orderable}
+          offerStamps={Object.fromEntries(
+            orderable.map((offer) => [offer.id, ordering.stampOffer(offer)]),
+          )}
           csrfToken={ordering.csrfToken}
           submissionId={ordering.mintSubmissionId()}
           newOrderHref={newOrderHref}
