@@ -2291,6 +2291,9 @@ export const ECONOMIC_DATA_ROLLBACK = {
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
+        // FU-230: its evidence trigger reads the task table 20260930200000's down drops, and
+        // refuses the marked intents planted below; rolled back first, re-applied with them.
+        '20261109130000_payment_intent_terms_fixed',
         // An index on the resolution table, which 20261001100000's down drops:
         // rolled back with it, or its ledger row stays and the re-apply below
         // never recreates the index — masked while it was the newest
@@ -2438,7 +2441,10 @@ export const ECONOMIC_DATA_ROLLBACK = {
             DELETE FROM "payment_reconciliation_resolution" WHERE organization_id = 'ORG-MIGCHECK';
             ALTER TABLE "payment_reconciliation_resolution" ENABLE TRIGGER "trg_payment_resolution_append_only";
             DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
-            DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
+            -- Never erased either (FU-230): lifted the same way, for the probe's own rows.
+            ALTER TABLE "payment_intent" DISABLE TRIGGER "trg_payment_intent_terms_fixed";
+            DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';
+            ALTER TABLE "payment_intent" ENABLE TRIGGER "trg_payment_intent_terms_fixed";`,
     },
     ...COMMISSION_BUSINESS_LINES_STEPS,
     ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
@@ -2919,6 +2925,9 @@ export const EXPECTED = {
       'payment_reconciliation_resolution',
       'payment_reconciliation_requeue',
       'payment_refund_decline',
+      // What the provider answered, and how each task was decided (#1017 r3).
+      'payment_provider_outcome',
+      'payment_reconciliation_decision',
       // The instant line rules began to price (docs/23 D-057).
       'commission_pricing_cutover',
       // The instant each rule change was decided at, which no session sets (#1016 r1 F1).
@@ -3021,6 +3030,17 @@ export const EXPECTED = {
       'trg_commission_rule_scope_decided',
       'trg_commission_rule_scope_decision_kept',
       'trg_commission_rule_history_kept',
+      // A payment intent's terms never change once written; it is never erased (FU-230).
+      'trg_payment_intent_terms_fixed',
+      'trg_payment_intent_no_truncate',
+      // ...its lifecycle moves only on the service's evidence (#1017 r1 F1), which is kept for good
+      // and finishes a task only through its decision (#1017 r3).
+      'trg_payment_intent_evidenced',
+      'trg_payment_provider_outcome_kept',
+      'trg_payment_provider_outcome_no_truncate',
+      'trg_payment_reconciliation_decision_kept',
+      'trg_payment_reconciliation_decision_no_truncate',
+      'trg_payment_reconciliation_task_decided',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -3084,6 +3104,11 @@ export const EXPECTED = {
       'note_wallet_account_debits',
       'wallet_account_debited_later',
       'commission_rule_scope_decided',
+      'reject_payment_intent_rewrite',
+      'assert_payment_intent_evidenced',
+      'record_payment_provider_outcome',
+      'finish_payment_reconciliation_task',
+      'guard_payment_reconciliation_task',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',

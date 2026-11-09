@@ -1680,6 +1680,27 @@ export const REVIEWED_FUNCTIONS = [
     sha256: '67a8e42e41b700e26a8771f83ca3203e5c83eb8ba46d7bf2b1d0826e24a37b79',
     why: 'the "SQL" is a RAISE message ("… never edited; create a new version"), never run; no clock, no EXECUTE',
   },
+  // #1017 r3: each reads its relations in its trigger table's schema, never the caller's path (r2
+  // F2): its header pins pg_catalog, pg_temp, and its body's one set_config('search_path', …, true)
+  // sets pg_catalog, <TG_TABLE_SCHEMA>, pg_temp for itself alone (a SET clause restores it at exit).
+  {
+    service: 'economic-service',
+    name: 'record_payment_provider_outcome',
+    sha256: 'bba5db9fd76614d7c184e1d18bbf3526591d3f32b169973bc4b23926c275ad52',
+    why: 'the path set_config above; its one clock is (clock_timestamp() AT TIME ZONE UTC)::timestamp(3) into recorded_at, timestamp(3)',
+  },
+  {
+    service: 'economic-service',
+    name: 'finish_payment_reconciliation_task',
+    sha256: 'a0cd2dfa7c4cbc329e513cb0fb2375827fd79ce1207a198493b6bae7d6f7c552',
+    why: 'the path set_config above; done_at and updated_at take decided_at, (now() AT TIME ZONE UTC)::timestamp(3)',
+  },
+  {
+    service: 'economic-service',
+    name: 'assert_payment_intent_evidenced',
+    sha256: 'fe3c79e8540c2dd2452d06abb8d33fe62942c8a9bb275748b3ebd358fbe23087',
+    why: 'the path set_config above; its one clock, (now() AT TIME ZONE UTC)::timestamp(3), is compared with decided_at, timestamp(3)',
+  },
 ];
 
 /** One-shot DO blocks with DDL or EXECUTE that define nothing live: bound to body and migration. */

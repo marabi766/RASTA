@@ -3,6 +3,7 @@ import { Prisma, PrismaClient } from '../src/generated/prisma';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { HoldPurpose } from '../src/wallet/wallet.repository';
 import {
+  plantPaymentIntent,
   asActor,
   cleanup,
   coverByHand,
@@ -1488,7 +1489,8 @@ describe('the proof of a settlement at its creation (real database, runtime role
       const capturedIntent = async () => {
         const reference = `PAY_${ulid()}`;
         const transactionId = `TOP_${ulid()}`;
-        await owner.$executeRawUnsafe(
+        // Captured on a transaction this file does not record: planted (#1017 r1 F1).
+        await plantPaymentIntent(
           `INSERT INTO payment_intent (id, organization_id, wallet_id, transaction_id, amount_minor,
                                        currency, provider, idempotency_key, correlation_id, created_by)
            VALUES ($1, $2, $3, $4, $5, 'IRR', 'itest', $1, 'itest', 'itest')`,

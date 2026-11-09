@@ -4,7 +4,7 @@ import { runUnscoped } from '@rasta/nest-common';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
 import type { RefundRequest, RefundResult } from '../src/payment/provider';
 import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { plantPaymentIntent, cleanup, id } from './helpers';
 
 /**
  * A replayed top-up answers with the historical response; the current state
@@ -207,11 +207,10 @@ describe('a replayed top-up and the intent behind it (HTTP)', () => {
       // here it is written directly so only the read path is under test.
       const key = id(`replay-${marker.toLowerCase()}`);
       const first = await topUp(key);
-      await runUnscoped('the suite marks the intent', () =>
-        harness.prisma.client.paymentIntent.update({
-          where: { id: first.body.paymentIntentId },
-          data: { failureReason: marker },
-        }),
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET failure_reason = $2 WHERE id = $1',
+        first.body.paymentIntentId,
+        marker,
       );
 
       const replay = await topUp(key);
