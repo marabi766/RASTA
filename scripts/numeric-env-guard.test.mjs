@@ -56,6 +56,6 @@ test('both directions: removal requires shrinking, growth/new services/shared co
   assert.equal(checkNumericEnv([['packages/config/src/env.ts', 'z.coerce.number()']], {}).length, 1);
   assert.equal(ratchetGrowth({ old: 2 }, { old: 1 }).length, 1);
   assert.equal(ratchetGrowth({ new: 1 }, { old: 1 }).length, 1);
-  assert.equal(ratchetGrowth({ constructor: 1 }, {}).length, 1);
+  assert.equal(ratchetGrowth(JSON.parse('{"constructor":1}'), {}).length, 1);
   assert.deepEqual(ratchetGrowth({}, { old: 1 }), []);
 });
