@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { relative } from 'node:path';
 import { authoredFiles } from './authored-source-inventory.cjs';
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 import {
   FROZEN_RATCHET, numericCoercions, checkNumericEnv, ratchetGrowth, readRatchet,
 } from './numeric-env-guard.mjs';
@@ -22,7 +23,7 @@ test('repository numeric env parsers obey the exact frozen ratchet', () => {
 
 test('the ratchet cannot grow against the same verified base used by the static-guards step', () => {
   const base = process.env.SERVICE_ENV_WITHHELD_BASE || 'origin/main';
-  const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' });
+  const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', env: fixtureGitEnv() });
   git('rev-parse', '--verify', `${base}^{commit}`);
   const listed = git('ls-tree', '--name-only', base, '--', GUARD).trim();
   // The introducing PR is bounded by its base's actual source counts, not an editable allowance.
