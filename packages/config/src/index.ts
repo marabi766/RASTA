@@ -5,6 +5,8 @@ export {
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
   booleanEnv,
   wholeNumberEnv,
+  wholeBigintEnv,
+  parseWholeNumber,
   queryBoolean,
   queryBooleanDefault,
   databaseEnvSchema,

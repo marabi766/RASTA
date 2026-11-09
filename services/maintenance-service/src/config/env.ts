@@ -10,6 +10,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   serviceUrlSchema,
+  wholeNumberEnv,
 } from '@rasta/config';
 import { maintenanceOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 
@@ -136,8 +137,7 @@ export const maintenanceEnvSchema = baseEnvSchema
       .string()
       .regex(/^[0-9]{1,3}$/)
       .prefault('30')
-      .transform(Number)
-      .pipe(z.number().int().min(0).max(300)),
+      .pipe(wholeNumberEnv(0, 300)),
   })
   .superRefine((env, ctx) => {
     // A window of the shared bound's size must be accepted on the slowest legal clock:

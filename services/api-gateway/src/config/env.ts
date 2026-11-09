@@ -156,8 +156,7 @@ export const gatewayEnvSchema = baseEnvSchema
     KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: z
       .string()
       .regex(/^\d{1,2}$/, fixed('must be whole seconds, 0 to 60'))
-      .transform(Number)
-      .pipe(z.number().int().min(0).max(60)),
+      .pipe(wholeNumberEnv(0, 60)),
 
     /** An enforcing replica not shown caught up for longer than this refuses every pair. */
     GATEWAY_REVOCATION_MAX_STALENESS_SECONDS: wholeNumberEnv(5, 300).prefault('30'),
