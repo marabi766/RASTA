@@ -389,6 +389,21 @@ export function jestCommands(paths, read) {
             valid = false;
           }
         }
+        if (entry.workflowSteps) {
+          try {
+            const pin = entry.workflowSteps;
+            const steps = yaml.parse(read(pin.file)).jobs[pin.job].steps;
+            const selected = pin.names.map((name) => {
+              const matches = steps.filter((step) => step.name === name);
+              if (matches.length !== 1) throw new Error('missing/duplicate pinned step');
+              return matches[0]; // Pin all step fields, including env/if/shell/failure handling.
+            });
+            if (createHash('sha256').update(JSON.stringify(selected)).digest('hex') !== pin.sha256)
+              valid = false;
+          } catch {
+            valid = false;
+          }
+        }
         if (!valid) {
           refuse(name, `changed/unreadable registered launcher ${path}`);
           continue;

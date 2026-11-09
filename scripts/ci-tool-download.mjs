@@ -97,7 +97,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     )
       throw new Error('unsupported tool invocation');
     const tool = TOOLS[name];
-    const key = `ci-tool-linux-x64-${name}-${tool.version}-${tool.sha256}`;
+    // FU-288: rotate the immutable remote namespace; old corrupt entries cannot be overwritten.
+    const key = `ci-tool-v2-linux-x64-${name}-${tool.version}-${tool.sha256}`;
     const cache = join(process.env.RUNNER_TEMP, 'ci-tool-archives');
     const archive = join(cache, `${key}.tar.gz`);
     if (mode === 'key') {

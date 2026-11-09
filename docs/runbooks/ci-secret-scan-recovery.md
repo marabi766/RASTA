@@ -1,7 +1,7 @@
 # Recover a refused main secret-scan range
 
 The `Secret scan` step refuses malformed or missing commits, an empty unequal
-range (including a rollback), and octopus merges. These refusals are security
+range (including a rollback), octopus merges, and Gitleaks errors or incomplete scans. These refusals are security
 failures: a green scan of an empty range is not proof that main was scanned.
 Re-running the same event cannot repair its immutable `before` SHA.
 
@@ -51,3 +51,24 @@ as unknown and escalate; scanning the replacement head cannot prove their safety
 Remove the temporary tool directory after retaining the evidence. The original
 CI event stays red; attach the manual evidence for PM disposition, without
 claiming that it retroactively passed CI.
+
+Gitleaks 8.30.1 can exit zero after logging `ERR` (including Git warnings on stderr)
+or a partial scan. The workflow captures both streams in
+`$RUNNER_TEMP/gitleaks.*.log`, refuses `ERR`/`partial scan`, and requires the positive
+`INF scanned ~<bytes> bytes (...) in <duration>` completion summary. An absent or
+changed summary refuses too. Retain that log; do not treat "no leaks found" alone
+as proof of a complete scan or disable the guard to recover.
+
+For a reviewed false positive introduced by a merge conflict resolution, the
+pinned parser reports the exact path `b/<file>` (for example `b/base`), although
+that prefixed path does not exist in the tree. Copy the **reported fingerprint**
+into `.gitleaksignore`: `<merge-commit-sha>:b/<file>:<rule-id>:<line>`, for example
+`<merge-commit-sha>:b/base:range-fixture:1`. Do not strip `b/`, ignore a directory,
+or change detection rules. The topology test asserts this identity so a future
+parser change requires review.
+
+The CI tool archive key uses the reviewed `ci-tool-v2-linux-x64-` namespace to
+retire old immutable remote cache entries. Version and SHA-256 remain in the key,
+and every restored archive is verified again before extraction. A future corrupt
+remote entry still requires a reviewed salt rotation; deleting a local archive
+cannot overwrite an immutable remote entry. Never relax checksum verification.
