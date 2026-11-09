@@ -90,7 +90,7 @@ describe('procurement-service’s demand contract', () => {
 
   it('the mirrored retention has the service’s bounds', () => {
     expect(env).toContain(
-      'PROCUREMENT_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168)',
+      "PROCUREMENT_IDEMPOTENCY_TTL_HOURS:z.string().regex(/^[0-9]{1,3}$/).prefault('24').pipe(wholeNumberEnv(1,168))",
     );
   });
 

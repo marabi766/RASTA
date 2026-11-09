@@ -404,3 +404,45 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
     );
   });
 });
+
+// FU-299: strict syntax applies to every replay/lease/retention budget in this service.
+describe('strict whole-number timing budgets', () => {
+  it.each([
+    ['PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS', 10, 3600, 60],
+    ['PROCUREMENT_IDEMPOTENCY_TTL_HOURS', 1, 168, 24],
+    ['PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS', 10, 900, 120],
+    ['PROCUREMENT_CLOCK_SKEW_SECONDS', 0, 300, 30],
+    ['PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS', 10, 3600, 60],
+  ] as const)(
+    '%s preserves its default and bounds, and refuses malformed text',
+    (name, min, max, fallback) => {
+      expect(load({ [name]: undefined })[name]).toBe(fallback);
+      for (const value of [min, max]) {
+        expect(load({ [name]: String(value) })[name]).toBe(value);
+      }
+      for (const value of [
+        '',
+        ' ',
+        '\t',
+        '+30',
+        '-1',
+        '1.5',
+        '1e1',
+        '0x1e',
+        '۳۰',
+        '٣٠',
+        '30\n',
+        ` ${min} `,
+        `+${min}`,
+        `${min}.0`,
+        `${min}e0`,
+        `0x${min.toString(16)}`,
+        String(min - 1),
+        String(max + 1),
+        '0'.repeat(String(max).length + 1),
+      ]) {
+        expect(() => load({ [name]: value })).toThrow(name);
+      }
+    },
+  );
+});
