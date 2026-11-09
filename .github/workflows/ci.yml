@@ -2818,7 +2818,8 @@ jobs:
     # (8 minutes at x 1.5). The job itself took up to 1326 s (p50 1224 s) and the
     # slowest gate, economic, 285 s, so 92 is a ceiling that no healthy run comes
     # near; the gates' own limits are what catch a hang.
-    timeout-minutes: 92
+    # 96 since FU-286 stopgap (2026-11-09): economic gate 8 -> 12 adds 4.
+    timeout-minutes: 96
     needs: quality-types
 
     services:
@@ -3068,7 +3069,10 @@ jobs:
         # settlement rollback exist only in the database, so a unit-only
         # measurement would both understate the number and reward mocking the
         # very things `docs/10` § 10.12 requires to be tested for real.
-        timeout-minutes: 8
+        # 12, not 8 (FU-286 stopgap 2026-11-09): with every test green (3298/3298)
+        # the step ran 5:12-7:42 on main and 8:01 on main + #1016, so three merge
+        # trains died on the 8-minute limit. Sharding the run is FU-286.
+        timeout-minutes: 12
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
