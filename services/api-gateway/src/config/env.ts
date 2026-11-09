@@ -3,6 +3,8 @@ import {
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  wholeNumberEnv,
   fixedEnvMessages,
   redisEnvSchema,
   loadEnv,
@@ -45,6 +47,9 @@ const DEFAULT_KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS = '10';
  */
 export const DEFAULT_ORGANIZATIONS_TO_OPEN = 3;
 
+/** Largest delay representable by Node timers, also safe for expiry arithmetic. */
+const MAX_GATEWAY_DURATION_MS = 2_147_483_647;
+
 /**
  * api-gateway configuration.
  *
@@ -57,19 +62,26 @@ export const gatewayEnvSchema = baseEnvSchema
   .merge(authEnvSchema)
   .merge(serviceUrlEnvSchema)
   .extend({
+    // Strengthen inherited settings at this startup boundary too (FU-276).
+    PORT: wholeNumberEnv(1, 65535),
+    SHUTDOWN_TIMEOUT_MS: wholeNumberEnv(1000, 120_000).prefault(
+      String(DEFAULT_SHUTDOWN_TIMEOUT_MS),
+    ),
+    INTERNAL_TOKEN_TTL_SECONDS: wholeNumberEnv(30, 900).prefault('300'),
+
     GATEWAY_CORS_ORIGINS: z.string().prefault(''),
 
     /** Default per-user allowance. Individual routes may tighten this. */
-    GATEWAY_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(300),
-    GATEWAY_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).prefault(60_000),
+    GATEWAY_RATE_LIMIT_MAX: wholeNumberEnv(1, Number.MAX_SAFE_INTEGER).prefault('300'),
+    GATEWAY_RATE_LIMIT_WINDOW_MS: wholeNumberEnv(1000, MAX_GATEWAY_DURATION_MS).prefault('60000'),
 
     /** Tenant-wide ceiling, so one busy organization cannot starve the rest. */
-    GATEWAY_TENANT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(3000),
+    GATEWAY_TENANT_RATE_LIMIT_MAX: wholeNumberEnv(1, Number.MAX_SAFE_INTEGER).prefault('3000'),
 
     /** Anonymous callers get far less: only registration is reachable. */
-    GATEWAY_ANON_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(60),
+    GATEWAY_ANON_RATE_LIMIT_MAX: wholeNumberEnv(1, Number.MAX_SAFE_INTEGER).prefault('60'),
 
-    GATEWAY_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(100).prefault(3000),
+    GATEWAY_UPSTREAM_TIMEOUT_MS: wholeNumberEnv(100, MAX_GATEWAY_DURATION_MS).prefault('3000'),
 
     /**
      * The upstream deadline of the two routes that open a tender's bids and read every opened
@@ -85,25 +97,20 @@ export const gatewayEnvSchema = baseEnvSchema
      * The two services cannot check each other at startup; `env.spec.ts` holds the defaults
      * together. Out of range, or shorter than the default deadline, refuses to start.
      */
-    GATEWAY_TENDER_OPEN_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(TENDER_OPEN_DEADLINE_MIN_MS)
-      .max(TENDER_OPEN_DEADLINE_MAX_MS)
-      .prefault(TENDER_OPEN_DEADLINE_DEFAULT_MS),
-    GATEWAY_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).prefault(5),
-    GATEWAY_CIRCUIT_RESET_MS: z.coerce.number().int().min(1000).prefault(30_000),
+    GATEWAY_TENDER_OPEN_TIMEOUT_MS: wholeNumberEnv(
+      TENDER_OPEN_DEADLINE_MIN_MS,
+      TENDER_OPEN_DEADLINE_MAX_MS,
+    ).prefault(String(TENDER_OPEN_DEADLINE_DEFAULT_MS)),
+    GATEWAY_CIRCUIT_FAILURE_THRESHOLD: wholeNumberEnv(1, Number.MAX_SAFE_INTEGER).prefault('5'),
+    GATEWAY_CIRCUIT_RESET_MS: wholeNumberEnv(1000, MAX_GATEWAY_DURATION_MS).prefault('30000'),
     /**
      * Distinct organizations a failure run needs before the circuit every tenant shares opens.
      * Never below 2: at 1, one tenant's bad input opens it for all (FU-085). Capped far below
      * what the breaker remembers (`MAX_TRACKED_CALLERS`), so that it can always be reached.
      */
-    GATEWAY_CIRCUIT_ORGANIZATIONS_TO_OPEN: z.coerce
-      .number()
-      .int()
-      .min(2)
-      .max(100)
-      .prefault(DEFAULT_ORGANIZATIONS_TO_OPEN),
+    GATEWAY_CIRCUIT_ORGANIZATIONS_TO_OPEN: wholeNumberEnv(2, 100).prefault(
+      String(DEFAULT_ORGANIZATIONS_TO_OPEN),
+    ),
 
     /**
      * Allow traffic when Redis is unreachable.
@@ -136,19 +143,14 @@ export const gatewayEnvSchema = baseEnvSchema
      * refused, because the list would forget a revocation before the token
      * expired. Required with `enforce`.
      */
-    GATEWAY_REVOCATION_MAX_TOKEN_LIFETIME_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(60)
-      .max(86_400)
-      .optional(),
+    GATEWAY_REVOCATION_MAX_TOKEN_LIFETIME_SECONDS: wholeNumberEnv(60, 86_400).optional(),
 
     /**
      * Clock tolerance for user tokens, in seconds: the verifier accepts a
      * token this long past its `exp`, and the list keeps a revocation that
      * much longer. One value for both, so they cannot drift (addendum § 2).
      */
-    GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS: z.coerce.number().int().min(0).max(60).prefault(5),
+    GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS: wholeNumberEnv(0, 60).prefault('5'),
 
     /**
      * How long after identity-service's write returns Keycloak may still mint a
@@ -166,15 +168,10 @@ export const gatewayEnvSchema = baseEnvSchema
       .pipe(z.number().int().min(0).max(60)),
 
     /** An enforcing replica not shown caught up for longer than this refuses every pair. */
-    GATEWAY_REVOCATION_MAX_STALENESS_SECONDS: z.coerce.number().int().min(5).max(300).prefault(30),
+    GATEWAY_REVOCATION_MAX_STALENESS_SECONDS: wholeNumberEnv(5, 300).prefault('30'),
 
     /** The list's bound. Reached, a revocation that cannot be stored holds every pair (addendum § 4). */
-    GATEWAY_REVOCATION_MAX_ENTRIES: z.coerce
-      .number()
-      .int()
-      .min(1_000)
-      .max(10_000_000)
-      .prefault(100_000),
+    GATEWAY_REVOCATION_MAX_ENTRIES: wholeNumberEnv(1_000, 10_000_000).prefault('100000'),
   })
   // A longer deadline for the tender routes only: never one shorter than every other route gets.
   .refine((env) => env.GATEWAY_TENDER_OPEN_TIMEOUT_MS >= env.GATEWAY_UPSTREAM_TIMEOUT_MS, {

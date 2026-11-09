@@ -347,3 +347,68 @@ describe('GATEWAY_TRUSTED_PROXIES refuses without the entry written (#385 r1/r2,
     for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
   });
 });
+
+/** FU-276: every numeric gateway input, including the shared startup/auth helpers. */
+describe('strict decimal integer environment settings', () => {
+  const settings: Array<[string, number, number]> = [
+    ['PORT', 1, 65535],
+    ['SHUTDOWN_TIMEOUT_MS', 1000, 120000],
+    ['INTERNAL_TOKEN_TTL_SECONDS', 30, 900],
+    ['GATEWAY_RATE_LIMIT_MAX', 1, Number.MAX_SAFE_INTEGER],
+    ['GATEWAY_RATE_LIMIT_WINDOW_MS', 1000, 2147483647],
+    ['GATEWAY_TENANT_RATE_LIMIT_MAX', 1, Number.MAX_SAFE_INTEGER],
+    ['GATEWAY_ANON_RATE_LIMIT_MAX', 1, Number.MAX_SAFE_INTEGER],
+    ['GATEWAY_UPSTREAM_TIMEOUT_MS', 100, 180000],
+    ['GATEWAY_TENDER_OPEN_TIMEOUT_MS', 5000, 180000],
+    ['GATEWAY_CIRCUIT_FAILURE_THRESHOLD', 1, Number.MAX_SAFE_INTEGER],
+    ['GATEWAY_CIRCUIT_RESET_MS', 1000, 2147483647],
+    ['GATEWAY_CIRCUIT_ORGANIZATIONS_TO_OPEN', 2, 100],
+    ['GATEWAY_REVOCATION_MAX_TOKEN_LIFETIME_SECONDS', 60, 86400],
+    ['GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS', 0, 60],
+    ['GATEWAY_REVOCATION_MAX_STALENESS_SECONDS', 5, 300],
+    ['GATEWAY_REVOCATION_MAX_ENTRIES', 1000, 10000000],
+  ];
+  const numericLoad = (name: string, value: string) =>
+    loadGatewayEnv({
+      ...BASE,
+      GATEWAY_TENDER_OPEN_TIMEOUT_MS: '180000',
+      [name]: value,
+    });
+
+  it.each(settings)('%s accepts both bounds and refuses out-of-range values', (name, min, max) => {
+    for (const value of [min, max])
+      expect(
+        numericLoad(name, String(value))[name as keyof ReturnType<typeof loadGatewayEnv>],
+      ).toBe(value);
+    for (const value of [min - 1, max + 1])
+      expect(() => numericLoad(name, String(value))).toThrow(EnvValidationError);
+  });
+
+  it.each(settings)('%s refuses coercion at startup without echoing the input', (name, min) => {
+    for (const value of [
+      '',
+      ' ',
+      ` ${min}`,
+      `${min} `,
+      `${min}\n`,
+      `0x${min.toString(16)}`,
+      `0b${min.toString(2)}`,
+      `0o${min.toString(8)}`,
+      `${min}e0`,
+      `${min}.0`,
+      `+${min}`,
+      '-0',
+      'NaN',
+      'Infinity',
+      '1_000',
+      '60s',
+      '۶۰',
+      'private-sentinel-79',
+      '9007199254740993',
+    ]) {
+      const refusal = envRefusalOf(() => numericLoad(name, value));
+      expect(refusal?.issues.some((issue) => issue.path === name)).toBe(true);
+      expect(JSON.stringify(refusal)).not.toContain('private-sentinel-79');
+    }
+  });
+});

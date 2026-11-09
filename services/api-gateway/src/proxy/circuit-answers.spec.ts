@@ -25,7 +25,9 @@ function envelope(code: string, extra: Record<string, unknown> = {}) {
   return JSON.stringify({
     code,
     message: 'refused',
-    correlationId: 'req-upstream',
+    correlationId: 'req-answers',
+    traceId: '0123456789abcdef0123456789abcdef',
+    path: '/v1/memberships/refused/revoke',
     timestamp: '2026-11-05T00:00:00.000Z',
     ...extra,
   });
@@ -41,6 +43,21 @@ const ANSWERS: Record<string, [number, string]> = {
   '/v1/memberships/not-an-envelope/revoke': [503, '{"code":"KEYCLOAK_UNAVAILABLE"}'],
   '/v1/memberships/upstream/revoke': [503, envelope('UPSTREAM_UNAVAILABLE')],
   '/v1/memberships/as-500/revoke': [500, envelope('KEYCLOAK_UNAVAILABLE')],
+  ...Object.fromEntries(
+    ['KEYCLOAK_WRITE_SETTLING', 'KEYCLOAK_UNAVAILABLE'].flatMap((code) =>
+      Object.entries({
+        details: { details: [{ path: 'x', message: 'y' }] },
+        'empty-details': { details: [] },
+        extra: { internal: 'not an envelope field' },
+        correlation: { correlationId: 'another-request' },
+        'missing-correlation': { correlationId: undefined },
+        'missing-timestamp': { timestamp: undefined },
+      }).map(([kind, extra]) => [
+        `/v1/memberships/${code}-${kind}/revoke`,
+        [503, envelope(code, extra)],
+      ]),
+    ),
+  ),
 };
 
 let server: Server;
@@ -170,12 +187,42 @@ describe('identity’s exempt refusals are neutral, complete and from identity o
     ['with another 503 code', '/v1/memberships/upstream/revoke', 'identity'],
     ['as a 500', '/v1/memberships/as-500/revoke', 'identity'],
     ['from another service', '/v1/memberships/keycloak-down/revoke', 'organization'],
-  ])('%s, it is still a failure that sheds the organization', async (_label, path, service) => {
-    for (let i = 0; i < THRESHOLD; i += 1) await call('ORG_A', path, service);
+    ...['KEYCLOAK_WRITE_SETTLING', 'KEYCLOAK_UNAVAILABLE'].flatMap((code) =>
+      [
+        'details',
+        'empty-details',
+        'extra',
+        'correlation',
+        'missing-correlation',
+        'missing-timestamp',
+      ].map((kind): [string, string, ServiceName] => [
+        `${code} with ${kind}`,
+        `/v1/memberships/${code}-${kind}/revoke`,
+        'identity',
+      ]),
+    ),
+  ])('%s, it still opens the circuit', async (_label, path, service) => {
+    for (const org of ['ORG_A', 'ORG_B', 'ORG_C', 'ORG_D', 'ORG_E']) await call(org, path, service);
+    expect(proxy.circuitStates()[service]?.state).toBe('OPEN');
     const sent = forwarded.length;
     expect(await call('ORG_A', '/v1/users/me', service)).toBe('UPSTREAM_UNAVAILABLE');
     expect(forwarded).toHaveLength(sent);
   });
+
+  it.each(['settling', 'keycloak-down'])(
+    '%s neither erases failures nor closes a probe',
+    async (which) => {
+      for (const org of ['ORG_A', 'ORG_B', 'ORG_C', 'ORG_D']) await call(org, '/v1/users/poison');
+      await call('ORG_E', `/v1/memberships/${which}/revoke`);
+      await call('ORG_E', '/v1/users/poison');
+      expect(state()).toBe('OPEN');
+      clock += COOLDOWN_MS;
+      expect(await call('ORG_E', `/v1/memberships/${which}/revoke`)).toBe(503);
+      expect(state()).toBe('HALF_OPEN');
+      expect(await call('ORG_E', '/v1/users/me')).toBe(200);
+      expect(state()).toBe('CLOSED');
+    },
+  );
 
   it('one place decides: only 2xx–3xx is recovery', () => {
     expect(answerOutcome('identity', 204, null)).toBe('success');
