@@ -3349,10 +3349,6 @@ jobs:
         run: |
           export PGHOST=localhost PGPORT=5432
           bash infrastructure/docker/postgres/00-init-databases.sh
-      - name: Select PostgreSQL 16 clients for the pinned server
-        run: |
-          test -x /usr/lib/postgresql/16/bin/pg_dump
-          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
       - name: Backup restore SQL on a disposable database
         timeout-minutes: 5
         run: pnpm run test:backup-restore-drill-pg
