@@ -255,7 +255,7 @@ describe('a pre-receipt dispute settled by an operator resumes the order (D-083,
   ): Promise<{ result: string; orderId: string; ledger: EconomicLedger }> {
     const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '120000' });
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('d083')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('d083')),
     );
     const ledger = new EconomicLedger(prisma, org.buyer);
     const taskQueue = `d083-${(queues += 1)}-${ulid()}`;

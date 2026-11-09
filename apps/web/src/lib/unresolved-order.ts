@@ -1,4 +1,8 @@
-import { canonicalQuantity, type PlaceOrderFormValues } from './place-order-fields';
+import {
+  canonicalQuantity,
+  PLACE_ORDER_LIMITS,
+  type PlaceOrderFormValues,
+} from './place-order-fields';
 import {
   fencedSlot,
   keysUnder,
@@ -29,7 +33,11 @@ export type { AccountTags, AnswerOutcome, Binding, StartOutcome };
  * it was saved — and two one-way tags (`server/submission.ts`,
  * `submissionBinding`) saying whose it was. **No token, no session value, no
  * CSRF value:** the submission id is an identifier the form already carries in
- * the page, and the tags are keyed digests that open nothing.
+ * the page, and the tags are keyed digests that open nothing. The values include
+ * the offer's stamp (`server/offer-stamp.ts`), which the page also carried: a
+ * signed statement of which offer version the page drew, bound to the login and
+ * opening nothing, kept so that a retry after a reload re-sends the same version
+ * (D-156) rather than whatever the reloaded page drew.
  *
  * ## What it is for, and not for
  *
@@ -150,6 +158,13 @@ function parse(raw: string): Stored | null {
   // here — an entry written with the text as typed still reads as the count it was.
   const quantity = canonicalQuantity(values.quantity);
   if (quantity === null) return null;
+  // An entry from before the stamp was kept restores without one: its retry is
+  // refused by the action (nothing is sent), never sent at another version.
+  const offerStamp =
+    typeof values.offerStamp === 'string' &&
+    values.offerStamp.length <= PLACE_ORDER_LIMITS.offerStamp.max
+      ? values.offerStamp
+      : '';
   return {
     v: VERSION,
     submissionId: entry.submissionId,
@@ -157,7 +172,7 @@ function parse(raw: string): Stored | null {
     savedAt: entry.savedAt,
     owner: entry.owner,
     session: entry.session,
-    values: { offerId: values.offerId, quantity },
+    values: { offerId: values.offerId, quantity, offerStamp },
   };
 }
 
@@ -227,7 +242,11 @@ function recordOf(
     // The body is the first send's, whatever a later answer carries: the retry is the same request.
     values: earlier
       ? earlier.values
-      : { offerId: order.values.offerId, quantity: order.values.quantity },
+      : {
+          offerId: order.values.offerId,
+          quantity: order.values.quantity,
+          offerStamp: order.values.offerStamp,
+        },
     correlationId: order.correlationId,
     // Written before the send, when there is no correlation id yet.
     ...(order.correlationId === null ? { pending: true as const } : {}),

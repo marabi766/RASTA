@@ -13,6 +13,9 @@ import { e2eConfig } from '../../src/env';
  * one function.
  */
 
+/** A just-created offer is at version 1 (`createOffer`); an order names the version it read (D-156). */
+const FRESH_OFFER_VERSION = 1;
+
 async function publishedOffer(tenantB: Actor): Promise<string> {
   const product = await tenantB.post('/v1/products', {
     idempotencyKey: idempotencyKey('e2e-catalogue'),
@@ -47,7 +50,7 @@ test.describe.serial('marketplace isolation', () => {
 
     const placed = await tenantA.post('/v1/orders', {
       idempotencyKey: idempotencyKey('e2e-iso'),
-      body: { lines: [{ offerId, quantity: 1 }] },
+      body: { lines: [{ offerId, offerVersion: FRESH_OFFER_VERSION, quantity: 1 }] },
     });
     expect(placed.status).toBe(201);
     orderId = (placed.body as { id: string }).id;
@@ -137,7 +140,7 @@ test.describe.serial('correlation across HTTP, the outbox and Kafka', () => {
     const placed = await tenantA.post('/v1/orders', {
       correlationId,
       idempotencyKey: idempotencyKey('e2e-corr'),
-      body: { lines: [{ offerId, quantity: 1 }] },
+      body: { lines: [{ offerId, offerVersion: FRESH_OFFER_VERSION, quantity: 1 }] },
     });
     expect(placed.status).toBe(201);
     expect(placed.headers['x-correlation-id']).toBe(correlationId);

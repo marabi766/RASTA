@@ -159,7 +159,7 @@ function order(sessionValue: ReturnType<typeof session>) {
       kind: 'UNCONFIRMED' as const,
       correlationId: 'corr-original',
       submissionId: submission,
-      values: { offerId: 'OFR_1', quantity: '3' },
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
     },
   };
 }

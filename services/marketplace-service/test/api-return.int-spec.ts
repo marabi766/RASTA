@@ -85,7 +85,7 @@ describe('return request API', () => {
       .post('/v1/orders')
       .set(as(buyer(buyerOrg)))
       .set('idempotency-key', apiKey('ret-order'))
-      .send({ lines: [{ offerId, quantity }] })
+      .send({ lines: [{ offerId, offerVersion: 1, quantity }] })
       .expect(201);
     const orderId = order.body.id as string;
     await runUnscoped('the suite completes the order the saga would', () =>
@@ -274,7 +274,7 @@ describe('return request API', () => {
         .post('/v1/orders')
         .set(as(buyer(buyerOrg)))
         .set('idempotency-key', apiKey('ret-pending'))
-        .send({ lines: [{ offerId, quantity: 1 }] })
+        .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
         .expect(201);
 
       await ask(order.body.id, order.body.lines[0].id).expect(422);

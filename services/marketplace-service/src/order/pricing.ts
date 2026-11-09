@@ -13,6 +13,11 @@ import { RastaError } from '@rasta/nest-common';
  * that sends one is refused rather than silently overridden (ADR-037 § 5).
  * This module never sees a client-supplied number, which is the point:
  * it cannot use one by accident.
+ *
+ * The one thing a line does name is the offer **version** the buyer read
+ * (D-156). It is not a price and never becomes one: it is compared with the
+ * locked row's own version, and any difference refuses the order. So the price
+ * charged is the row's, and the row is the one the buyer saw.
  */
 
 /** The subset of an `Offer` row a price depends on. */
@@ -32,6 +37,8 @@ export interface PriceableOffer {
 
 export interface RequestedLine {
   readonly offerId: string;
+  /** The `version` of the offer the buyer read; the order is refused at any other. */
+  readonly offerVersion: number;
   readonly quantity: number;
 }
 
@@ -61,7 +68,8 @@ export interface PricedOrder {
 }
 
 /**
- * Prices a set of requested lines against the offers as they are right now.
+ * Prices a set of requested lines against the offers as they are right now —
+ * which must be the versions the buyer read.
  *
  * Refuses, rather than adjusting, whenever the request and the catalogue
  * disagree. An order that silently comes back cheaper or smaller than asked
@@ -104,6 +112,12 @@ export function priceOrder(
     if (offer.status !== 'PUBLISHED') {
       throw RastaError.notFound('Offer');
     }
+
+    // Only after the offer is known to be one this buyer may read: a stranger
+    // to it has had its 404 above and learns nothing here. Strict equality, so
+    // a version from the future is as stale as one from the past — neither is
+    // the price on the row.
+    if (offer.version !== line.offerVersion) throw offerVersionChanged(index);
 
     if (line.quantity < offer.minimumQuantity) {
       throw RastaError.businessRule(
@@ -198,6 +212,34 @@ function amountExceedsLimit(path: string): RastaError {
   return new RastaError(ERROR_CODES.BUSINESS_RULE_VIOLATION, ORDER_AMOUNT_EXCEEDS_LIMIT_MESSAGE, {
     details: [
       { path, code: ORDER_AMOUNT_EXCEEDS_LIMIT, message: ORDER_AMOUNT_EXCEEDS_LIMIT_MESSAGE },
+    ],
+  });
+}
+
+/**
+ * The closed reason (`details[].code`) an order is refused for when a line's
+ * offer has been repriced since the buyer read it (D-156): the offer row locked
+ * for pricing is at another version than the line names.
+ */
+export const OFFER_VERSION_CHANGED = 'OFFER_VERSION_CHANGED';
+
+const OFFER_VERSION_CHANGED_MESSAGE =
+  'The offer has changed since it was read; read it again before ordering';
+
+/**
+ * A conflict, not a business rule: the request was right when it was made, and
+ * reading the offer again is how to make it right. Fixed words and the path —
+ * neither the price nor the version the offer is at now (S-09), so a refusal
+ * tells nobody what the supplier changed.
+ */
+function offerVersionChanged(index: number): RastaError {
+  return new RastaError(ERROR_CODES.OPTIMISTIC_LOCK_FAILED, OFFER_VERSION_CHANGED_MESSAGE, {
+    details: [
+      {
+        path: `lines[${index}].offerVersion`,
+        code: OFFER_VERSION_CHANGED,
+        message: OFFER_VERSION_CHANGED_MESSAGE,
+      },
     ],
   });
 }

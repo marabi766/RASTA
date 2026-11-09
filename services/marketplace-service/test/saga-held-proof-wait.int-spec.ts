@@ -20,7 +20,10 @@ it('an order whose hold exists waits out an older economic-service, then adopts 
   try {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asActor({ organizationId: org.buyer }, () =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 2 }] }, key('held-proof-wait')),
+      wiring.orders.place(
+        { lines: [{ offerId, offerVersion: 1, quantity: 2 }] },
+        key('held-proof-wait'),
+      ),
     );
 
     const obligation = {

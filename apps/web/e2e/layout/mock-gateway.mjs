@@ -72,6 +72,7 @@ const offer = (productId, i) => ({
   availableQuantity: 1200 + i * 35,
   leadTimeDays: 3 + i,
   minimumQuantity: 10 + i,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 });
 

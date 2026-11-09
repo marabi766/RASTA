@@ -34,7 +34,9 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
     );
     const offerId = offer.id;
     own = (
-      await asBuyer(() => wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('scalar')))
+      await asBuyer(() =>
+        wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('scalar')),
+      )
     ).id;
     foreign = id('ORD');
     await copyParent(foreign, org.other);

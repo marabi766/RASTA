@@ -64,7 +64,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
   async function place(): Promise<string> {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('f3')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('f3')),
     );
     return order.id;
   }

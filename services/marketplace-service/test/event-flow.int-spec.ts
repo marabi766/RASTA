@@ -167,7 +167,10 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
   it('carries promisedDeliveryAt on ORDER_CREATED from a domain write to a Kafka consumer', async () => {
     const { offerId } = await publishOffer(wiring, org.supplier, { leadTimeDays: 6 });
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('ev-created')),
+      wiring.orders.place(
+        { lines: [{ offerId, offerVersion: 1, quantity: 1 }] },
+        key('ev-created'),
+      ),
     );
 
     const pending = await prisma.client.outboxMessage.findFirstOrThrow({
@@ -198,7 +201,10 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
   it('carries ORDER_DISPUTE_RESOLVED with the operator’s own responsibility', async () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('ev-dispute')),
+      wiring.orders.place(
+        { lines: [{ offerId, offerVersion: 1, quantity: 1 }] },
+        key('ev-dispute'),
+      ),
     );
     await asSaga(() => wiring.orders.markFundsHeld(order.id, id('TXN'), sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
@@ -229,7 +235,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
   it('carries ORDER_CANCELLED with the structured cancellationCause', async () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('ev-cancel')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('ev-cancel')),
     );
     await asBuyer(() =>
       wiring.orders.cancel(order.id, { reason: 'no longer needed, over the broker suite' }),
@@ -253,7 +259,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
       // consumer that does not exist yet, never changes on redelivery.
       const { offerId } = await publishOffer(wiring, org.supplier);
       const order = await asBuyer(() =>
-        wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('ev-idem')),
+        wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('ev-idem')),
       );
       await asBuyer(() => wiring.orders.cancel(order.id, { reason: 'idempotency probe' }));
       await asSaga(() => wiring.orders.markCancelled(order.id, 'idempotency probe', sagaStep()));

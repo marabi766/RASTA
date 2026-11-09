@@ -137,7 +137,12 @@ describe('zod to JSON Schema', () => {
 
       const items = props.lines.items as Record<string, unknown>;
       expect(items.type).toBe('object');
-      expect(Object.keys(items.properties as object)).toEqual(['offerId', 'quantity']);
+      expect(Object.keys(items.properties as object)).toEqual([
+        'offerId',
+        'offerVersion',
+        'quantity',
+      ]);
+      expect(items.required).toEqual(['offerId', 'offerVersion', 'quantity']);
     });
   });
 

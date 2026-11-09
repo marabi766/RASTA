@@ -24,6 +24,7 @@ const OFFER = (id: string, supplier: string): Offer => ({
   availableQuantity: 15,
   leadTimeDays: 5,
   minimumQuantity: 1,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 });
 
@@ -41,6 +42,7 @@ const PRODUCT: Product = {
 const ORDERING = {
   csrfToken: 'csrf-token-for-this-session',
   mintSubmissionId: () => 'sub_AAAAAAAAAAAAAAAAAAAA',
+  stampOffer: (offer: { id: string }) => `stamp-${offer.id}`,
   organizationId: 'ORG-DEH-0001',
   binding: bindingOf('owner-tag', 'session-tag'),
   sessionMaxAgeSeconds: 3600,

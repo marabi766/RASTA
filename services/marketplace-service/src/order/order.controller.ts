@@ -87,8 +87,12 @@ export class OrderController {
     summary: 'Place an order',
     description:
       'Prices the order from the current server-side offers — a price in the body is ' +
-      'refused, not ignored. Requires an `Idempotency-Key`; the same key with the same ' +
-      'body returns the original order without placing a second one. A line total or an ' +
+      'refused, not ignored. Each line names the `offerVersion` the buyer read (required); ' +
+      'an offer repriced since is refused with 409 `OPTIMISTIC_LOCK_FAILED`, ' +
+      '`details[].code` `OFFER_VERSION_CHANGED`, and nothing is placed: read the offer ' +
+      'again. Requires an `Idempotency-Key`; the same key with the same body returns the ' +
+      'original order without placing a second one, and the same key with another body ' +
+      '(another `offerVersion` included) is 409 `IDEMPOTENCY_KEY_REUSED`. A line total or an ' +
       'order total past the largest storable amount (2^63 - 1 minor units) is refused with ' +
       '422 `BUSINESS_RULE_VIOLATION`, `details[].code` `ORDER_AMOUNT_EXCEEDS_LIMIT`, and ' +
       'nothing is placed.',

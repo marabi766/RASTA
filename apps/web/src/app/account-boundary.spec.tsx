@@ -27,7 +27,7 @@ function entry(owner: string, productId: string, session = 'login-1') {
     JSON.stringify({
       v: 1,
       submissionId: 'sub_KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKE',
-      values: { offerId: 'OFR_1', quantity: '3' },
+      values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
       correlationId: 'COR_ORIGINAL',
       savedAt: Date.now(),
       owner,
@@ -43,7 +43,7 @@ function tenantEntry(person: string, owner: string, productId: string) {
     JSON.stringify({
       v: 1,
       submissionId: 'sub_KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKE',
-      values: { offerId: 'OFR_SECRET', quantity: '3' },
+      values: { offerId: 'OFR_SECRET', quantity: '3', offerStamp: 'stamp-OFR_SECRET' },
       correlationId: 'COR_ORIGINAL',
       savedAt: Date.now(),
       owner,

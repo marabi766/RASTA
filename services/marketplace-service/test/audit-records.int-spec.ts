@@ -176,7 +176,9 @@ describe('L7-14 audit records (real database)', () => {
 
   async function pendingOrder() {
     const { offerId } = await publishOffer(wiring, org.supplier);
-    return asBuyer(() => wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('ord')));
+    return asBuyer(() =>
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('ord')),
+    );
   }
 
   it('records the funds hold under the buyer, with this service as actor, and nowhere else', async () => {

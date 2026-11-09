@@ -64,7 +64,9 @@ describe('tenant isolation (real database)', () => {
 
   async function anOrder() {
     const { offerId } = await publishOffer(wiring, org.supplier);
-    return asBuyer(() => wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('iso')));
+    return asBuyer(() =>
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('iso')),
+    );
   }
 
   // -------------------------------------------------------------------------

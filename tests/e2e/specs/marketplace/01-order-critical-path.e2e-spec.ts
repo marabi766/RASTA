@@ -50,6 +50,8 @@ async function until(
 test.describe.serial('the marketplace critical path', () => {
   let productId: string;
   let offerId: string;
+  /** The version the buyer read (D-156): an order names it. */
+  let offerVersion: number;
   /** The order the critical path completed, for the reversal check after it. */
   let completedOrder: { id: string; transactionId: string; settlementId: string } | undefined;
 
@@ -83,6 +85,7 @@ test.describe.serial('the marketplace critical path', () => {
     });
     expect(offer.status).toBe(201);
     offerId = (offer.body as { id: string }).id;
+    offerVersion = (offer.body as { version: number }).version;
 
     // ADR-041: the qualification check did not run, and the API says so rather
     // than reporting `false`, which would claim the supplier had failed one.
@@ -114,7 +117,7 @@ test.describe.serial('the marketplace critical path', () => {
     // price (ADR-037 § 5).
     const response = await tenantA.post('/v1/orders', {
       idempotencyKey: idempotencyKey('e2e-price'),
-      body: { lines: [{ offerId, quantity: 1, unitPriceMinor: '1' }] },
+      body: { lines: [{ offerId, offerVersion, quantity: 1, unitPriceMinor: '1' }] },
     });
 
     expect(response.status).toBe(400);
@@ -123,7 +126,7 @@ test.describe.serial('the marketplace critical path', () => {
 
   test('refuses an order with no Idempotency-Key', async ({ tenantA }) => {
     const response = await tenantA.post('/v1/orders', {
-      body: { lines: [{ offerId, quantity: 1 }] },
+      body: { lines: [{ offerId, offerVersion, quantity: 1 }] },
     });
     expect(response.status).toBe(400);
   });
@@ -145,7 +148,7 @@ test.describe.serial('the marketplace critical path', () => {
     const orderKey = idempotencyKey('e2e-order');
     const placed = await tenantA.post('/v1/orders', {
       idempotencyKey: orderKey,
-      body: { lines: [{ offerId, quantity: 2 }] },
+      body: { lines: [{ offerId, offerVersion, quantity: 2 }] },
     });
 
     expect(placed.status).toBe(201);
@@ -169,7 +172,7 @@ test.describe.serial('the marketplace critical path', () => {
     // ---- a replay does not place a second order ---------------------------
     const replay = await tenantA.post('/v1/orders', {
       idempotencyKey: orderKey,
-      body: { lines: [{ offerId, quantity: 2 }] },
+      body: { lines: [{ offerId, offerVersion, quantity: 2 }] },
     });
     expect(replay.status).toBe(201);
     expect((replay.body as { id: string }).id).toBe(order.id);

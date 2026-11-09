@@ -197,7 +197,13 @@ model OfferPriceHistory {
   changedAt DateTime @default(now()) @map("changed_at")
   changedBy String   @map("changed_by")
 
+  /// The lines that agreed to this price (D-156); a row one names is never
+  /// removed (fk_order_line_price_history, RESTRICT).
+  orderLines OrderLine[]
+
   @@unique([offerId, version], map: "uq_offer_price_version")
+  /// The key `fk_order_line_price_history` references; as unique as the one above.
+  @@unique([offerId, version, unitPriceMinor, currency], map: "uq_offer_price_history_price")
   @@index([organizationId], map: "ix_offer_price_org")
   @@map("offer_price_history")
 }
@@ -331,8 +337,13 @@ model OrderLine {
   lineTotalMinor BigInt @map("line_total_minor")
   currency       String
 
-  /// The offer version this line agreed to.
+  /// The offer version this line agreed to: the one the buyer read (D-156).
   offerVersion Int @map("offer_version")
+
+  /// The database's proof of the price: (offer, version, unit price, currency)
+  /// is a row the offer published. Cross-tenant by design: the line is the
+  /// buyer's, the history the supplier's.
+  priceHistory OfferPriceHistory @relation(fields: [offerId, offerVersion, unitPriceMinor, currency], references: [offerId, version, unitPriceMinor, currency], map: "fk_order_line_price_history", onUpdate: Restrict, onDelete: Restrict)
 
   /// A snapshot for display, so a completed order still reads correctly after
   /// the product is renamed. Never used for an authorization or price
