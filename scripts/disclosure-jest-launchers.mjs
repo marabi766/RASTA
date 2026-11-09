@@ -27,9 +27,9 @@ export const JEST_LAUNCHERS = {
       'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
     sha256: {
       'scripts/verify-migration-reversible-lib.test.mjs':
-        'dc9985598eb7b2ecdfb748d798989ff11572dacda52121439ef846f5693eb00b',
+        'ab2597a5acbea53c710fdc3ea7851890da0f2313644b02a3be15085fe4a75b2d',
       'scripts/verify-migration-reversible-lib.mjs':
-        '2c826fb3ff96ea6153408d6d9a293034495e7768ad2632a8531744f3bb51f6eb',
+        'a2ed25f4f03ceb8f7a4ea729ed1f94a821ad745d2256a742185d088788f20e0f',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },
@@ -214,9 +214,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        '0bb9440a4ec8bdd191707c8853a32315d0ba2c8cf4d5bf468830c4388d49d14a',
+        '94f5e4b161bf3facf0bca3daf9cb4ff433d57010b24686d2e746df697cf3c609',
       'scripts/ci-integration-split-lib.mjs':
-        '04916b838e43eaff29e95e14960b0e95f058b7401c9e68f3c1d3211c844f495c',
+        'a90c3be97d1a6cad0ecf94c9ee11de1cb9f7e5a9e470671f8a202ff070ea9026',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },

@@ -71,6 +71,7 @@ function gatedDatabase(gated: readonly Step[]) {
   const gates = new Map<Step, Barrier<void>>(gated.map((step) => [step, barrier()]));
   const passed = (step: Step): Promise<void> => gates.get(step)?.promise ?? Promise.resolve();
   const statements: string[] = [];
+  const parameters: unknown[][] = [];
   const runnerTimeoutsMs: number[] = [];
   const ended: ('COMMIT' | 'ROLLBACK')[] = [];
 
@@ -80,7 +81,8 @@ function gatedDatabase(gated: readonly Step[]) {
     },
     $executeRawUnsafe: async (query: string, ...values: unknown[]) => {
       statements.push(query.replace(/\s+/g, ' ').trim());
-      if (query.startsWith('SET LOCAL')) {
+      parameters.push(values);
+      if (query.startsWith('SELECT pg_catalog.set_config')) {
         await passed('set');
         return 0;
       }
@@ -107,6 +109,7 @@ function gatedDatabase(gated: readonly Step[]) {
   return {
     runTransaction,
     statements,
+    parameters,
     runnerTimeoutsMs,
     ended,
     open(step: Step): void {
@@ -269,7 +272,8 @@ describe('OutboxRelay: a release that begins before its bound and ends after it 
     await stopping;
 
     expect(returned()).toBe(true);
-    expect(db.statements[0]).toBe('SET LOCAL statement_timeout = 500');
+    expect(db.statements[0]).toBe("SELECT pg_catalog.set_config('statement_timeout', $1, true)");
+    expect(db.parameters[0]).toEqual(['500ms']);
     expect(db.statements[1]).toMatch(UPDATE);
     expect(db.statements).toHaveLength(2);
     expect(db.ended).toEqual(['COMMIT']);
@@ -279,7 +283,8 @@ describe('OutboxRelay: a release that begins before its bound and ends after it 
   it('a SET LOCAL still in its round trip when the stop returns is followed by no UPDATE', async () => {
     const db = gatedDatabase(['set']);
     const { stopping } = await stopReleasing(db, { graceSeconds: 2 });
-    expect(db.statements).toEqual(['SET LOCAL statement_timeout = 2000']);
+    expect(db.statements).toEqual(["SELECT pg_catalog.set_config('statement_timeout', $1, true)"]);
+    expect(db.parameters).toEqual([['2000ms']]);
 
     jest.advanceTimersByTime(2_000);
     await stopping;
@@ -287,7 +292,8 @@ describe('OutboxRelay: a release that begins before its bound and ends after it 
     await flush();
     await flush();
 
-    expect(db.statements).toEqual(['SET LOCAL statement_timeout = 2000']);
+    expect(db.statements).toEqual(["SELECT pg_catalog.set_config('statement_timeout', $1, true)"]);
+    expect(db.parameters).toEqual([['2000ms']]);
     expect(db.ended).toEqual(['ROLLBACK']);
   });
 
@@ -391,7 +397,8 @@ describe('releaseSql: the bound', () => {
     db.open('acquire');
     expect(await releasing).toBe(2);
     expect(db.runnerTimeoutsMs).toEqual([300]);
-    expect(db.statements[0]).toBe('SET LOCAL statement_timeout = 180');
+    expect(db.statements[0]).toBe("SELECT pg_catalog.set_config('statement_timeout', $1, true)");
+    expect(db.parameters[0]).toEqual(['180ms']);
     expect(db.statements[1]).toMatch(UPDATE);
     expect(db.ended).toEqual(['COMMIT']);
   });

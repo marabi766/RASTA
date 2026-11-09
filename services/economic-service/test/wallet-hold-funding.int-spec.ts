@@ -694,8 +694,8 @@ describe('funding is money that is there, once, in the wallet’s currency (real
       expect(raced.second?.message).toMatch(NEVER_REVERSED);
     });
 
-    const WRITTEN_ONLY_RC = /A hold naming a journal is written only under READ COMMITTED/;
-    const REVERSED_ONLY_RC = /A FUNDS_HELD journal is reversed only under READ COMMITTED/;
+    const WRITTEN_ONLY_RC = /A guard that locks and then reads runs only under READ COMMITTED/;
+    const REVERSED_ONLY_RC = /A guard that locks and then reads runs only under READ COMMITTED/;
 
     // SERIALIZABLE reads the same snapshot from before the wait, and aborts one of two that cross
     // only when both are SERIALIZABLE (#936 r1 F1): every level but READ COMMITTED is refused.
