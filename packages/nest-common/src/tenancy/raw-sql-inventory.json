@@ -833,6 +833,13 @@
     "decision": "platform-wide: financial pricing locks include nullable global scopes and the tenant subject; fixed reviewed database functions coordinate pricing and rule changes"
   },
   {
+    "file": "services/economic-service/src/commission/commission.service.ts",
+    "line": 634,
+    "hash": "1396e3f9418b3a56685e9f4fa45e03a9c4df2e3c6e76cd8b2053c8a735cdc868",
+    "occurrence": 0,
+    "decision": "platform-wide: the commission scope's lock through the READ COMMITTED gate (FU-268); the scope includes nullable global rules; no tenant row is read or written"
+  },
+  {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
     "line": 55,
     "hash": "5423fd4312b6b7cf7a568855f36d0c649c32188167e2abd547a060c62ed533b9",
@@ -952,18 +959,18 @@
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
   },
   {
-    "file": "services/economic-service/src/reward/configuration-lock.ts",
-    "line": 12,
-    "hash": "9eee77d2bdc33b43f0d45f7765c134896c3d1f1647b5ec7b735fba3640d68b67",
+    "file": "services/economic-service/src/prisma/read-committed-lock.ts",
+    "line": 22,
+    "hash": "8306b7520e7ab2fe9a9d1ab0c85af308fa0e256a8a86699db5a6242fe505f4c8",
     "occurrence": 0,
-    "decision": "platform-wide: transaction advisory lock serializes selection against changes to shared and tenant reward rules; no tenant data returned"
+    "decision": "platform-wide: transaction lock through the schema's READ COMMITTED gate (read_committed_xact_lock, FU-268); keyed by a fixed domain slot, no tenant row is read or written"
   },
   {
-    "file": "services/economic-service/src/reward/configuration-lock.ts",
-    "line": 14,
-    "hash": "0c246a521e21bdbc86cf4cfea7b6a3518144b2e248444eafad453f5bb9835dd6",
+    "file": "services/economic-service/src/prisma/read-committed-lock.ts",
+    "line": 24,
+    "hash": "dd5382e2a525ad279fd62905d1aa5644ad433be41e868d1e44820f0493497c23",
     "occurrence": 0,
-    "decision": "platform-wide: transaction advisory lock serializes selection against changes to shared and tenant reward rules; no tenant data returned"
+    "decision": "platform-wide: transaction lock through the schema's READ COMMITTED gate (read_committed_xact_lock, FU-268); keyed by a fixed domain slot, no tenant row is read or written"
   },
   {
     "file": "services/economic-service/src/reward/participation.service.ts",
@@ -978,20 +985,6 @@
     "hash": "25f0d9e9b3ccce62852c68e8bb0a4af387d734098a783b71ff1a25909f0ed93a",
     "occurrence": 0,
     "decision": "has bound organization predicate"
-  },
-  {
-    "file": "services/economic-service/src/reward/participation.service.ts",
-    "line": 161,
-    "hash": "f069163b0eea7f4090cd14ef590528f5babb1a0d1258970e51a97f7ede1680ac",
-    "occurrence": 0,
-    "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
-  },
-  {
-    "file": "services/economic-service/src/reward/recognition.service.ts",
-    "line": 99,
-    "hash": "88704e93aab012c012d114a0ec1a4fb8b17a95086dae006d829be223e3e893aa",
-    "occurrence": 0,
-    "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
   },
   {
     "file": "services/economic-service/src/reward/reward.service.ts",
