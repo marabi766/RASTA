@@ -3314,7 +3314,7 @@ jobs:
   # Independent database-only gate: creates its own migrated fixture databases.
   integration-backup-drill:
     name: Backup restore PostgreSQL drill
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: quality-types
     timeout-minutes: 10
     services:
@@ -3349,13 +3349,13 @@ jobs:
         run: |
           export PGHOST=localhost PGPORT=5432
           bash infrastructure/docker/postgres/00-init-databases.sh
+      - name: Select PostgreSQL 16 clients for the pinned server
+        run: |
+          test -x /usr/lib/postgresql/16/bin/pg_dump
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
       - name: Backup restore SQL on a disposable database
         timeout-minutes: 5
-        run: |
-          # Match the pinned PostgreSQL 16 server; newer dumps may not restore on it.
-          test -x /usr/lib/postgresql/16/bin/pg_dump
-          export PATH="/usr/lib/postgresql/16/bin:$PATH"
-          pnpm run test:backup-restore-drill-pg
+        run: pnpm run test:backup-restore-drill-pg
         env:
           PGHOST: localhost
           PGPORT: '5432'
