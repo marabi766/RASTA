@@ -4,6 +4,7 @@ import { INVENTORY_MAX_REPLAY_WINDOW_SECONDS, RETURN_DISPOSITIONS } from '@rasta
 import {
   authEnvSchema,
   baseEnvSchema,
+  boundedWholeNumberEnv,
   databaseEnvSchema,
   fixedEnvMessages,
   kafkaEnvSchema,
@@ -175,14 +176,9 @@ export const inventoryEnvSchema = baseEnvSchema
       .prefault(String(7 * 24 * 60 * 60))
       .pipe(wholeNumberEnv(60, 366 * 24 * 60 * 60)),
 
-    INVENTORY_RESERVATION_SWEEP_INTERVAL_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(3600)
-      .prefault(30),
-    INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(100),
-    INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    INVENTORY_RESERVATION_SWEEP_INTERVAL_SECONDS: boundedWholeNumberEnv(1, 3600, 30),
+    INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: boundedWholeNumberEnv(1, 1000, 100),
+    INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: boundedWholeNumberEnv(1, 500, 20),
 
     /**
      * Q-133 (RUN-005, ADR-048 § 1): which dispositions a return shipment may be resolved with —
@@ -213,7 +209,7 @@ export const inventoryEnvSchema = baseEnvSchema
       .prefault('false')
       .transform((value) => value === 'true'),
 
-    INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).prefault(5000),
+    INVENTORY_LOCK_TIMEOUT_MS: boundedWholeNumberEnv(100, 60_000, 5000),
 
     /**
      * marketplace-service, which owns the return request (ADR-048 § 2). Before a return shipment
@@ -226,12 +222,7 @@ export const inventoryEnvSchema = baseEnvSchema
      * command's transaction, never inside it; one that does not answer in time refuses the
      * dispatch (504 UPSTREAM_TIMEOUT) and nothing is written.
      */
-    INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(200)
-      .max(10_000)
-      .prefault(3000),
+    INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: boundedWholeNumberEnv(200, 10_000, 3000),
 
     INVENTORY_IDEMPOTENCY_TTL_HOURS: z
       .string()
