@@ -4,7 +4,7 @@ import {
   WorkerBoundary,
   WorkerAbandonedError,
   workerOperation,
-  withinDeadline,
+  WorkerDrain,
   createSystemContext,
   invalidPayloadError,
   runWithContext,
@@ -106,7 +106,13 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
     this.logger.warn('Obligation worker ABANDONED; submitted write outcome UNCONFIRMED'),
   );
   private stopped = false;
-  private stopping?: Promise<void>;
+  private readonly drain = new WorkerDrain(
+    this.worker,
+    {
+      stop: (options) => this.consumer.stop(options),
+    },
+    () => this.logger.warn('Obligation worker ABANDONED; submitted write outcome UNCONFIRMED'),
+  );
 
   static readonly CONSUMER_NAME = 'economic-service.settlement-authority';
 
@@ -126,18 +132,7 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
   /** Drains broker and direct deliveries under the coordinator's one deadline. */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopped = true;
-    this.worker.stopAt(options.deadlineAt);
-    return (this.stopping ??= this.drain(options));
-  }
-
-  private async drain(options: OutboxStopOptions): Promise<void> {
-    const draining = Promise.all([this.consumer.stop(options), this.worker.current]);
-    void draining.catch(() => undefined); // Observe late disconnect rejection after abandonment.
-    if (options.deadlineAt === undefined) await draining;
-    else if ((await withinDeadline(draining, options.deadlineAt - Date.now())) === 'abandoned') {
-      this.worker.abandon();
-      this.logger.warn('Obligation worker ABANDONED; submitted write outcome UNCONFIRMED');
-    } else await draining;
+    return this.drain.stop(options);
   }
 
   /** Joins the stop `OutboxShutdown` began; returns at once. */
