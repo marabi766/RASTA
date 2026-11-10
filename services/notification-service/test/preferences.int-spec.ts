@@ -41,7 +41,7 @@ describe('preferences decide who is told', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   }, 120_000);
 
   /** Writes a preference the way the API will, and unscoped for the same reason a seed is. */

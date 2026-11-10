@@ -33,7 +33,7 @@ describe('concurrency', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   });
 
   it('50 concurrent distinct events about one fact produce exactly one intent', async () => {

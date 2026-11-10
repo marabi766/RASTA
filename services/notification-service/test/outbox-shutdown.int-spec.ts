@@ -23,8 +23,6 @@ import { DispatcherConsumer } from '../src/intake/dispatcher.consumer';
 import { NotificationRepository } from '../src/notification/notification.repository';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
-import { ResolutionWorker } from '../src/resolution/resolution.worker';
-import { MailWorker } from '../src/channels/mail.worker';
 import { databaseUrl, MAINTENANCE_TOPIC, maintenanceDue, newOrganizationId } from './helpers';
 
 /**
@@ -54,7 +52,7 @@ import { databaseUrl, MAINTENANCE_TOPIC, maintenanceDue, newOrganizationId } fro
  * Stand-ins: the outbox store and the publisher; kafkajs under the real
  * `EventConsumer` — a fake that, as kafkajs does, commits a message only when
  * its `eachMessage` returned, so the shared broker's consumer group is left
- * alone; and the workers' `tick`, replaced before the timers start. The relay,
+ * alone; and the workers' claim I/O, replaced before the timers start. The relay,
  * the purge and both workers claim across the whole table by design, and the
  * shared database's rows belong to other suites. The dispatcher, its intake
  * decision and its wiring are the real ones; only the repository's `ingest`
@@ -281,14 +279,14 @@ async function boot(behaviour: Behaviour): Promise<{
     } satisfies AuthGuardOptions)
     .compile();
 
-  // Before `init()` starts the timers: the real workers, with their batch replaced.
-  jest.spyOn(moduleRef.get(ResolutionWorker), 'tick').mockImplementation(async () => {
+  // Before `init()` starts the timers: keep the real worker boundary, replace claim I/O.
+  jest.spyOn(moduleRef.get(NotificationRepository), 'claimPending').mockImplementation(async () => {
     probe.ticks.resolution.push(nextEvent());
-    return 0;
+    return [];
   });
-  jest.spyOn(moduleRef.get(MailWorker), 'tick').mockImplementation(() => {
+  jest.spyOn(moduleRef.get(NotificationRepository), 'claimSendable').mockImplementation(() => {
     probe.ticks.mail.push(nextEvent());
-    return behaviour.mailHangs ? never<number>() : Promise.resolve(0);
+    return behaviour.mailHangs ? never() : Promise.resolve([]);
   });
 
   const app = moduleRef.createNestApplication();

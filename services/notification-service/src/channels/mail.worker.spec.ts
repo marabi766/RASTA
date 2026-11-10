@@ -141,6 +141,7 @@ const options = {
   pollIntervalMs: 1_000,
   batchSize: 10,
   leaseSeconds: 120,
+  processingBudgetMs: 1_000,
   backoffMaxSeconds: 600,
   owner: 'test',
 };
@@ -392,4 +393,85 @@ describe('stopping on shutdown (OutboxShutdown)', () => {
 
     expect(lines).toEqual([]);
   });
+});
+
+// FU-320/FU-321: deferred I/O and the monotonic clock exercise the actual worker.
+describe('claim admission and abandonment', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it.each([0, 1, options.leaseSeconds * 1000])(
+    'checks remaining lease after claim acknowledgement (+%s)',
+    async (extra) => {
+      const repo = fakeRepository();
+      const mail = fakeMail({});
+      const current = worker(repo, mail);
+      let finish!: (rows: unknown[]) => void;
+      (repo.repository.claimSendable as jest.Mock)
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        )
+        .mockResolvedValue([]);
+      const running = current.tick();
+      await jest.advanceTimersByTimeAsync(
+        options.leaseSeconds * 1000 - options.processingBudgetMs + extra,
+      );
+      finish([delivery()]);
+      expect(await running).toBe(extra === 0 ? 1 : 0);
+      expect(repo.settled).toHaveLength(extra === 0 ? 1 : 0);
+      expect(repo.repository.claimSendable).toHaveBeenCalledWith(
+        options.owner,
+        1,
+        options.leaseSeconds,
+      );
+    },
+  );
+
+  it.each(['grace', 'late success', 'late failure', 'late rejection'])(
+    '%s: submitted work never records a late outcome',
+    async (scenario) => {
+      const repo = fakeRepository();
+      const mail = fakeMail({});
+      const current = worker(repo, mail);
+      let finish!: (value: unknown) => void;
+      let reject!: (error: Error) => void;
+      (mail.channel.send as jest.Mock).mockImplementationOnce(
+        () =>
+          new Promise((resolve, refuse) => {
+            finish = resolve;
+            reject = refuse;
+          }),
+      );
+      (repo.repository.claimSendable as jest.Mock)
+        .mockResolvedValueOnce([delivery()])
+        .mockResolvedValue([]);
+      const running = current.tick().then(
+        () => 'completed',
+        () => 'refused',
+      );
+      await jest.advanceTimersByTimeAsync(0);
+      expect(mail.channel.send).toHaveBeenCalledTimes(1);
+      const stopping = current.stop({ deadlineAt: Date.now() + 1000 });
+      await jest.advanceTimersByTimeAsync(scenario === 'grace' ? 999 : 1000);
+      if (scenario !== 'grace') await stopping;
+      if (scenario === 'late rejection') reject(new Error('late response'));
+      else
+        finish({
+          outcome: scenario === 'late failure' ? 'PERMANENT_FAILURE' : 'SENT',
+          failureReason: null,
+        });
+      expect(await running).toBe(scenario === 'grace' ? 'completed' : 'refused');
+      await stopping;
+      expect(repo.settled).toHaveLength(scenario === 'grace' ? 1 : 0);
+      expect(repo.released).toHaveLength(0);
+      expect(repo.published).toHaveLength(scenario === 'grace' ? 1 : 0);
+      expect(await current.tick()).toBe(0);
+      current.start();
+      expect(current.isRunning()).toBe(false);
+      expect(repo.repository.claimSendable).toHaveBeenCalledTimes(1);
+    },
+  );
 });

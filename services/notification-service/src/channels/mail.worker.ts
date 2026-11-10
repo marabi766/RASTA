@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { Injectable, type OnApplicationShutdown } from '@nestjs/common';
 import {
+  WorkerBoundary,
+  workerOperation,
+  claimWhenReady,
   createSystemContext,
   runWithContext,
   withinDeadline,
@@ -32,6 +35,7 @@ export interface MailWorkerOptions {
   readonly pollIntervalMs: number;
   readonly batchSize: number;
   readonly leaseSeconds: number;
+  readonly processingBudgetMs: number;
   /** Ceiling on a single backoff wait, in seconds. */
   readonly backoffMaxSeconds: number;
   readonly owner: string;
@@ -82,10 +86,12 @@ export const MAIL_ERROR_CLASSES = {
  */
 @Injectable()
 export class MailWorker implements OnApplicationShutdown {
+  // Inherited by safe Prisma queries/callbacks, including late success and rejection.
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<void>;
   private stopped = false;
-  /** The one stop in progress or done since the last `start()`; later calls join it. */
+  /** The one stop per process; later calls join it. */
   private stopping?: Promise<void>;
 
   constructor(
@@ -98,9 +104,7 @@ export class MailWorker implements OnApplicationShutdown {
   ) {}
 
   start(): void {
-    if (this.timer) return;
-    this.stopped = false;
-    this.stopping = undefined;
+    if (this.timer || this.stopped) return;
     this.timer = setInterval(() => void this.tickGuarded(), this.options.pollIntervalMs);
     this.timer.unref?.();
   }
@@ -112,7 +116,7 @@ export class MailWorker implements OnApplicationShutdown {
   /**
    * Stops polling at once and waits for the batch in flight — until
    * `deadlineAt` when the shutdown passes one (`OutboxShutdown`), else
-   * for as long as it takes. One stop per `start()`: a later call joins it.
+   * for as long as it takes. One stop per process: a later call joins it.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
@@ -121,11 +125,12 @@ export class MailWorker implements OnApplicationShutdown {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     // A batch mid-flight finishes. Abandoning it would leave a row `SENDING`
     // with a live lease, which nobody may touch until that lease expires.
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
@@ -134,10 +139,10 @@ export class MailWorker implements OnApplicationShutdown {
     // Past the shutdown's deadline it is abandoned all the same — the forced
     // exit would cut it off a moment later — and says so.
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
-        'Mail batch still running at the shutdown deadline; abandoned. Its rows return to ' +
-          `the queue when their lease (${this.options.leaseSeconds} s) expires, and a message ` +
-          'sent but not yet recorded is sent again',
+        'Mail batch abandoned at shutdown deadline; submitted send is UNCONFIRMED. ' +
+          'No late result is recorded; lease expiry may cause a duplicate send',
       );
     }
   }
@@ -161,14 +166,21 @@ export class MailWorker implements OnApplicationShutdown {
   }
 
   /** One batch. Exposed so the suites can drive it instead of the timer. */
-  async tick(): Promise<number> {
-    const claimed = await this.repository.claimSendable(
-      this.options.owner,
-      this.options.batchSize,
-      this.options.leaseSeconds,
-    );
+  tick(): Promise<number> {
+    return this.boundary.run(() => this.runTick());
+  }
 
-    for (const delivery of claimed) {
+  private async runTick(): Promise<number> {
+    let processed = 0;
+    const claimed = claimWhenReady(
+      this.options.batchSize,
+      () => this.stopped,
+      () => this.repository.claimSendable(this.options.owner, 1, this.options.leaseSeconds),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
+    );
+    for await (const delivery of claimed) {
+      if (this.stopped) break;
       await runWithContext(
         createSystemContext({
           correlationId: delivery.correlationId,
@@ -177,19 +189,26 @@ export class MailWorker implements OnApplicationShutdown {
         }),
         async () => this.sendOne(delivery),
       );
+      processed += 1;
     }
 
-    return claimed.length;
+    return processed;
   }
 
-  async sendOne(delivery: SendableDelivery): Promise<void> {
+  sendOne(delivery: SendableDelivery): Promise<void> {
+    return this.boundary.run(() => this.processOne(delivery));
+  }
+
+  private async processOne(delivery: SendableDelivery): Promise<void> {
+    this.boundary.assertActive();
     const now = this.options.now?.() ?? new Date();
 
     // 1 — is this person asleep?
     const window = await this.repository.quietWindowFor(delivery.organizationId, delivery.userId);
     const quiet = applyQuietHours(now, delivery.severity, window);
     if (quiet.deferred && quiet.scheduledFor) {
-      await this.repository.releaseUntil(delivery, quiet.scheduledFor, quiet.scheduledFor);
+      const scheduledFor = quiet.scheduledFor;
+      await this.repository.releaseUntil(delivery, scheduledFor, scheduledFor);
       this.logger.info(
         `Delivery ${delivery.id} waits until ${quiet.scheduledFor.toISOString()}: quiet hours`,
       );
@@ -201,6 +220,7 @@ export class MailWorker implements OnApplicationShutdown {
     try {
       template = await this.loadTemplate(delivery);
     } catch (error) {
+      this.boundary.assertActive();
       // No published version under this key and version, in the recipient's
       // locale or the fallback. Permanent: a retry reads the same table.
       this.logger.error(`Delivery ${delivery.id} has no template: ${describe(error)}`);
@@ -223,6 +243,7 @@ export class MailWorker implements OnApplicationShutdown {
         locale: delivery.locale,
       });
     } catch (error) {
+      this.boundary.assertActive();
       // A template that cannot render will not render on the next attempt
       // either. Permanent, and attributable to the template rather than to the
       // event that produced the intent (ADR-054 § 9).
@@ -235,12 +256,15 @@ export class MailWorker implements OnApplicationShutdown {
 
     // 3 — send, then record.
     const startedAt = new Date();
-    const result = await this.mail.send({
-      to: delivery.email,
-      subject: rendered.subject,
-      html: rendered.html,
-      text: rendered.text,
-    });
+    const email = delivery.email;
+    const result = await workerOperation(() =>
+      this.mail.send({
+        to: email,
+        subject: rendered.subject,
+        html: rendered.html,
+        text: rendered.text,
+      }),
+    );
     const finishedAt = new Date();
 
     notificationMailAttemptsTotal.inc({ outcome: result.outcome });
@@ -323,17 +347,13 @@ export class MailWorker implements OnApplicationShutdown {
    * half-translated message (ADR § 10.4).
    */
   private async loadTemplate(delivery: SendableDelivery): Promise<EmailTemplate> {
-    const found = await this.readTemplate(
-      delivery.templateKey,
-      delivery.templateVersion,
-      delivery.locale,
+    const found = await workerOperation(() =>
+      this.readTemplate(delivery.templateKey, delivery.templateVersion, delivery.locale),
     );
     if (found) return found;
 
-    const fallback = await this.readTemplate(
-      delivery.templateKey,
-      delivery.templateVersion,
-      FALLBACK_LOCALE,
+    const fallback = await workerOperation(() =>
+      this.readTemplate(delivery.templateKey, delivery.templateVersion, FALLBACK_LOCALE),
     );
     if (fallback) return fallback;
 
@@ -418,6 +438,7 @@ export class MailWorker implements OnApplicationShutdown {
           `(${input.errorClass})`,
       );
     } catch (error) {
+      this.boundary.assertActive();
       if (error instanceof LeaseLostError) {
         // Another worker took the row over while this one was talking to the
         // mail server. Its attempt is not recorded, deliberately: an attempt

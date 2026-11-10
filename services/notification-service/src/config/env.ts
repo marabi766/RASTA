@@ -10,10 +10,16 @@ import {
   serviceUrlSchema,
   wholeNumberEnv,
 } from '@rasta/config';
-import { notificationOperationBudgets } from './operation-budgets';
+import {
+  notificationItemBudgetMs,
+  SMTP_TIMEOUT_PHASES,
+  notificationOperationBudgets,
+} from './operation-budgets';
 
 /** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
 const { fixed, seal } = fixedEnvMessages();
+
+const LEASE_BUDGET = fixed('Worker lease must exceed the complete claimed-item admission budget');
 
 const SMTP_CREDENTIALS_PAIRED = fixed(
   'NOTIFICATION_SMTP_USER and NOTIFICATION_SMTP_PASSWORD must be set together or not at all',
@@ -143,7 +149,11 @@ export const notificationEnvSchema = baseEnvSchema
       .max(60_000)
       .prefault(1_000),
     NOTIFICATION_RESOLUTION_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
-    NOTIFICATION_RESOLUTION_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).prefault(60),
+    NOTIFICATION_RESOLUTION_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('180')
+      .pipe(wholeNumberEnv(10, 3_600)),
     /** Ceiling of the retry backoff when identity is unavailable. */
     NOTIFICATION_RESOLUTION_BACKOFF_MAX_SECONDS: z.coerce
       .number()
@@ -168,11 +178,14 @@ export const notificationEnvSchema = baseEnvSchema
     /**
      * How many messages one tick may send.
      *
-     * Small on purpose: a tick sends them one after another, and a batch of
-     * fifty against a slow server holds a lease long enough to lose it.
+     * Claimed one when ready: later messages never spend their lease waiting.
      */
     NOTIFICATION_MAIL_BATCH_SIZE: z.coerce.number().int().min(1).max(100).prefault(10),
-    NOTIFICATION_MAIL_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).prefault(120),
+    NOTIFICATION_MAIL_LEASE_SECONDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('180')
+      .pipe(wholeNumberEnv(10, 3_600)),
     NOTIFICATION_MAIL_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).prefault(600),
 
     // Mail channel (ADR-054 § 6, `docs/24` Q-37) ---------------------------
@@ -218,6 +231,14 @@ export const notificationEnvSchema = baseEnvSchema
     NOTIFICATION_MAIL_FROM_NAME: z.string().prefault('رستا'),
   })
   .superRefine((env, ctx) => {
+    for (const [field, requestMs] of [
+      ['NOTIFICATION_RESOLUTION_LEASE_SECONDS', env.NOTIFICATION_IDENTITY_REQUEST_TIMEOUT_MS],
+      ['NOTIFICATION_MAIL_LEASE_SECONDS', SMTP_TIMEOUT_PHASES * env.NOTIFICATION_SMTP_TIMEOUT_MS],
+    ] as const) {
+      if (env[field] * 1000 <= notificationItemBudgetMs(requestMs))
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: LEASE_BUDGET });
+    }
+
     // Credentials are a pair. One without the other is a deployment that
     // believes it is authenticating and is not — and an anonymous session to a
     // relay that expected a login fails later, further away, and less clearly.

@@ -44,7 +44,7 @@ describe('recipient resolution failure and recovery', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   });
 
   it('retains a PENDING intent, schedules a retry and reports no delivery while identity is away', async () => {

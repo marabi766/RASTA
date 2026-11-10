@@ -2,10 +2,13 @@ import {
   CLAIM_TRANSACTION_MAX_WAIT_MS,
   PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
 } from '@rasta/config';
-import { createSafePrismaClient } from '@rasta/nest-common';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
+  DatabaseTeardown,
+  type DatabaseCloseReport,
+  type OutboxStopOptions,
+  createSafePrismaClient,
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
@@ -56,6 +59,7 @@ export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 export class PrismaService implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
   private readonly base: PrismaClient;
+  private readonly teardown: DatabaseTeardown;
 
   /** The client every repository uses. Tenant scoping is already applied. */
   readonly client: ExtendedPrismaClient;
@@ -77,6 +81,7 @@ export class PrismaService implements OnModuleInit {
       'DATABASE_URL_PROCUREMENT',
     );
     this.client = this.buildClient();
+    this.teardown = new DatabaseTeardown(this.base, this.logger);
   }
 
   private buildClient() {
@@ -120,8 +125,8 @@ export class PrismaService implements OnModuleInit {
   }
 
   /** Closed only by OutboxShutdown, after workers and publishers have drained. */
-  async stop(): Promise<void> {
-    await this.base.$disconnect();
+  stop(options: OutboxStopOptions = {}): Promise<DatabaseCloseReport> {
+    return this.teardown.stop(options);
   }
 
   /** Liveness of the database, for the readiness probe. Never throws. */

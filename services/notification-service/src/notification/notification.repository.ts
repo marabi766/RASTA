@@ -4,6 +4,7 @@ import { Prisma, type NotificationIntent } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import {
   DISPATCH_TRANSACTION_TIMEOUT_MS,
+  DISPATCH_TRANSACTION_MAX_WAIT_MS,
   INGEST_TRANSACTION_TIMEOUT_MS,
 } from '../config/operation-budgets';
 import { newId, type IntentInput } from '../intake/intake';
@@ -136,7 +137,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * connection indefinitely.
  */
 const INGEST_TRANSACTION = { maxWait: 15_000, timeout: INGEST_TRANSACTION_TIMEOUT_MS } as const;
-const DISPATCH_TRANSACTION = { maxWait: 15_000, timeout: DISPATCH_TRANSACTION_TIMEOUT_MS } as const;
+const DISPATCH_TRANSACTION = {
+  maxWait: DISPATCH_TRANSACTION_MAX_WAIT_MS,
+  timeout: DISPATCH_TRANSACTION_TIMEOUT_MS,
+} as const;
 
 @Injectable()
 export class NotificationRepository {
