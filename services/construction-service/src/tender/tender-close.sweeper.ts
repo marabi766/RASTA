@@ -18,6 +18,7 @@ export interface TenderCloseSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the tender back. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A failed tender waits `min(max, base × 2^attempts)` seconds before it is claimed again. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -142,6 +143,8 @@ export class TenderCloseSweeper {
       this.options.batchSize,
       () => this.stopped,
       () => this.closes.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: TenderCloseOutcome = {
       claimed: 0,

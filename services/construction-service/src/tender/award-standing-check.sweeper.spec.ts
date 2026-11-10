@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import type { AwardStandingCheckRepository, ClaimedCheck } from './award-standing-check.repository';
 import type {
   AwardStandingCheckService,
@@ -38,6 +39,7 @@ function sweeperWith(claimed: ClaimedCheck[]) {
     {
       intervalMs: INTERVAL_MS,
       batchSize: 7,
+      processingBudgetMs: 10_000,
       leaseSeconds: 45,
       retryBackoffBaseSeconds: 10,
       retryBackoffMaxSeconds: 900,
@@ -47,6 +49,19 @@ function sweeperWith(claimed: ClaimedCheck[]) {
 }
 
 describe('AwardStandingCheckSweeper.stop', () => {
+  it.each([35001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, claimDue, process } = sweeperWith([claim('A')]);
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        claimDue,
+        await claimDue(1),
+        process,
+        elapsed,
+      );
+    },
+  );
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 

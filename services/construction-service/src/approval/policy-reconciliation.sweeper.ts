@@ -27,6 +27,7 @@ export interface SweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the task back. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** Retry delay after the first failure; doubles per attempt up to the maximum. */
   backoffSeconds: number;
   backoffMaxSeconds: number;
@@ -155,6 +156,8 @@ export class PolicyReconciliationSweeper {
       this.options.batchSize,
       () => this.stopped,
       () => this.reconciliations.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: SweepOutcome = {
       claimed: 0,

@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import { RastaError } from '@rasta/nest-common';
 import type { ClaimedRfq, RfqRepository } from './rfq.repository';
 import type { RfqCloseResult, RfqCloseService, RfqCloseTarget } from './rfq-close.service';
@@ -25,6 +26,7 @@ function sweeperWith(claimed: ClaimedRfq[], results: Record<string, RfqCloseResu
     {
       intervalMs: 5000,
       batchSize: 7,
+      processingBudgetMs: 10_000,
       leaseSeconds: 45,
       retryBackoffBaseSeconds: 10,
       retryBackoffMaxSeconds: 900,
@@ -34,6 +36,19 @@ function sweeperWith(claimed: ClaimedRfq[], results: Record<string, RfqCloseResu
 }
 
 describe('RfqCloseSweeper', () => {
+  it.each([35001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, claimDue, close } = sweeperWith([claim('A')], {});
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        claimDue,
+        await claimDue(1),
+        close,
+        elapsed,
+      );
+    },
+  );
   it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
     jest.useFakeTimers();
     try {

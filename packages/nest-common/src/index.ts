@@ -416,4 +416,4 @@ export {
 } from './text/canonical-unique-text';
 export type { CanonicalUniqueTextOptions } from './text/canonical-unique-text';
 
-export { claimWhenReady } from './claim-when-ready';
+export { claimWhenReady, hasClaimBudget } from './claim-when-ready';

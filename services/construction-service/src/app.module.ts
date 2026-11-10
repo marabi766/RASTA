@@ -26,7 +26,7 @@ import {
   kafkaConnection,
   StrictQueryParserInstaller,
 } from '@rasta/nest-common';
-import { outboxShutdownBudgetMs } from '@rasta/config';
+import { claimedItemBudgetMs, outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -270,6 +270,10 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
           intervalMs: env.CONSTRUCTION_AWARD_CHECK_INTERVAL_MS,
           batchSize: env.CONSTRUCTION_AWARD_CHECK_BATCH_SIZE,
           leaseSeconds: env.CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS,
+          processingBudgetMs: claimedItemBudgetMs(
+            env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+            env.CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS,
+          ),
           retryBackoffBaseSeconds: env.CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS,
           retryBackoffMaxSeconds: env.CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS,
         }),
@@ -290,6 +294,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
           intervalMs: env.CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS,
           batchSize: env.CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE,
           leaseSeconds: env.CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS,
+          processingBudgetMs: claimedItemBudgetMs(env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS, 0),
           retryBackoffBaseSeconds: env.CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS,
           retryBackoffMaxSeconds: env.CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS,
         }),
@@ -323,6 +328,10 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
           intervalMs: env.CONSTRUCTION_RECONCILE_INTERVAL_MS,
           batchSize: env.CONSTRUCTION_RECONCILE_BATCH_SIZE,
           leaseSeconds: env.CONSTRUCTION_RECONCILE_LEASE_SECONDS,
+          processingBudgetMs: claimedItemBudgetMs(
+            env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+            env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS,
+          ),
           backoffSeconds: env.CONSTRUCTION_RECONCILE_BACKOFF_SECONDS,
           backoffMaxSeconds: env.CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS,
         }),

@@ -18,6 +18,7 @@ export interface RfqCloseSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the RFQ. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A failed RFQ waits `min(max, base × 2^attempts)` seconds before it is claimed again. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -131,6 +132,8 @@ export class RfqCloseSweeper {
       this.options.batchSize,
       () => this.stopped,
       () => this.rfqs.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: RfqCloseSweepOutcome = {
       claimed: 0,

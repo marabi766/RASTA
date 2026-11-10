@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import {
   RastaError,
   claimWhenReady,
+  hasClaimBudget,
   withinDeadline,
   type OutboxStopOptions,
 } from '@rasta/nest-common';
@@ -18,6 +19,7 @@ export interface AggregationWindowSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the window; renewed by every step. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A failed window waits `min(max, base × 2^attempts)` seconds before it is claimed again. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -146,6 +148,8 @@ export class AggregationWindowSweeper {
       this.options.batchSize,
       () => this.stopped,
       () => this.sweeps.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: WindowSweepOutcome = {
       claimed: 0,
@@ -169,10 +173,15 @@ export class AggregationWindowSweeper {
         // Stopping: the window keeps its claim until the lease runs out, then any sweep takes it.
         if (this.stopped) break;
         try {
+          const started = performance.now();
           const step = await this.service.step(target, this.options.leaseSeconds);
           outcome[COUNTED[step.result]] += 1;
           windowSweepTotal.inc({ service: SERVICE_NAME, result: METRIC_RESULT[step.result] });
           if (!step.pending) break;
+          if (!hasClaimBudget(started, this.options)) {
+            this.logger.warn('Renewal acknowledgement left insufficient lease; waiting for expiry');
+            break;
+          }
         } catch (error) {
           outcome.failed += 1;
           windowSweepTotal.inc({ service: SERVICE_NAME, result: 'failed' });

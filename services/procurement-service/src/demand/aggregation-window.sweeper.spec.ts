@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import type { ClaimedWindow, WindowSweepRepository } from './window-sweep.repository';
 import type { SweepStep, SweepTarget, WindowSweepService } from './window-sweep.service';
 import { AggregationWindowSweeper } from './aggregation-window.sweeper';
@@ -30,6 +31,7 @@ function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep 
     {
       intervalMs: 5000,
       batchSize: 7,
+      processingBudgetMs: 10_000,
       leaseSeconds: 45,
       retryBackoffBaseSeconds: 10,
       retryBackoffMaxSeconds: 900,
@@ -41,6 +43,30 @@ function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep 
 const NONE = { claimed: 0, ended: 0, followed: 0, noop: 0, notDue: 0, lost: 0, failed: 0 };
 
 describe('AggregationWindowSweeper', () => {
+  it.each([35001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, claimDue, step } = sweeperWith([claim('A')], {});
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        claimDue,
+        await claimDue(1),
+        step,
+        elapsed,
+      );
+    },
+  );
+  it('refuses another step after a delayed renewal acknowledgement', async () => {
+    const { sweeper, step: stepFn } = sweeperWith([claim('A')], {});
+    await expectLateAcknowledgementIgnored(
+      () => sweeper.runOnce(),
+      stepFn,
+      step('ENDED', true),
+      stepFn,
+      35001,
+      1,
+    );
+  });
   it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
     jest.useFakeTimers();
     try {

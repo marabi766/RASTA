@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import type { OrganizationDirectory } from '../organization/organization-directory';
 import type {
   ClaimedTask,
@@ -42,6 +43,7 @@ function build(tasks: ClaimedTask[]) {
     {
       intervalMs: INTERVAL_MS,
       batchSize: 10,
+      processingBudgetMs: 10_000,
       leaseSeconds: 60,
       backoffSeconds: 30,
       backoffMaxSeconds: 100,
@@ -51,6 +53,19 @@ function build(tasks: ClaimedTask[]) {
 }
 
 describe('PolicyReconciliationSweeper.stop', () => {
+  it.each([50001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, reconciliations, directory } = build([task('A', 'ORG_A')]);
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        reconciliations.claimDue,
+        await reconciliations.claimDue(1),
+        directory.isWithin,
+        elapsed,
+      );
+    },
+  );
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 

@@ -41,7 +41,11 @@ Policy reconciliation asks the directory again for each claim, including a reque
 Window steps keep their existing transactional renewal, so a large window never holds waiting windows.
 
 Boot refuses a lease at or below `3 × (transaction timeout + 2000 ms acquisition) + request timeout + 1000 ms margin`.
-This covers claim/return, processing and failure recording. Construction uses its configured transaction
+This is admission arithmetic, not an elapsed claim/return or commit bound (D-061, docs/23).
+Before processing, the shared helper checks monotonic elapsed time from claim start; remaining lease
+must cover the configured per-item allowance. Late successful results are discarded with a warning;
+claims expire for reclaim. Window steps repeat this check after renewal acknowledgements, measuring
+from before the renewing step. No transaction timeout is treated as bounding commit acknowledgement. Construction uses its configured transaction
 and supplier/directory timeout; procurement uses its explicit 5000 ms transaction timeout, without a request.
 Defaults remain valid. A 10 s award lease with a 60000 ms supplier timeout is refused; raise the lease
 above the budget explicitly. Values are never silently increased. Failed claims expire for retry;

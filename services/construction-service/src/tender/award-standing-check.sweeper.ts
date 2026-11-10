@@ -18,6 +18,7 @@ export interface AwardStandingCheckSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the check back. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A check supplier-service could not answer waits `min(max, base × 2^attempts)` seconds. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -118,6 +119,8 @@ export class AwardStandingCheckSweeper {
       this.options.batchSize,
       () => this.stopped,
       () => this.checks.claimDue(1, this.options.leaseSeconds, ulid(), tenderId),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: AwardStandingCheckOutcome = {
       claimed: 0,

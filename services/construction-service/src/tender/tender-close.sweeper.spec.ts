@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import type { ClaimedTender, TenderCloseRepository } from './tender-close.repository';
 import type { CloseResult, TenderCloseService } from './tender-close.service';
 import { TenderCloseSweeper } from './tender-close.sweeper';
@@ -24,6 +25,7 @@ function sweeperWith(claimed: ClaimedTender[], results: Record<string, CloseResu
     {
       intervalMs: 5000,
       batchSize: 7,
+      processingBudgetMs: 10_000,
       leaseSeconds: 45,
       retryBackoffBaseSeconds: 10,
       retryBackoffMaxSeconds: 900,
@@ -33,6 +35,19 @@ function sweeperWith(claimed: ClaimedTender[], results: Record<string, CloseResu
 }
 
 describe('TenderCloseSweeper', () => {
+  it.each([35001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, claimDue, close } = sweeperWith([claim('A')], {});
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        claimDue,
+        await claimDue(1),
+        close,
+        elapsed,
+      );
+    },
+  );
   it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
     jest.useFakeTimers();
     try {
