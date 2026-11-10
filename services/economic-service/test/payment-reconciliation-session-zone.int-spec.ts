@@ -36,7 +36,7 @@ describe('payment_reconciliation_task deadlines in any session zone (real databa
   });
   afterAll(async () => {
     await cleanup(prisma, [org.a]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const intent = async (): Promise<string> => {
@@ -220,7 +220,7 @@ describe('payment_reconciliation_task deadlines in any session zone (real databa
           expect(Math.abs(at)).toBeLessThan(0.002);
         });
       } finally {
-        await owner.onModuleDestroy();
+        await owner.stop();
       }
     },
   );

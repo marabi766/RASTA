@@ -66,7 +66,7 @@ describe('a system actor', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function heldTransaction(amountMinor = 40_000n): Promise<string> {

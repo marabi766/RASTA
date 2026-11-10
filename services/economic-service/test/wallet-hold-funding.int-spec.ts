@@ -93,7 +93,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
 
   afterAll(async () => {
     await cleanup(prisma, [org.a]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
     await owner.$disconnect();
     await other.$disconnect();
     await runtime.$disconnect();

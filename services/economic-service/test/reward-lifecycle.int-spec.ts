@@ -67,7 +67,7 @@ describe('reward lifecycle', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   // JUSTIFIED-ANY: `CreateRewardRuleDto` is a Zod inference with several

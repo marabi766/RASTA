@@ -45,7 +45,7 @@ describe('wallet concurrency (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** One hold attempt, reported as a settled outcome rather than a rejection. */

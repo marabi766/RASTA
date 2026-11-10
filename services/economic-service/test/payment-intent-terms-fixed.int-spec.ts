@@ -50,7 +50,7 @@ describe('a payment intent’s terms are fixed and its lifecycle evidenced (real
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await Promise.all([runtime.$disconnect(), owner.$disconnect(), prisma.onModuleDestroy()]);
+    await Promise.all([runtime.$disconnect(), owner.$disconnect(), prisma.stop()]);
   });
 
   /** A CREATED intent, as the service writes one; its id. */

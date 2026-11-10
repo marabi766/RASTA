@@ -86,7 +86,7 @@ describe('the payment reconciler (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const reconcilerWith = (overrides: Partial<EconomicEnv> = {}, withProvider = provider) =>

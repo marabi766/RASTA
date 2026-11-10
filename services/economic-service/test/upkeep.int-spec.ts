@@ -41,7 +41,7 @@ describe('upkeep', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   // -------------------------------------------------------------------------

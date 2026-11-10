@@ -111,7 +111,7 @@ describe('settlement reversal storage (real database, runtime role)', () => {
       );
     });
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
     await runtime.$disconnect();
     await owner.$disconnect();
   });
