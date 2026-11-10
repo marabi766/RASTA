@@ -28,11 +28,11 @@ it('FU-321: refuses lazy model/raw queries, transaction continuations and reconn
     await expect(other.run(() => prisma.client.$queryRaw`SELECT 1`)).resolves.toEqual([
       { '?column?': 1 },
     ]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
     await expect(other.run(() => prisma.client.$queryRaw`SELECT 1`)).rejects.toThrow(
       'Database shutdown',
     );
   } finally {
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   }
 });

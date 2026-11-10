@@ -7,6 +7,7 @@ import {
 } from '@rasta/testing';
 import { AppModule } from './app.module';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
+import { PrismaService } from './prisma/prisma.service';
 import { ENV } from './tokens';
 
 /**
@@ -35,6 +36,6 @@ describe('AppModule closes the Kafka publisher after the outbox drain (D-052 pha
       envToken: ENV,
     });
 
-    expect(publisherCloseProblems(stops, KafkaEventPublisher)).toEqual([]);
+    expect(publisherCloseProblems(stops, KafkaEventPublisher, [PrismaService])).toEqual([]);
   });
 });
