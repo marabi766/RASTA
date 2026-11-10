@@ -7,6 +7,8 @@ import {
   RFQ_CANCELLATION_CODE_PATTERN,
 } from '@rasta/contracts';
 import {
+  claimedItemBudgetMs,
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
   authEnvSchema,
   baseEnvSchema,
   boundedWholeNumberEnv,
@@ -23,6 +25,9 @@ import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-prov
 
 /** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
 const { fixed, seal } = fixedEnvMessages();
+const SWEEP_LEASE_TOO_SHORT = fixed(
+  'Sweeper lease must exceed the complete claimed-item budget (claim, request, processing, failure recording and margin)',
+);
 
 const KEK_CURRENT_NOT_IN_KEKS = fixed(
   'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
@@ -470,6 +475,18 @@ export const procurementEnvSchema = baseEnvSchema
       .prefault(2000),
   })
   .superRefine((env, ctx) => {
+    for (const field of [
+      'PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS',
+      'PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS',
+    ] as const) {
+      if (env[field] * 1000 <= claimedItemBudgetMs(PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS))
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: SWEEP_LEASE_TOO_SHORT,
+        });
+    }
+
     // The replay fence refuses a deadline later than claim + TTL − B (shared/idempotency.ts). The
     // portal's window is capped by the same constant (PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS), so the
     // service must accept a window of that size on its slowest legal clock:

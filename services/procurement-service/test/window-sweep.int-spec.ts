@@ -1,3 +1,4 @@
+import { setEligibilityFixture } from '@rasta/testing';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { registry } from '@rasta/observability';
 import { demandIdsDigest } from '../src/events/events';
@@ -529,7 +530,7 @@ describe('the window sweeper', () => {
       });
       const service = harness.app.get(WindowSweepService);
       const step = service.step.bind(service);
-      const stopping = harness.sweeper({ leaseSeconds: 1, batchSize: 500 });
+      const stopping = harness.sweeper({ batchSize: 500 });
       const spy = jest.spyOn(service, 'step').mockImplementation(async (target, lease) => {
         const done = await step(target, lease);
         if (target.aggregationId === seeded.aggregationId) void stopping.stop();
@@ -543,7 +544,7 @@ describe('the window sweeper', () => {
       expect(held).toMatchObject({ status: 'LAPSED', demandsToFollow: 80 });
       expect(held.sweepFence).not.toBeNull();
 
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      await setEligibilityFixture({ client: db }, 'windowExpired', [seeded.aggregationId]);
       await sweepAll(harness.sweeper());
       expect(await row(organizationId, seeded.aggregationId)).toMatchObject({
         demandsToFollow: 0,

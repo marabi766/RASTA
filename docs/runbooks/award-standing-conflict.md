@@ -32,3 +32,21 @@ supplier-service هنگام پاسخ، پس از Commit)** را می‌سنجد:
 - انتخاب را خودکار پس نگیرید و پیشنهاد دیگری را خودکار برنده نکنید. مالک مناقصه و مسئول انطباق تصمیم می‌گیرند: ادامه با ثبت دلیل، یا جلوگیری از ساخت قرارداد (CON-003 از `TENDER_AWARDED` پیش‌نویس می‌سازد؛ پیش از امضا این پیش‌نویس را متوقف کنید).
 - برای `Overdue`: ردیف‌های `PENDING` را بیابید (`created_at` قدیمی؛ `attempts` بالا یعنی supplier-service پاسخ نمی‌دهد و کد خطا در لاگ است؛ `attempts` صفر و `lease_until` تهی یعنی جاروکننده اجرا نمی‌شود). علت را رفع کنید؛ جاروکننده خودش ادامه می‌دهد. اگر باید دستی تصمیم بگیرید، شایستگی برنده را در supplier-service ببینید (مرحلهٔ ۲).
 - شمارنده با راه‌اندازی مجدد سرویس صفر می‌شود و هشدار برمی‌خیزد؛ این دلیل بر رفع نیست — پیش از آن علت را ثبت کنید.
+
+## Lease configuration (FU-320)
+
+Construction's three sweepers and procurement's RFQ/window sweepers claim one item when ready.
+Batch size limits work per sweep; waiting items hold no lease. Each claim uses a fresh fence.
+Policy reconciliation asks the directory again for each claim, including a requeued generation.
+Window steps keep their existing transactional renewal, so a large window never holds waiting windows.
+
+Boot refuses a lease at or below `3 × (transaction timeout + 2000 ms acquisition) + request timeout + 1000 ms margin`.
+This is admission arithmetic, not an elapsed claim/return or commit bound (D-061, docs/23).
+Before processing, the shared helper checks monotonic elapsed time from claim start; remaining lease
+must cover the configured per-item allowance. Late successful results are discarded with a warning;
+claims expire for reclaim. Window steps repeat this check after renewal acknowledgements, measuring
+from before the renewing step. No transaction timeout is treated as bounding commit acknowledgement. Construction uses its configured transaction
+and supplier/directory timeout; procurement uses its explicit 5000 ms transaction timeout, without a request.
+Defaults remain valid. A 10 s award lease with a 60000 ms supplier timeout is refused; raise the lease
+above the budget explicitly. Values are never silently increased. Failed claims expire for retry;
+shutdown starts no further claim. There is no background renewal task to outlive database shutdown.

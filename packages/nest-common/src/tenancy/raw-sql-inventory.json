@@ -352,7 +352,7 @@
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
     "line": 118,
-    "hash": "829571358b114bc47db8825fbf8055cb25cbe9ca09bf13651a0e0649a32c4832",
+    "hash": "07098317db964d3fddae6bb8ed9c1810ca7c359d00818828d41e9e2ec8b05879",
     "occurrence": 0,
     "decision": "platform-wide: background policy-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -366,7 +366,7 @@
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
     "line": 188,
-    "hash": "c21f00dc9e61338ccfae724a5267276406669fc8c00265098591d1265a0c2fe6",
+    "hash": "10652e2c30dbf95053252c156c1ef3ec15f32db2238d03619682a73435db3170",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
@@ -380,7 +380,7 @@
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
     "line": 227,
-    "hash": "d67a73441987b256f0940077c36aaf9631b2fab15c93df026b126027c027c800",
+    "hash": "ed8d49bf5583958d7136f05bba84b87bed607c78b76386e2d4b5bea1c0702663",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
@@ -450,7 +450,7 @@
   {
     "file": "services/construction-service/src/tender/award-standing-check.repository.ts",
     "line": 66,
-    "hash": "2d167435c28e0aab3a4c4dcc8100ddd13f620f45b90fb03d0d6af061d4f39269",
+    "hash": "9c0bf2c63ac4068daef63894ef3b12439ce568711e0f5c3b27e68dff43c0a86c",
     "occurrence": 0,
     "decision": "platform-wide: background award-standing-check worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -562,7 +562,7 @@
   {
     "file": "services/construction-service/src/tender/tender-close.repository.ts",
     "line": 75,
-    "hash": "52877bf60e44a82b90b189b90f914e1fbfe0778745ca9599887bbe895ec2c409",
+    "hash": "48bb9f1244dfa6b5ccdb7b01f5411b295eea502040d70e0107cc0469c14fa75b",
     "occurrence": 0,
     "decision": "platform-wide: background tender-close worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -2914,7 +2914,7 @@
   {
     "file": "services/procurement-service/src/demand/window-sweep.repository.ts",
     "line": 64,
-    "hash": "1234c7773332e85abcb5f1c0b74947c917048e6200661422eb0b4183054f4e8a",
+    "hash": "52db04d4cee88564f908f0b3fc7114b7c3663e9046a3e7f4a02e1f603a960f50",
     "occurrence": 0,
     "decision": "platform-wide: background window-sweep worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -2998,7 +2998,7 @@
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",
     "line": 303,
-    "hash": "1dec3cf27e2f1c106e21bc6ed7b259914b74b0923502179278cff44037e3b3a8",
+    "hash": "8478380eb2feee01de9a9c3ccea5c8b6663a90fdbdaad5061275498a21ef46da",
     "occurrence": 0,
     "decision": "platform-wide: background rfq worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },

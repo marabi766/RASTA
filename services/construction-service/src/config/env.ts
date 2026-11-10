@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
+  claimedItemBudgetMs,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
@@ -25,6 +26,9 @@ import {
 
 /** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
 const { fixed, seal } = fixedEnvMessages();
+const SWEEP_LEASE_TOO_SHORT = fixed(
+  'Sweeper lease must exceed the complete claimed-item budget (claim, request, processing, failure recording and margin)',
+);
 
 const EVALUATORS_MIN_OVER_MAX = fixed(
   'CONSTRUCTION_EVALUATION_MIN_EVALUATORS may not exceed CONSTRUCTION_EVALUATION_MAX_EVALUATORS: no bid could ever be complete',
@@ -404,9 +408,9 @@ export const constructionEnvSchema = baseEnvSchema
     /**
      * The sweeper behind ORGANIZATION_MOVED (Q-83, docs/23 D-041). A sweep
      * every `INTERVAL_MS` claims at most `BATCH_SIZE` due tasks, so one sweep
-     * costs at most BATCH_SIZE × CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS;
-     * `LEASE_SECONDS` must exceed that, or a slow sweep loses its claims to
-     * another instance (harmless — the writes are conditional — but wasteful).
+     * claims one item when ready; the lease covers its request and database work;
+     * `LEASE_SECONDS` must cover the claimed-item budget or boot refuses it;
+     * no waiting batch member holds a lease.
      * A failed task is retried after `BACKOFF_SECONDS`, doubling to `BACKOFF_MAX_SECONDS`.
      */
     CONSTRUCTION_RECONCILE_INTERVAL_MS: boundedWholeNumberEnv(500, 300_000, 5000),
@@ -425,7 +429,7 @@ export const constructionEnvSchema = baseEnvSchema
      * in one short transaction (no network call), so a tender is closed at most one
      * interval late — which only delays the state: a bid after the deadline is refused
      * by the database's clock whether or not the sweeper has run. `LEASE_SECONDS` must
-     * exceed one sweep (`BATCH_SIZE` × a close, milliseconds each); a tender whose
+     * cover one claimed item (claim, close, failure recording and margin); a tender whose
      * close failed is claimed again when its lease runs out.
      */
     CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS: boundedWholeNumberEnv(500, 300_000, 5000),
@@ -449,7 +453,7 @@ export const constructionEnvSchema = baseEnvSchema
      * sweeper's shape: a sweep every `INTERVAL_MS` claims at most `BATCH_SIZE` pending checks under a
      * lease of `LEASE_SECONDS` and a fencing token, asks supplier-service about each winner (a network
      * call, outside any transaction) and settles each in one short transaction. `LEASE_SECONDS` must
-     * exceed one sweep (`BATCH_SIZE` × the supplier request timeout). A check whose answer could not be
+     * cover one claimed item (claim, request, settle, failure recording and margin). A check whose answer could not be
      * had is not claimed again for `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^attempts)`.
      * `ALERT_AGE_SECONDS`: a check still PENDING past this age is counted by the overdue gauge, which
      * `RastaConstructionAwardStandingCheckOverdue` alerts on.
@@ -609,6 +613,20 @@ export const constructionEnvSchema = baseEnvSchema
   // CURRENT that is not among them — or a CURRENT with no keys — used to pass
   // startup and fail only when a tender was first published. Judged together, here.
   .superRefine((env, ctx) => {
+    const transactionMs = env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS;
+    for (const [field, requestMs] of [
+      ['CONSTRUCTION_RECONCILE_LEASE_SECONDS', env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS],
+      ['CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS', 0],
+      ['CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS', env.CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS],
+    ] as const) {
+      if (env[field] * 1000 <= claimedItemBudgetMs(transactionMs, requestMs))
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: SWEEP_LEASE_TOO_SHORT,
+        });
+    }
+
     if (env.CONSTRUCTION_EVALUATION_MIN_EVALUATORS > env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

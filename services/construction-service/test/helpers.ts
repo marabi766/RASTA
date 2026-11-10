@@ -2,7 +2,7 @@ import { eligibilityClockSql } from '@rasta/testing';
 import { setEligibilityFixture } from '@rasta/testing';
 import { ProcurementThresholdPolicy } from '../src/organization/procurement-threshold-policy';
 import type { ThresholdPolicy } from '../src/tender/procurement-thresholds';
-import { withUtcSession } from '@rasta/config';
+import { claimedItemBudgetMs, withUtcSession } from '@rasta/config';
 import {
   RastaError,
   getContext,
@@ -185,6 +185,7 @@ const TEST_SWEEPER: SweeperOptions = {
   intervalMs: 60_000,
   batchSize: 500,
   leaseSeconds: 120,
+  processingBudgetMs: 55_000,
   backoffSeconds: 30,
   backoffMaxSeconds: 900,
 };
@@ -357,7 +358,14 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       reconciliations,
       suspension,
       hierarchy as unknown as OrganizationDirectory,
-      { ...TEST_SWEEPER, ...overrides },
+      {
+        ...TEST_SWEEPER,
+        processingBudgetMs: claimedItemBudgetMs(
+          env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+          env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS,
+        ),
+        ...overrides,
+      },
     );
   const tenderCloses = new TenderCloseRepository(prisma);
   const bidAudit = new BidAccessAudit(bidRepository, events);
@@ -370,6 +378,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       intervalMs: 60_000,
       batchSize: 500,
       leaseSeconds: 60,
+      processingBudgetMs: claimedItemBudgetMs(env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS),
       retryBackoffBaseSeconds: 10,
       retryBackoffMaxSeconds: 900,
       ...overrides,
@@ -385,6 +394,10 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     new AwardStandingCheckSweeper(awardChecks, awardCheckService, {
       intervalMs: 60_000,
       batchSize: 50,
+      processingBudgetMs: claimedItemBudgetMs(
+        env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+        env.CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS,
+      ),
       leaseSeconds: 60,
       retryBackoffBaseSeconds: 30,
       retryBackoffMaxSeconds: 900,

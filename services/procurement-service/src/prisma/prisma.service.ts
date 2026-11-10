@@ -1,3 +1,7 @@
+import {
+  CLAIM_TRANSACTION_MAX_WAIT_MS,
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+} from '@rasta/config';
 import { createSafePrismaClient } from '@rasta/nest-common';
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
@@ -61,6 +65,10 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
       () =>
         new PrismaClient({
           datasources: { db: { url: databaseUrl } },
+          transactionOptions: {
+            timeout: PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+            maxWait: CLAIM_TRANSACTION_MAX_WAIT_MS,
+          },
           log: [
             { emit: 'event', level: 'warn' },
             { emit: 'event', level: 'error' },

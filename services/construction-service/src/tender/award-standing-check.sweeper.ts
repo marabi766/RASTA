@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import { claimWhenReady, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { awardStandingChecksTotal } from '../observability/metrics';
@@ -18,6 +18,7 @@ export interface AwardStandingCheckSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the check back. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A check supplier-service could not answer waits `min(max, base × 2^attempts)` seconds. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -35,7 +36,7 @@ export interface AwardStandingCheckOutcome {
 
 /**
  * Makes the standing check after every award (ADR-067 § 3, residual), the same shape as
- * `TenderCloseSweeper`: each sweep claims a bounded batch of PENDING checks in one statement
+ * `TenderCloseSweeper`: each sweep claims up to a bounded batch, one item when ready, of PENDING checks in one statement
  * (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any number of instances may run, then
  * asks supplier-service about each winner outside any transaction and settles each in its own short
  * one, in the award's own tenant, via `AwardStandingCheckService`.
@@ -114,14 +115,15 @@ export class AwardStandingCheckSweeper {
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
   async runOnce(tenderId?: string): Promise<AwardStandingCheckOutcome> {
-    const claimed = await this.checks.claimDue(
+    const claimed = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      ulid(),
-      tenderId,
+      () => this.stopped,
+      () => this.checks.claimDue(1, this.options.leaseSeconds, ulid(), tenderId),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: AwardStandingCheckOutcome = {
-      claimed: claimed.length,
+      claimed: 0,
       clear: 0,
       conflict: 0,
       retry: 0,
@@ -138,8 +140,9 @@ export class AwardStandingCheckSweeper {
       maxSeconds: this.options.retryBackoffMaxSeconds,
     };
 
-    for (const claim of claimed) {
-      // Stopping: the rest stay claimed until their lease runs out, then any sweep takes them.
+    for await (const claim of claimed) {
+      outcome.claimed += 1;
+      // Stopping: only this item holds a claim; later items have not been claimed.
       if (this.stopped) break;
       try {
         outcome[COUNTED[await this.service.process(claim, backoff)]] += 1;

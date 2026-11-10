@@ -1,5 +1,10 @@
 import { Logger } from '@nestjs/common';
-import { RastaError, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import {
+  RastaError,
+  claimWhenReady,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { rfqCloseSweepTotal } from '../observability/metrics';
@@ -13,6 +18,7 @@ export interface RfqCloseSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the RFQ. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A failed RFQ waits `min(max, base × 2^attempts)` seconds before it is claimed again. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -52,7 +58,7 @@ const METRIC_RESULT: Record<RfqCloseResult, string> = {
  * Closes the RFQs whose quotation deadline has passed (ADR-070 § 3, plan PR 6), so an RFQ is CLOSED
  * on time whether or not a person of the buyer closes it — the shape of the aggregation window
  * sweeper (plan PR 2) and of construction's `TenderCloseSweeper` (ADR-065 § 3). Each sweep claims a
- * bounded batch in one statement (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any
+ * bounded number, one when ready, in one statement (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any
  * number of instances may run, and closes each in a transaction of its own, in the RFQ's own
  * tenant, via `RfqCloseService`.
  *
@@ -122,14 +128,15 @@ export class RfqCloseSweeper {
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
   async runOnce(): Promise<RfqCloseSweepOutcome> {
-    const fence = ulid();
-    const claimed = await this.rfqs.claimDue(
+    const claimed = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      fence,
+      () => this.stopped,
+      () => this.rfqs.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: RfqCloseSweepOutcome = {
-      claimed: claimed.length,
+      claimed: 0,
       closed: 0,
       noop: 0,
       notDue: 0,
@@ -137,7 +144,8 @@ export class RfqCloseSweeper {
       failed: 0,
     };
 
-    for (const rfq of claimed) {
+    for await (const rfq of claimed) {
+      outcome.claimed += 1;
       // Stopping: the RFQ keeps its claim until the lease runs out, then any sweep takes it.
       if (this.stopped) break;
       const target = { organizationId: rfq.organizationId, rfqId: rfq.id, fence: rfq.fence };

@@ -1,5 +1,11 @@
 import { Logger } from '@nestjs/common';
-import { RastaError, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import {
+  RastaError,
+  claimWhenReady,
+  hasClaimBudget,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { windowSweepTotal } from '../observability/metrics';
@@ -13,6 +19,7 @@ export interface AggregationWindowSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the window; renewed by every step. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A failed window waits `min(max, base × 2^attempts)` seconds before it is claimed again. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -55,7 +62,7 @@ const METRIC_RESULT: Record<SweepResult, string> = {
 /**
  * Ends the aggregation windows whose `closes_at` has passed (ADR-070 § 2, plan PR 2), so a window
  * ends on time whether or not another demand for its product ever arrives — the shape of
- * construction's `TenderCloseSweeper` (ADR-065 § 3). Each sweep claims a bounded batch of windows
+ * construction's `TenderCloseSweeper` (ADR-065 § 3). Each sweep claims a bounded number of windows, one when ready,
  * in one statement (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any number of
  * instances may run, and sweeps each in short transactions of its own, in the window's own tenant,
  * via `WindowSweepService`: the end, then — for a window of more demands than one batch — one
@@ -137,14 +144,15 @@ export class AggregationWindowSweeper {
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
   async runOnce(): Promise<WindowSweepOutcome> {
-    const fence = ulid();
-    const claimed = await this.sweeps.claimDue(
+    const claimed = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      fence,
+      () => this.stopped,
+      () => this.sweeps.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: WindowSweepOutcome = {
-      claimed: claimed.length,
+      claimed: 0,
       ended: 0,
       followed: 0,
       noop: 0,
@@ -153,7 +161,8 @@ export class AggregationWindowSweeper {
       failed: 0,
     };
 
-    for (const window of claimed) {
+    for await (const window of claimed) {
+      outcome.claimed += 1;
       const target = {
         organizationId: window.organizationId,
         aggregationId: window.id,
@@ -164,10 +173,15 @@ export class AggregationWindowSweeper {
         // Stopping: the window keeps its claim until the lease runs out, then any sweep takes it.
         if (this.stopped) break;
         try {
+          const started = performance.now();
           const step = await this.service.step(target, this.options.leaseSeconds);
           outcome[COUNTED[step.result]] += 1;
           windowSweepTotal.inc({ service: SERVICE_NAME, result: METRIC_RESULT[step.result] });
           if (!step.pending) break;
+          if (!hasClaimBudget(started, this.options)) {
+            this.logger.warn('Renewal acknowledgement left insufficient lease; waiting for expiry');
+            break;
+          }
         } catch (error) {
           outcome.failed += 1;
           windowSweepTotal.inc({ service: SERVICE_NAME, result: 'failed' });

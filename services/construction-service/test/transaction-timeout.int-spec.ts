@@ -393,7 +393,13 @@ describe('the interactive transaction timeout', () => {
 
   it('wires a value set explicitly — both bounds and one above the default — and commits on it', async () => {
     for (const ms of [5_000, 30_000, 60_000]) {
-      const env = testEnv({ CONSTRUCTION_TRANSACTION_TIMEOUT_MS: String(ms) });
+      const env = testEnv({
+        CONSTRUCTION_TRANSACTION_TIMEOUT_MS: String(ms),
+        // FU-320: longer transaction bounds require feasible sweeper leases too.
+        CONSTRUCTION_RECONCILE_LEASE_SECONDS: '300',
+        CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '300',
+        CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '300',
+      });
       expect(await commitsOn(env)).toEqual([ms, ms]);
     }
   });

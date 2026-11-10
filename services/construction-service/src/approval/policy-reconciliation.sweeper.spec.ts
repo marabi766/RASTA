@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import type { OrganizationDirectory } from '../organization/organization-directory';
 import type {
   ClaimedTask,
@@ -30,7 +31,7 @@ const task = (id: string, organizationId: string): ClaimedTask => ({
 
 function build(tasks: ClaimedTask[]) {
   const reconciliations = {
-    claimDue: jest.fn(async () => tasks),
+    claimDue: jest.fn(async (limit: number) => tasks.splice(0, limit)),
     markDone: jest.fn(async () => true),
     backlog: jest.fn(async () => ({ open: 1, due: 1, oldestDueAgeSeconds: 1 })),
   };
@@ -42,6 +43,7 @@ function build(tasks: ClaimedTask[]) {
     {
       intervalMs: INTERVAL_MS,
       batchSize: 10,
+      processingBudgetMs: 10_000,
       leaseSeconds: 60,
       backoffSeconds: 30,
       backoffMaxSeconds: 100,
@@ -51,6 +53,19 @@ function build(tasks: ClaimedTask[]) {
 }
 
 describe('PolicyReconciliationSweeper.stop', () => {
+  it.each([50001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, reconciliations, directory } = build([task('A', 'ORG_A')]);
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        reconciliations.claimDue,
+        await reconciliations.claimDue(1),
+        directory.isWithin,
+        elapsed,
+      );
+    },
+  );
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
@@ -69,6 +84,40 @@ describe('PolicyReconciliationSweeper.stop', () => {
     expect(built.directory.isWithin).toHaveBeenCalledTimes(1);
     return { ...built, answer: () => answer() };
   }
+
+  it('rechecks a requeued generation instead of reusing the preceding claim answer', async () => {
+    const { sweeper, reconciliations, directory } = build([
+      task('A', 'ORG_A'),
+      { ...task('A', 'ORG_A'), generation: 1 },
+    ]);
+    reconciliations.markDone.mockResolvedValueOnce(false);
+    expect(await sweeper.runOnce()).toMatchObject({ requeued: 1, confirmed: 1 });
+    expect(directory.isWithin).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
+    jest.useFakeTimers();
+    try {
+      const { sweeper, reconciliations, directory } = build([
+        task('A', 'ORG_A'),
+        task('B', 'ORG_B'),
+      ]);
+      const originalClaim = reconciliations.claimDue.getMockImplementation()!;
+      const times: number[] = [];
+      reconciliations.claimDue.mockImplementation(async (limit: number) => {
+        times.push(Date.now());
+        return originalClaim(limit);
+      });
+      directory.isWithin.mockImplementation(async () => {
+        jest.setSystemTime(Date.now() + 11_000);
+        return true;
+      });
+      expect((await sweeper.runOnce()).confirmed).toBe(2);
+      expect(times[1]! - times[0]!).toBe(11_000);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 
   it('starts no further task once stopping, and waits for the one in flight', async () => {
     const { sweeper, reconciliations, directory, answer } = await heldInTheFirstTask();
