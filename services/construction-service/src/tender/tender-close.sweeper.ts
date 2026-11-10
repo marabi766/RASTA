@@ -1,5 +1,10 @@
 import { Logger } from '@nestjs/common';
-import { RastaError, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import {
+  RastaError,
+  claimWhenReady,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { tenderCloseTotal } from '../observability/metrics';
@@ -13,6 +18,7 @@ export interface TenderCloseSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the tender back. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A failed tender waits `min(max, base × 2^attempts)` seconds before it is claimed again. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -49,7 +55,7 @@ const METRIC_RESULT: Record<CloseResult, string> = {
 
 /**
  * Closes the tenders whose bidding window has ended (ADR-065 § 3), the same shape
- * as `PolicyReconciliationSweeper`: each sweep claims a bounded batch of PUBLISHED
+ * as `PolicyReconciliationSweeper`: each sweep claims up to a bounded batch, one item when ready, of PUBLISHED
  * tenders past `bid_closing_at` in one statement (`FOR UPDATE SKIP LOCKED`, a lease
  * and a fencing token), so any number of instances may run, and closes each in its
  * own short transaction, in the tender's own tenant, via `TenderCloseService`.
@@ -133,14 +139,15 @@ export class TenderCloseSweeper {
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
   async runOnce(): Promise<TenderCloseOutcome> {
-    const fence = ulid();
-    const claimed = await this.closes.claimDue(
+    const claimed = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      fence,
+      () => this.stopped,
+      () => this.closes.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: TenderCloseOutcome = {
-      claimed: claimed.length,
+      claimed: 0,
       closed: 0,
       noop: 0,
       notDue: 0,
@@ -148,8 +155,9 @@ export class TenderCloseSweeper {
       failed: 0,
     };
 
-    for (const tender of claimed) {
-      // Stopping: the rest stay claimed until their lease runs out, then any sweep takes them.
+    for await (const tender of claimed) {
+      outcome.claimed += 1;
+      // Stopping: only this item holds a claim; later items have not been claimed.
       if (this.stopped) break;
       try {
         const result = await this.service.close({

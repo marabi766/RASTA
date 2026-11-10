@@ -63,8 +63,9 @@ export class AwardStandingCheckRepository {
     return runUnscoped(
       'the standing-check sweeper claims the pending checks of every tenant; each is settled in its own tenant (ADR-067 § 3)',
       () =>
-        this.prisma.client.$queryRawUnsafe<ClaimedCheck[]>(
-          `UPDATE "tender_award_standing_check"
+        this.prisma.transaction((tx) =>
+          tx.$queryRawUnsafe<ClaimedCheck[]>(
+            `UPDATE "tender_award_standing_check"
               SET "lease_until" = clock_timestamp() + ($2::int * interval '1 second'),
                   "fence" = $3
             WHERE "id" IN (
@@ -80,10 +81,11 @@ export class AwardStandingCheckRepository {
                   "project_id" AS "projectId", "bid_id" AS "bidId",
                   "winner_organization_id" AS "winnerOrganizationId", "awarded_by" AS "awardedBy",
                   "awarded_at" AS "awardedAt", "window_start" AS "windowStart", "fence", "attempts"`,
-          limit,
-          leaseSeconds,
-          fence,
-          tenderId ?? null,
+            limit,
+            leaseSeconds,
+            fence,
+            tenderId ?? null,
+          ),
         ),
     );
   }

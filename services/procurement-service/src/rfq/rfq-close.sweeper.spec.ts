@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import { RastaError } from '@rasta/nest-common';
 import type { ClaimedRfq, RfqRepository } from './rfq.repository';
 import type { RfqCloseResult, RfqCloseService, RfqCloseTarget } from './rfq-close.service';
@@ -12,7 +13,7 @@ import { RfqCloseSweeper } from './rfq-close.sweeper';
 const claim = (id: string): ClaimedRfq => ({ id, organizationId: `ORG_${id}`, fence: 'F1' });
 
 function sweeperWith(claimed: ClaimedRfq[], results: Record<string, RfqCloseResult | Error>) {
-  const claimDue = jest.fn().mockResolvedValue(claimed);
+  const claimDue = jest.fn(async (limit: number) => claimed.splice(0, limit));
   const close = jest.fn(async (target: RfqCloseTarget) => {
     const answer = results[target.rfqId] ?? 'CLOSED';
     if (answer instanceof Error) throw answer;
@@ -25,6 +26,7 @@ function sweeperWith(claimed: ClaimedRfq[], results: Record<string, RfqCloseResu
     {
       intervalMs: 5000,
       batchSize: 7,
+      processingBudgetMs: 10_000,
       leaseSeconds: 45,
       retryBackoffBaseSeconds: 10,
       retryBackoffMaxSeconds: 900,
@@ -34,7 +36,41 @@ function sweeperWith(claimed: ClaimedRfq[], results: Record<string, RfqCloseResu
 }
 
 describe('RfqCloseSweeper', () => {
-  it('claims at most the configured batch, for the configured lease, under one fence', async () => {
+  it.each([35001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, claimDue, close } = sweeperWith([claim('A')], {});
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        claimDue,
+        await claimDue(1),
+        close,
+        elapsed,
+      );
+    },
+  );
+  it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
+    jest.useFakeTimers();
+    try {
+      const { sweeper, claimDue, close } = sweeperWith([claim('A'), claim('B')], {});
+      const originalClaim = claimDue.getMockImplementation()!;
+      const times: number[] = [];
+      claimDue.mockImplementation(async (limit: number) => {
+        times.push(Date.now());
+        return originalClaim(limit);
+      });
+      close.mockImplementation(async (_target) => {
+        jest.setSystemTime(Date.now() + 11_000);
+        return 'CLOSED';
+      });
+      expect((await sweeper.runOnce()).closed).toBe(2);
+      expect(times[1]! - times[0]!).toBe(11_000);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('claims at most the configured batch, for the configured lease, one when ready', async () => {
     const { sweeper, claimDue } = sweeperWith([], {});
 
     expect(await sweeper.runOnce()).toEqual({
@@ -45,7 +81,7 @@ describe('RfqCloseSweeper', () => {
       lost: 0,
       failed: 0,
     });
-    expect(claimDue).toHaveBeenCalledWith(7, 45, expect.stringMatching(/^[0-9A-Z]{26}$/));
+    expect(claimDue).toHaveBeenCalledWith(1, 45, expect.stringMatching(/^[0-9A-Z]{26}$/));
   });
 
   it('closes each claimed RFQ in its own organization under the fence it claimed with, and counts each result', async () => {
@@ -88,7 +124,7 @@ describe('RfqCloseSweeper', () => {
     await sweeper.stop({ deadlineAt: Date.now() + 1000 });
     sweeper.start();
 
-    expect(await sweeper.runOnce()).toMatchObject({ claimed: 1, closed: 0 });
+    expect(await sweeper.runOnce()).toMatchObject({ claimed: 0, closed: 0 });
     expect(close).not.toHaveBeenCalled();
     await expect(sweeper.stop()).resolves.toBeUndefined();
   });

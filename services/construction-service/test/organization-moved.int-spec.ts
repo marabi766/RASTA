@@ -455,7 +455,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       });
     });
 
-    it('asks once per (union, organization) in a sweep however many policies name them', async () => {
+    it('asks afresh for each just-in-time claim, including policies of the same organization', async () => {
       const { union, county } = tree();
       await inForce(union, county, 'project.execution');
       await inForce(union, county, 'project.completion');
@@ -465,6 +465,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       await w.sweeper.runOnce();
 
       expect(w.hierarchy.asked.filter(([scope, id]) => scope === union && id === county)).toEqual([
+        [union, county],
         [union, county],
       ]);
     });
@@ -782,7 +783,8 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
         return within;
       });
 
-      const first = await w.sweeper.runOnce();
+      const sweeper = w.sweeperWith({ batchSize: 1 });
+      const first = await sweeper.runOnce();
       expect(first.requeued).toBeGreaterThanOrEqual(1);
       expect(await statusOf(policyId)).toBe('ACTIVE');
       // Not finished, not lost: open, generation bumped, no lease, due now.
@@ -792,7 +794,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
         leaseToken: null,
       });
 
-      await w.sweeper.runOnce();
+      await sweeper.runOnce();
       expect(await statusOf(policyId)).toBe('SUSPENDED');
       expect((await tasksOf(policyId))[0]).toMatchObject({ status: 'DONE' });
       expect((await suspensions(county)).length).toBe(1);

@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import type { ClaimedWindow, WindowSweepRepository } from './window-sweep.repository';
 import type { SweepStep, SweepTarget, WindowSweepService } from './window-sweep.service';
 import { AggregationWindowSweeper } from './aggregation-window.sweeper';
@@ -14,7 +15,7 @@ const step = (result: SweepStep['result'], pending = false): SweepStep => ({ res
 
 /** Each window answers its steps in order; an `Error` is a failed step. */
 function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep | Error)[]>) {
-  const claimDue = jest.fn().mockResolvedValue(claimed);
+  const claimDue = jest.fn(async (limit: number) => claimed.splice(0, limit));
   const taken = new Map<string, number>();
   const stepFn = jest.fn(async (target: SweepTarget) => {
     const index = taken.get(target.aggregationId) ?? 0;
@@ -30,6 +31,7 @@ function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep 
     {
       intervalMs: 5000,
       batchSize: 7,
+      processingBudgetMs: 10_000,
       leaseSeconds: 45,
       retryBackoffBaseSeconds: 10,
       retryBackoffMaxSeconds: 900,
@@ -41,12 +43,57 @@ function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep 
 const NONE = { claimed: 0, ended: 0, followed: 0, noop: 0, notDue: 0, lost: 0, failed: 0 };
 
 describe('AggregationWindowSweeper', () => {
-  it('claims at most the configured batch, for the configured lease, under one fence', async () => {
+  it.each([35001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, claimDue, step } = sweeperWith([claim('A')], {});
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        claimDue,
+        await claimDue(1),
+        step,
+        elapsed,
+      );
+    },
+  );
+  it('refuses another step after a delayed renewal acknowledgement', async () => {
+    const { sweeper, step: stepFn } = sweeperWith([claim('A')], {});
+    await expectLateAcknowledgementIgnored(
+      () => sweeper.runOnce(),
+      stepFn,
+      step('ENDED', true),
+      stepFn,
+      35001,
+      1,
+    );
+  });
+  it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
+    jest.useFakeTimers();
+    try {
+      const { sweeper, claimDue, step: stepFn } = sweeperWith([claim('A'), claim('B')], {});
+      const originalClaim = claimDue.getMockImplementation()!;
+      const times: number[] = [];
+      claimDue.mockImplementation(async (limit: number) => {
+        times.push(Date.now());
+        return originalClaim(limit);
+      });
+      stepFn.mockImplementation(async (_target) => {
+        jest.setSystemTime(Date.now() + 11_000);
+        return step('ENDED');
+      });
+      expect((await sweeper.runOnce()).ended).toBe(2);
+      expect(times[1]! - times[0]!).toBe(11_000);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('claims at most the configured batch, for the configured lease, one when ready', async () => {
     const { sweeper, claimDue } = sweeperWith([], {});
 
     await sweeper.runOnce();
 
-    expect(claimDue).toHaveBeenCalledWith(7, 45, expect.stringMatching(/^[0-9A-Z]{26}$/));
+    expect(claimDue).toHaveBeenCalledWith(1, 45, expect.stringMatching(/^[0-9A-Z]{26}$/));
   });
 
   it('sweeps each claimed window in its own organization, under the fence it claimed with, renewing with the lease', async () => {

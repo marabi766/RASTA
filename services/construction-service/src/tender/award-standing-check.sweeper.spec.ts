@@ -1,3 +1,4 @@
+import { expectLateAcknowledgementIgnored } from '@rasta/testing';
 import type { AwardStandingCheckRepository, ClaimedCheck } from './award-standing-check.repository';
 import type {
   AwardStandingCheckService,
@@ -29,7 +30,7 @@ const claim = (id: string): ClaimedCheck => ({
 });
 
 function sweeperWith(claimed: ClaimedCheck[]) {
-  const claimDue = jest.fn(async () => claimed);
+  const claimDue = jest.fn(async (limit: number) => claimed.splice(0, limit));
   const process = jest.fn(async (_claim: ClaimedCheck): Promise<StandingCheckResult> => 'CLEAR');
   const recordFailure = jest.fn(async () => undefined);
   const sweeper = new AwardStandingCheckSweeper(
@@ -38,6 +39,7 @@ function sweeperWith(claimed: ClaimedCheck[]) {
     {
       intervalMs: INTERVAL_MS,
       batchSize: 7,
+      processingBudgetMs: 10_000,
       leaseSeconds: 45,
       retryBackoffBaseSeconds: 10,
       retryBackoffMaxSeconds: 900,
@@ -47,6 +49,19 @@ function sweeperWith(claimed: ClaimedCheck[]) {
 }
 
 describe('AwardStandingCheckSweeper.stop', () => {
+  it.each([35001, 120001])(
+    'discards a delayed commit acknowledgement at %i ms',
+    async (elapsed) => {
+      const { sweeper, claimDue, process } = sweeperWith([claim('A')]);
+      await expectLateAcknowledgementIgnored(
+        () => sweeper.runOnce(),
+        claimDue,
+        await claimDue(1),
+        process,
+        elapsed,
+      );
+    },
+  );
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
@@ -65,6 +80,27 @@ describe('AwardStandingCheckSweeper.stop', () => {
     expect(built.process).toHaveBeenCalledTimes(1);
     return { ...built, finish: () => finish() };
   }
+
+  it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
+    jest.useFakeTimers();
+    try {
+      const { sweeper, claimDue, process } = sweeperWith([claim('A'), claim('B')]);
+      const originalClaim = claimDue.getMockImplementation()!;
+      const times: number[] = [];
+      claimDue.mockImplementation(async (limit: number) => {
+        times.push(Date.now());
+        return originalClaim(limit);
+      });
+      process.mockImplementation(async (_target) => {
+        jest.setSystemTime(Date.now() + 11_000);
+        return 'CLEAR';
+      });
+      expect((await sweeper.runOnce()).clear).toBe(2);
+      expect(times[1]! - times[0]!).toBe(11_000);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 
   it('starts no further check once stopping, and waits for the one being made', async () => {
     const { sweeper, process, finish } = await heldInTheFirstCheck();

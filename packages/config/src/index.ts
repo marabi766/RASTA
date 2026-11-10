@@ -125,3 +125,5 @@ export {
   refuseAlteredEnvironment,
   refusedBeforeSending,
 } from './credential-environment';
+
+export { CLAIM_TRANSACTION_MAX_WAIT_MS, claimedItemBudgetMs } from './claimed-item-budget';
