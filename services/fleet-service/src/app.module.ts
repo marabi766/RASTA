@@ -325,12 +325,20 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
       // D-052: the relay, the purge and the asset-sync consumer stop together
       // in the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, AssetSyncConsumer, KafkaEventPublisher, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        AssetSyncConsumer,
+        KafkaEventPublisher,
+        PrismaService,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         assetSync: AssetSyncConsumer,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: FleetEnv,
       ) =>
         new OutboxShutdown({
@@ -339,6 +347,7 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
           workers: [assetSync],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

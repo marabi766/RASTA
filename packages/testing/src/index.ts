@@ -137,4 +137,4 @@ export {
   expectAbandonedWorkerDrops,
 } from './late-acknowledgement';
 
-export { describeDatabaseTeardown } from './database-teardown';
+export { describeDatabaseTeardown, coordinateDatabaseTeardown } from './database-teardown';

@@ -20,7 +20,7 @@ class Signal implements SamplingSignal {
 
 /**
  * A periodic sample whose work is **tracked**: `stop()` ends the scheduling, and resolves
- * only when the sample in flight has finished (or after `deadlineMs`, whichever is first).
+ * only when the sample in flight has finished or the earliest stop deadline expires.
  *
  * The monitors used to `void this.sample()` and clear only the timer on destroy, so a sample
  * whose first query was still running went on to its second after the database client had
@@ -38,6 +38,9 @@ export class SamplingLoop {
   private timer?: NodeJS.Timeout;
   private active?: Promise<void>;
   private stopping?: Promise<void>;
+  private stopDeadlineAt = Infinity;
+  private deadlineTimer?: NodeJS.Timeout;
+  private finishStop?: () => void;
   /** Becomes abandoned when the shutdown deadline expires with a sample still in flight. */
   private readonly signal = new Signal();
 
@@ -54,9 +57,38 @@ export class SamplingLoop {
     this.timer.unref?.();
   }
 
-  /** Idempotent: every caller gets the same bounded wait. */
-  stop(): Promise<void> {
-    this.stopping ??= this.drain();
+  /** Every caller joins one wait; a later stop can shorten its deadline, never extend it. */
+  stop(options: { deadlineAt?: number } = {}): Promise<void> {
+    const fallback = Date.now() + this.deadlineMs;
+    const requested = options.deadlineAt ?? fallback;
+    this.stopDeadlineAt = Math.min(
+      this.stopDeadlineAt,
+      Number.isFinite(requested) ? requested : Date.now(),
+    );
+    if (!this.stopping) {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = undefined;
+      this.stopping = new Promise<void>((resolve) => {
+        this.finishStop = () => {
+          if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
+          this.finishStop = undefined;
+          resolve();
+        };
+      });
+      if (this.active) void this.active.then(() => this.finishStop?.());
+      else this.finishStop?.();
+    }
+    if (this.finishStop) {
+      if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
+      const abandon = (): void => {
+        // Synchronous even for an already expired deadline: disconnect may follow immediately.
+        this.signal.abandoned = true;
+        this.finishStop?.();
+      };
+      const remaining = this.stopDeadlineAt - Date.now();
+      if (remaining <= 0) abandon();
+      else this.deadlineTimer = setTimeout(abandon, remaining);
+    }
     return this.stopping;
   }
 
@@ -70,24 +102,5 @@ export class SamplingLoop {
         if (this.active === run) this.active = undefined;
       });
     this.active = run;
-  }
-
-  private async drain(): Promise<void> {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-    const active = this.active;
-    if (!active) return;
-    let deadline: NodeJS.Timeout | undefined;
-    const expired = new Promise<void>((resolve) => {
-      deadline = setTimeout(resolve, this.deadlineMs);
-    });
-    try {
-      await Promise.race([active, expired]);
-    } finally {
-      // Still running at the deadline: whatever it resumes must do no work (and the flag
-      // is set before this returns, hence before the client disconnects).
-      if (this.active === active) this.signal.abandoned = true;
-      if (deadline) clearTimeout(deadline);
-    }
   }
 }

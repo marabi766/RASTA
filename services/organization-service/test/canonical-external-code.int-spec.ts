@@ -32,7 +32,7 @@ describe('the canonical external code (FU-084)', () => {
   });
 
   afterAll(async () => {
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   });
 
   it.each([

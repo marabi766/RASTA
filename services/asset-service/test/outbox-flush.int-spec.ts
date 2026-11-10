@@ -57,7 +57,7 @@ describe('outbox:flush (#240 r5)', () => {
 
   afterAll(async () => {
     await prisma.client.$executeRaw`DELETE FROM outbox_message WHERE organization_id = ${org.a}`;
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('publishes unpublished rows and ends with none left, opening no listener', async () => {

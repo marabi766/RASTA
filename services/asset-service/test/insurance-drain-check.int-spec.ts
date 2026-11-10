@@ -34,7 +34,7 @@ describe('insurance:drain-check — outbox (#240 r5)', () => {
   afterAll(async () => {
     await prisma.client.$executeRaw`
       DELETE FROM outbox_message WHERE organization_id = ANY(${[org.a, org.b]}::text[])`;
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('reports drained when the organization has no unpublished row', async () => {

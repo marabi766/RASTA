@@ -16,6 +16,7 @@ const reporters = [
   ['fleet', 'fleet/drain-check', 2],
   ['identity', 'keycloak/projection', 2],
   ['economic', 'transaction/resolved-dispute-backfill', 1],
+  ['marketplace', 'ops/hold-deadline-backfill', 1],
 ];
 
 // Real built entry points and their main/finally/exit decisions, with external
@@ -37,11 +38,12 @@ const fault = phase => {
 const report = { drained: process.env.PROBE_DRAINED !== 'false', unpublished: 1,
   scanned: 0, emitted: 0, alreadyEmitted: 0, notCounting: 0,
   cleared: 0, invalidated: 0, skipped: 0, published: 0, accounts: 0,
-  fences: { outstanding: 0 } };
+  fences: { outstanding: 0 }, assigned: [], refused: [], converged: true };
 class PrismaService {
   constructor() { this.client = {}; }
   async onModuleInit() { fault('connect'); }
   async onModuleDestroy() { fault('cleanup'); }
+  async stop() { fault('cleanup'); return { drained: process.env.PROBE_DB_DRAINED !== 'false' }; }
 }
 class Empty {}
 class Relay extends Empty {
@@ -54,6 +56,7 @@ const commandExports = {
   checkOutboxDrained: command, checkConsumerGroupDrained: command,
   flushOutbox: command, runProjectionCommand: command,
   backfillResolvedDisputes: command, backfillExitCode: () => 0,
+  backfillLegacyHoldDeadlines: command, parseBackfillArgs: () => ({}),
   parseResolvedDisputeBackfillArgs: () => ({}),
   isClean: () => true, PROJECTION_COMMAND_POOLS: {}, RECOVERY_STOP_MS: 1000,
   tearDownProjectionCommand: async () => { fault('cleanup');
@@ -72,11 +75,11 @@ Module._load = function(id, ...args) {
   }; } } };
   if (id.endsWith('/config/env')) return {
     SERVICE_NAME: 'probe', ASSET_SYNC_TOPICS: [], loadAssetEnv: env,
-    loadFleetEnv: env, loadIdentityEnv: env, loadEconomicEnv: env,
+    loadFleetEnv: env, loadIdentityEnv: env, loadEconomicEnv: env, loadMarketplaceEnv: env,
   };
   if (id.endsWith('/generated/prisma')) return { PrismaClient: Empty };
   if (id.endsWith('/prisma/prisma.service')) return { PrismaService };
-  if (id.endsWith('.command') || id === './resolved-dispute-backfill') return commandExports;
+  if (id.endsWith('.command') || id === './resolved-dispute-backfill' || id === './hold-deadline-backfill') return commandExports;
   if (id.endsWith('.args')) return { parseReprojectArgs: () => ({}), parseClearTransferredArgs: () => ({}) };
   if (id.endsWith('.repository')) return { AssetRepository: Empty, FleetRepository: Empty, IdentityRepository: Empty };
   if (id === './keycloak.client') return { KeycloakAdminClient: Empty };
@@ -89,7 +92,7 @@ Module._load = function(id, ...args) {
 function env() { return { DATABASE_URL: 'unused', KEYCLOAK_SYNC_ENABLED: true }; }
 `;
 
-function run(entry, phase, drained = true) {
+function run(entry, phase, drained = true, databaseDrained = true) {
   const dir = mkdtempSync(join(tmpdir(), 'command-disclosure-'));
   try {
     const preload = join(dir, 'hook.cjs');
@@ -101,7 +104,12 @@ function run(entry, phase, drained = true) {
         cwd: root,
         encoding: 'utf8',
         timeout: 15_000,
-        env: { ...process.env, PROBE_PHASE: phase, PROBE_DRAINED: String(drained) },
+        env: {
+          ...process.env,
+          PROBE_PHASE: phase,
+          PROBE_DRAINED: String(drained),
+          PROBE_DB_DRAINED: String(databaseDrained),
+        },
       },
     );
     assert.equal(result.error, undefined);
@@ -125,6 +133,19 @@ for (const [service, command, exit] of reporters) {
       assertNoSentinel(result.output);
     });
   }
+}
+
+for (const [service, command, exit] of reporters.filter(
+  ([service, command]) =>
+    service === 'asset' ||
+    service === 'marketplace' ||
+    (service === 'fleet' && command === 'fleet/clear-transferred'),
+)) {
+  test(`${service}/${command}: unconfirmed database close refuses success`, () => {
+    const result = run(`services/${service}-service/dist/${command}.cli.js`, 'none', true, false);
+    assert.equal(result.status, exit, result.output);
+    assert.match(result.stderr, /prior work may have committed/);
+  });
 }
 
 for (const service of ['asset', 'fleet']) {

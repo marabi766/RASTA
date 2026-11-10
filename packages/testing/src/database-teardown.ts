@@ -40,3 +40,44 @@ export function describeDatabaseTeardown(
     }
   });
 }
+
+/** Exercise the production coordinator factory, including its database phase ordering. */
+export function coordinateDatabaseTeardown(
+  providers: unknown,
+  databaseToken: object,
+  envToken: unknown,
+  shutdownToken: object,
+  pool: TeardownPool,
+): Promise<void> {
+  const provider = (
+    providers as {
+      provide?: object;
+      inject?: unknown[];
+      useFactory?: (...args: unknown[]) => { stop(): Promise<void> };
+    }[]
+  ).find((candidate) => candidate.provide === shutdownToken);
+  if (!provider?.useFactory || !provider.inject) throw new Error('Missing shutdown factory');
+  const { inject, useFactory } = provider;
+  expect(inject).toContain(databaseToken);
+  expect('onModuleDestroy' in pool).toBe(false);
+  const startedAt = Date.now();
+  const stops: unknown[] = [];
+  const args = inject.map((token) => {
+    if (token === envToken) return { SHUTDOWN_TIMEOUT_MS: 25_000 };
+    if (token === databaseToken)
+      return {
+        stop: (options?: { deadlineAt?: number }) => {
+          expect(stops).toHaveLength(inject.length - 2);
+          expect(options?.deadlineAt).toBe(startedAt + 23_000);
+          return pool.stop(options);
+        },
+      };
+    return {
+      stop: async () => {
+        if (token === inject[0]) await new Promise((resolve) => setTimeout(resolve, 22_000));
+        stops.push(token);
+      },
+    };
+  });
+  return useFactory(...args).stop();
+}

@@ -85,7 +85,7 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
     await owner.$disconnect();
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asBuyer = <T>(fn: () => Promise<T>) =>

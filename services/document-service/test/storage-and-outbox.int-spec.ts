@@ -308,7 +308,7 @@ describe('the outbox store, against a real database', () => {
     await runUnscoped('the suite removes the rows it created', () =>
       prisma.client.outboxMessage.deleteMany({ where: { organizationId } }),
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function seed(

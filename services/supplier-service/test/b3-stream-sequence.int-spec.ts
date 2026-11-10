@@ -61,7 +61,7 @@ describe('supplier stream sequencing', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   });
 
   function organization(): string {

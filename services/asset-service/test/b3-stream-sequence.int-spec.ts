@@ -33,7 +33,7 @@ describe('asset stream sequencing', () => {
   });
 
   afterAll(async () => {
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** The four places a sequence appears must all carry the same value. */

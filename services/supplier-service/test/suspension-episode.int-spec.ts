@@ -39,7 +39,7 @@ describe('a suspension command is bound to the episode it was decided on', () =>
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   });
 
   afterEach(() => {

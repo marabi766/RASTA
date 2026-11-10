@@ -32,7 +32,7 @@ describe('driver profile updates', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   beforeEach(async () => {

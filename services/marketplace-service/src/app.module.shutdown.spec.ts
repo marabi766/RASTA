@@ -1,3 +1,4 @@
+import { PrismaService } from './prisma/prisma.service';
 import 'reflect-metadata';
 import {
   OutboxPurgeScheduler,
@@ -63,6 +64,7 @@ describe('AppModule shutdown wiring (D-052)', () => {
       OrderSagaClient,
       ReturnMirrorConsumer,
       KafkaEventPublisher,
+      PrismaService,
     ];
     expect(new Set(inject)).toEqual(new Set([...expected, ENV]));
     expect(inject).toHaveLength(expected.length + 1);

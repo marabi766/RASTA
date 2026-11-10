@@ -63,7 +63,7 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
   });
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** FK-only parents: copy explicit non-clock fields; park saga eligibility on the DB clock. */

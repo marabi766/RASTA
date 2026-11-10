@@ -108,7 +108,7 @@ describe('organization hierarchy integrity', () => {
   });
 
   afterAll(async () => {
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   });
 
   // =========================================================================

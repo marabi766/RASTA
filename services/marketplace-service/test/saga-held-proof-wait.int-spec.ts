@@ -96,7 +96,7 @@ it('an order whose hold exists waits out an older economic-service, then adopts 
     );
   } finally {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
     await temporal.teardown();
   }
 }, 300_000);

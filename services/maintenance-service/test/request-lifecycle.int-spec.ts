@@ -40,7 +40,7 @@ describe('maintenance request lifecycle', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function machine(status = 'ACTIVE'): Promise<string> {

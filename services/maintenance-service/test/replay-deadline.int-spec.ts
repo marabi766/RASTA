@@ -139,7 +139,7 @@ describe('Idempotency-Replay-Deadline', () => {
   afterAll(async () => {
     await http?.close();
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const machine = async () => {

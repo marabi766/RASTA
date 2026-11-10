@@ -236,12 +236,20 @@ import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
       // consumer too (Codex r1 on #276): stopped later, in
       // `onApplicationShutdown`, its wait came on top of the relay's.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, PerformanceConsumer, KafkaEventPublisher, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PerformanceConsumer,
+        KafkaEventPublisher,
+        PrismaService,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         performance: PerformanceConsumer,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: SupplierEnv,
       ) =>
         new OutboxShutdown({
@@ -250,6 +258,7 @@ import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
           workers: [performance],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
