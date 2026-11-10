@@ -136,3 +136,5 @@ export {
   expectLateAcknowledgementIgnored,
   expectAbandonedWorkerDrops,
 } from './late-acknowledgement';
+
+export { describeDatabaseTeardown } from './database-teardown';

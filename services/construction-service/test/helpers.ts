@@ -569,7 +569,9 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       idempotency,
       approvalRepository,
     ),
-    close: () => prisma.stop(),
+    close: async () => {
+      await prisma.stop();
+    },
   };
 }
 
