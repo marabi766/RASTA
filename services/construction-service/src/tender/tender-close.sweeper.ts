@@ -1,3 +1,4 @@
+import { WorkerBoundary, workerOperation } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import {
   RastaError,
@@ -71,6 +72,7 @@ const METRIC_RESULT: Record<CloseResult, string> = {
  */
 export class TenderCloseSweeper {
   private readonly logger = new Logger(TenderCloseSweeper.name);
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
   private stopping?: Promise<void>;
@@ -108,10 +110,9 @@ export class TenderCloseSweeper {
    * the relay, a sweep kept writing outbox rows while the relay drained, and its
    * wait came on top of the relay's.
    *
-   * Past the deadline the sweep is abandoned with a warning: each close and its
-   * event commit in one transaction, so an exit rolls back the one in flight,
-   * and the lease lets the next sweep, anywhere, take it and the rest of the
-   * batch again. Without a deadline it waits. One stop per process.
+   * At the deadline the shared worker boundary refuses further database work and drops late
+   * results. Submitted operations remain unconfirmed; leases/fences govern recovery.
+   * Without a deadline it waits. One stop per process.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
@@ -120,25 +121,30 @@ export class TenderCloseSweeper {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
       return;
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
-        'Tender close sweep still running at the shutdown deadline; abandoned. The close in ' +
-          'flight rolls back and its lease lets the next sweep take it again',
+        'Sweep abandoned at shutdown deadline; in-flight outcome unconfirmed; lease/fence govern recovery',
       );
     }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
-  async runOnce(): Promise<TenderCloseOutcome> {
+  runOnce(): Promise<TenderCloseOutcome> {
+    return this.boundary.run(() => this.sweep());
+  }
+
+  private async sweep(): Promise<TenderCloseOutcome> {
     const claimed = claimWhenReady(
       this.options.batchSize,
       () => this.stopped,
@@ -160,14 +166,17 @@ export class TenderCloseSweeper {
       // Stopping: only this item holds a claim; later items have not been claimed.
       if (this.stopped) break;
       try {
-        const result = await this.service.close({
-          organizationId: tender.organizationId,
-          tenderId: tender.id,
-          fence: tender.fence,
-        });
+        const result = await workerOperation(() =>
+          this.service.close({
+            organizationId: tender.organizationId,
+            tenderId: tender.id,
+            fence: tender.fence,
+          }),
+        );
         outcome[COUNTED[result]] += 1;
         tenderCloseTotal.inc({ service: SERVICE_NAME, result: METRIC_RESULT[result] });
       } catch (error) {
+        if (this.boundary.abandoned) return outcome;
         outcome.failed += 1;
         tenderCloseTotal.inc({ service: SERVICE_NAME, result: 'failed' });
         this.logger.warn(
@@ -190,7 +199,7 @@ export class TenderCloseSweeper {
       }
     }
 
-    if (outcome.claimed > 0) {
+    if (outcome.claimed > 0 && !this.boundary.abandoned) {
       this.logger.log(
         `Tender close sweep: claimed ${outcome.claimed}, closed ${outcome.closed}, ` +
           `noop ${outcome.noop}, not due ${outcome.notDue}, lost ${outcome.lost}, failed ${outcome.failed}`,

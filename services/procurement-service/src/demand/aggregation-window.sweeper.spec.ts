@@ -1,4 +1,4 @@
-import { expectLateAcknowledgementIgnored } from '@rasta/testing';
+import { expectLateAcknowledgementIgnored, expectAbandonedWorkerDrops } from '@rasta/testing';
 import type { ClaimedWindow, WindowSweepRepository } from './window-sweep.repository';
 import type { SweepStep, SweepTarget, WindowSweepService } from './window-sweep.service';
 import { AggregationWindowSweeper } from './aggregation-window.sweeper';
@@ -43,6 +43,15 @@ function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep 
 const NONE = { claimed: 0, ended: 0, followed: 0, noop: 0, notDue: 0, lost: 0, failed: 0 };
 
 describe('AggregationWindowSweeper', () => {
+  it.each(['reject', 'resolve'] as const)(
+    'FU-321: drops late %s after stop returns',
+    async (how) => {
+      const h = sweeperWith([claim('A')], {});
+      await expectAbandonedWorkerDrops(h.sweeper, h.step, { result: 'ENDED', pending: true }, how, [
+        h.recordFailure,
+      ]);
+    },
+  );
   it.each([35001, 120001])(
     'discards a delayed commit acknowledgement at %i ms',
     async (elapsed) => {

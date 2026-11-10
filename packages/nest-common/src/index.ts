@@ -417,3 +417,10 @@ export {
 export type { CanonicalUniqueTextOptions } from './text/canonical-unique-text';
 
 export { claimWhenReady, hasClaimBudget } from './claim-when-ready';
+
+export {
+  WorkerBoundary,
+  WorkerAbandonedError,
+  assertWorkerActive,
+  workerOperation,
+} from './worker-boundary';
