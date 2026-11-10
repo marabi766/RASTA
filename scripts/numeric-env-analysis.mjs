@@ -250,7 +250,9 @@ export function analyzeNumericEnv(root, files, roots = envRoots(files)) {
         ts.isFunctionDeclaration(parent) &&
         ts.isSourceFile(parent.parent) &&
         parent.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
-        ['wholeNumberEnv', 'wholeBigintEnv', 'parseWholeNumber'].includes(parent.name?.text)
+        ['wholeNumberEnv', 'boundedWholeNumberEnv', 'wholeBigintEnv', 'parseWholeNumber'].includes(
+          parent.name?.text,
+        )
       )
         return relative(root, parent.getSourceFile().fileName) === 'packages/config/src/env.ts';
     }
@@ -563,7 +565,7 @@ export function analyzeNumericEnv(root, files, roots = envRoots(files)) {
       (symbol(node.expression)?.declarations ?? []).some(
         (decl) =>
           ts.isFunctionDeclaration(decl) &&
-          ['wholeNumberEnv', 'wholeBigintEnv'].includes(decl.name?.text) &&
+          ['wholeNumberEnv', 'boundedWholeNumberEnv', 'wholeBigintEnv'].includes(decl.name?.text) &&
           reviewed(decl),
       )
     )
