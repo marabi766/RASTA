@@ -787,6 +787,27 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
 // FU-299: strict syntax applies to every replay/lease/retention budget in this service.
 describe('strict whole-number timing budgets', () => {
   it.each([
+    ['CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS', 100, 60_000, 5000],
+    ['CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS', 100, 60_000, 5000],
+    ['CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS', 100, 60_000, 5000],
+    ['CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS', 100, 600_000, 15_000],
+    ['CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS', 100, 30_000, 3000],
+    ['CONSTRUCTION_RECONCILE_INTERVAL_MS', 500, 300_000, 5000],
+    ['CONSTRUCTION_RECONCILE_BATCH_SIZE', 1, 500, 20],
+    ['CONSTRUCTION_RECONCILE_BACKOFF_SECONDS', 1, 3600, 30],
+    ['CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS', 1, 86_400, 900],
+    ['CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS', 500, 300_000, 5000],
+    ['CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE', 1, 500, 20],
+    ['CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS', 1, 3600, 10],
+    ['CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS', 1, 86_400, 900],
+    ['CONSTRUCTION_AWARD_CHECK_INTERVAL_MS', 500, 300_000, 10_000],
+    ['CONSTRUCTION_AWARD_CHECK_BATCH_SIZE', 1, 100, 10],
+    ['CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS', 1, 3600, 10],
+    ['CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS', 1, 86_400, 900],
+    ['CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS', 10, 604_800, 600],
+    ['CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS', 0, 31_536_000, 0],
+    ['CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS', 5_000, 120_000, 30_000],
+    ['CONSTRUCTION_TRANSACTION_TIMEOUT_MS', 5_000, 60_000, 15_000],
     ['CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS', 0, 1000, 1],
     ['CONSTRUCTION_RECONCILE_LEASE_SECONDS', 10, 3600, 120],
     ['CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS', 10, 3600, 60],
@@ -797,8 +818,8 @@ describe('strict whole-number timing budgets', () => {
     '%s preserves its default and bounds, and refuses malformed text',
     (name, min, max, fallback) => {
       expect(load({ [name]: undefined })[name]).toBe(fallback);
-      for (const value of [min, max]) {
-        expect(load({ [name]: String(value) })[name]).toBe(value);
+      for (const value of [min, max, fallback]) {
+        expect(constructionEnvSchema.shape[name].parse(String(value))).toBe(value);
       }
       for (const value of [
         '',
