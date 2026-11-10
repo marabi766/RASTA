@@ -50,3 +50,14 @@ and supplier/directory timeout; procurement uses its explicit 5000 ms transactio
 Defaults remain valid. A 10 s award lease with a 60000 ms supplier timeout is refused; raise the lease
 above the budget explicitly. Values are never silently increased. Failed claims expire for retry;
 shutdown starts no further claim. There is no background renewal task to outlive database shutdown.
+
+## Shutdown abandonment (FU-321)
+
+The five construction/procurement sweepers inherit a shared worker boundary through nested services
+and database callbacks. Once their shutdown deadline expires, new database operations are refused;
+late responses are dropped with a warning, including failures, completion, settlement and backlog reads.
+Database disconnect also permanently refuses new worker operations on that client, across extensions.
+Legacy operations outside an adopted worker context keep their existing shutdown/drain contract.
+Already submitted database operations/commits are not cancelled: their outcome remains unconfirmed.
+Fences and leases govern recovery; abandonment alone is not evidence of rollback.
+Contract, economic, document, notification and outbox worker adoption remains separate follow-up work.

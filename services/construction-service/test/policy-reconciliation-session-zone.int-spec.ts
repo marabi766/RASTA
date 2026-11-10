@@ -17,7 +17,7 @@ describe('policy_reconciliation_task deadlines in any session zone (real databas
   const prisma = new PrismaService(withUtcSession(url), 30_000);
   const row = 'policy_reconciliation_task WHERE policy_id = $1';
 
-  afterAll(() => prisma.onModuleDestroy());
+  afterAll(() => prisma.stop());
 
   const lifted = async (tx: { $executeRawUnsafe(sql: string): Promise<number> }) => {
     await tx.$executeRawUnsafe(

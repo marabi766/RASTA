@@ -284,6 +284,7 @@ import {
         AggregationWindowSweeper,
         RfqCloseSweeper,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -292,6 +293,7 @@ import {
         sweeper: AggregationWindowSweeper,
         rfqSweeper: RfqCloseSweeper,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: ProcurementEnv,
       ) =>
         new OutboxShutdown({
@@ -299,6 +301,7 @@ import {
           purge,
           workers: [sweeper, rfqSweeper],
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

@@ -1,3 +1,4 @@
+import { WorkerBoundary, workerOperation } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import {
   RastaError,
@@ -78,6 +79,7 @@ const METRIC_RESULT: Record<SweepResult, string> = {
  */
 export class AggregationWindowSweeper {
   private readonly logger = new Logger(AggregationWindowSweeper.name);
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
   private stopping?: Promise<void>;
@@ -113,10 +115,9 @@ export class AggregationWindowSweeper {
    * this in Nest's destroy phase, beside the relay and the purge; D-052), so no step writes an
    * outbox row after the relay drained.
    *
-   * Past the deadline the sweep is abandoned with a warning: each step and its event commit in
-   * one transaction, so an exit rolls back the one in flight, and the lease lets the next sweep,
-   * anywhere, take that window and the rest of the batch again. Without a deadline it waits. One
-   * stop per process.
+   * At the deadline the shared worker boundary refuses further database work and drops late
+   * results. Submitted operations remain unconfirmed; leases/fences govern recovery.
+   * Without a deadline it waits. One stop per process.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
@@ -125,25 +126,30 @@ export class AggregationWindowSweeper {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
       return;
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
-        'Aggregation window sweep still running at the shutdown deadline; abandoned. The step ' +
-          'in flight rolls back and its lease lets the next sweep take the window again',
+        'Sweep abandoned at shutdown deadline; in-flight outcome unconfirmed; lease/fence govern recovery',
       );
     }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
-  async runOnce(): Promise<WindowSweepOutcome> {
+  runOnce(): Promise<WindowSweepOutcome> {
+    return this.boundary.run(() => this.sweep());
+  }
+
+  private async sweep(): Promise<WindowSweepOutcome> {
     const claimed = claimWhenReady(
       this.options.batchSize,
       () => this.stopped,
@@ -174,7 +180,9 @@ export class AggregationWindowSweeper {
         if (this.stopped) break;
         try {
           const started = performance.now();
-          const step = await this.service.step(target, this.options.leaseSeconds);
+          const step = await workerOperation(() =>
+            this.service.step(target, this.options.leaseSeconds),
+          );
           outcome[COUNTED[step.result]] += 1;
           windowSweepTotal.inc({ service: SERVICE_NAME, result: METRIC_RESULT[step.result] });
           if (!step.pending) break;
@@ -183,6 +191,7 @@ export class AggregationWindowSweeper {
             break;
           }
         } catch (error) {
+          if (this.boundary.abandoned) return outcome;
           outcome.failed += 1;
           windowSweepTotal.inc({ service: SERVICE_NAME, result: 'failed' });
           this.logger.warn(
@@ -205,7 +214,7 @@ export class AggregationWindowSweeper {
       if (this.stopped) break;
     }
 
-    if (outcome.claimed > 0) {
+    if (outcome.claimed > 0 && !this.boundary.abandoned) {
       this.logger.log(
         `Aggregation window sweep: claimed ${outcome.claimed}, ended ${outcome.ended}, ` +
           `followed ${outcome.followed}, noop ${outcome.noop}, not due ${outcome.notDue}, ` +

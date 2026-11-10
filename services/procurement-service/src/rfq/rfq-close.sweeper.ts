@@ -1,3 +1,4 @@
+import { WorkerBoundary, workerOperation } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import {
   RastaError,
@@ -69,6 +70,7 @@ const METRIC_RESULT: Record<RfqCloseResult, string> = {
  */
 export class RfqCloseSweeper {
   private readonly logger = new Logger(RfqCloseSweeper.name);
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
   private stopping?: Promise<void>;
@@ -109,25 +111,30 @@ export class RfqCloseSweeper {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
       return;
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
-        'RFQ close sweep still running at the shutdown deadline; abandoned. The close in flight ' +
-          'rolls back and its lease lets the next sweep take the RFQ again',
+        'Sweep abandoned at shutdown deadline; in-flight outcome unconfirmed; lease/fence govern recovery',
       );
     }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
-  async runOnce(): Promise<RfqCloseSweepOutcome> {
+  runOnce(): Promise<RfqCloseSweepOutcome> {
+    return this.boundary.run(() => this.sweep());
+  }
+
+  private async sweep(): Promise<RfqCloseSweepOutcome> {
     const claimed = claimWhenReady(
       this.options.batchSize,
       () => this.stopped,
@@ -150,10 +157,11 @@ export class RfqCloseSweeper {
       if (this.stopped) break;
       const target = { organizationId: rfq.organizationId, rfqId: rfq.id, fence: rfq.fence };
       try {
-        const result = await this.service.close(target);
+        const result = await workerOperation(() => this.service.close(target));
         outcome[COUNTED[result]] += 1;
         rfqCloseSweepTotal.inc({ service: SERVICE_NAME, result: METRIC_RESULT[result] });
       } catch (error) {
+        if (this.boundary.abandoned) return outcome;
         outcome.failed += 1;
         rfqCloseSweepTotal.inc({ service: SERVICE_NAME, result: 'failed' });
         this.logger.warn(`Closing RFQ ${rfq.id} failed: ${codeOf(error)}; retried after a backoff`);
@@ -171,7 +179,7 @@ export class RfqCloseSweeper {
       }
     }
 
-    if (outcome.claimed > 0) {
+    if (outcome.claimed > 0 && !this.boundary.abandoned) {
       this.logger.log(
         `RFQ close sweep: claimed ${outcome.claimed}, closed ${outcome.closed}, noop ${outcome.noop}, ` +
           `not due ${outcome.notDue}, lost ${outcome.lost}, failed ${outcome.failed}`,
