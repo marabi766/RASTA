@@ -38,7 +38,7 @@ describe('document stream sequencing', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b], wiring.storage);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /**

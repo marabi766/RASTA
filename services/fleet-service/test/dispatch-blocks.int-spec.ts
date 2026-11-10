@@ -55,7 +55,7 @@ describe('dispatch blocks (L3-02)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, orgC]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const event = (eventName: string, payload: Record<string, unknown>): EventEnvelope => ({

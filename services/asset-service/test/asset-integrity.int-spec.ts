@@ -202,7 +202,7 @@ describe('asset integrity', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   // ---------------------------------------------------------------------------
@@ -1053,7 +1053,7 @@ describe('asset integrity', () => {
         expect(Date.now() - started).toBeLessThan(2500);
         expect((await statusOf(assetId)).status).toBe('IN_MAINTENANCE');
       } finally {
-        await tiny.onModuleDestroy();
+        await tiny.stop();
       }
     }, 30_000);
 

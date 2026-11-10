@@ -182,8 +182,8 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
    * the first test — so the deploy restarts the service, and so does this.
    */
   const reconnect = async () => {
-    await utc?.onModuleDestroy();
-    await tehran?.onModuleDestroy();
+    await utc?.stop();
+    await tehran?.stop();
     utc = new PrismaService(urlFor());
     tehran = new PrismaService(urlFor(TEHRAN));
   };
@@ -204,8 +204,8 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
   });
 
   afterAll(async () => {
-    await utc?.onModuleDestroy();
-    await tehran?.onModuleDestroy();
+    await utc?.stop();
+    await tehran?.stop();
     psql(['-c', `DROP SCHEMA IF EXISTS "${schema}" CASCADE`], 'UTC', 'public');
     psql(['-c', `DROP SCHEMA IF EXISTS "${deploySchema}" CASCADE`], 'UTC', 'public');
   });
@@ -478,7 +478,7 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
         { timeout: 120_000 },
       );
     } finally {
-      await holder.onModuleDestroy();
+      await holder.stop();
     }
   };
 
@@ -557,7 +557,7 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
     const applied = await deploy();
     expect(applied.ok).toBe(true);
     expect(ledger()).toEqual(['false|true', 'false|true', 'true|false']);
-    await db.onModuleDestroy();
+    await db.stop();
     const restarted = new PrismaService(urlIn(deploySchema));
     try {
       const converted = await types(restarted);
@@ -565,7 +565,7 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
       expect(converted.every((t) => t.includes('timestamp with time zone(3)'))).toBe(true);
       expect(await instants(restarted)).toEqual(before);
     } finally {
-      await restarted.onModuleDestroy();
+      await restarted.stop();
     }
   }, 300_000);
 
@@ -599,7 +599,7 @@ describe('the service’s own tables (D-048)', () => {
           .sort(),
       );
     } finally {
-      await prisma.onModuleDestroy();
+      await prisma.stop();
     }
   });
 });

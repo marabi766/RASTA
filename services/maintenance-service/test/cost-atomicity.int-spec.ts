@@ -37,7 +37,7 @@ describe('cost atomicity', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** A machine with a request already referred to a workshop and started. */

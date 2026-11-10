@@ -139,8 +139,8 @@ describe('insurance policy standing (internal)', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await owner.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await owner.stop();
+    await prisma.stop();
   });
 
   it('tells the current owner a counting policy’s window and the current generation', async () => {

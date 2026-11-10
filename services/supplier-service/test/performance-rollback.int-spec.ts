@@ -78,9 +78,9 @@ describe(`${MIGRATION}: rollback with data, then re-apply and replay`, () => {
   }, 240_000);
 
   afterAll(async () => {
-    await scratch?.onModuleDestroy();
+    await scratch?.stop();
     await owner?.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await owner?.onModuleDestroy();
+    await owner?.stop();
   }, 60_000);
 
   const buyer = newOrganizationId();
@@ -164,7 +164,7 @@ describe(`${MIGRATION}: rollback with data, then re-apply and replay`, () => {
 
     // Up again, and replay the whole history.
     prismaCli(['migrate', 'deploy'], { url: scratchUrl });
-    await scratch.onModuleDestroy();
+    await scratch.stop();
     scratch = new PrismaService(scratchUrl);
     consumer = new PerformanceConsumer(
       null,

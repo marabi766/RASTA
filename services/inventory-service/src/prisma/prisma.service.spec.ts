@@ -11,7 +11,7 @@ describe('PrismaService', () => {
       'postgresql://nobody:nothing@127.0.0.1:1/none?connect_timeout=1',
     );
     await expect(prisma.isHealthy()).resolves.toBe(false);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('passes a transaction’s isolation, timeout and connection wait to Prisma, and nothing it was not given', async () => {

@@ -71,7 +71,7 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
   });
 
   afterAll(async () => {
-    await owner.onModuleDestroy();
+    await owner.stop();
   });
 
   it('the guard rejects schema-qualified SQL, so it cannot pass vacuously', () => {

@@ -268,7 +268,7 @@ describe('idempotent stock commands', () => {
       expect(work).not.toHaveBeenCalled();
     } finally {
       await release();
-      await narrow.onModuleDestroy();
+      await narrow.stop();
     }
     expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(0);
   }, 30_000);

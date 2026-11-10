@@ -106,7 +106,7 @@ describe('declaring availability under an Idempotency-Key', () => {
       [org.a, org.b],
     );
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** A machine of `organizationId` in the replica, as asset-service's event would put it. */

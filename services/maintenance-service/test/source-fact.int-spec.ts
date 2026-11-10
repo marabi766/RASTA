@@ -89,7 +89,7 @@ describe('maintenance source fact', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('states the approval exactly as MAINTENANCE_APPROVED announced it', async () => {

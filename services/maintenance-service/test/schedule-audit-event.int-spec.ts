@@ -55,7 +55,7 @@ describe('schedule changes reach the audit trail', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /**

@@ -43,8 +43,8 @@ describe('performance formula storage (ADR-052 step 2)', () => {
   });
 
   afterAll(async () => {
-    await prisma.onModuleDestroy();
-    await owner.onModuleDestroy();
+    await prisma.stop();
+    await owner.stop();
   });
 
   function exec(sql: string): Promise<number> {
@@ -384,8 +384,8 @@ describe('performance formula storage (ADR-052 step 2)', () => {
     });
 
     afterAll(async () => {
-      await second.onModuleDestroy();
-      await watcher.onModuleDestroy();
+      await second.stop();
+      await watcher.stop();
     });
 
     it('refuses a balanced re-weighting that waited on an activation, once that activation commits', async () => {

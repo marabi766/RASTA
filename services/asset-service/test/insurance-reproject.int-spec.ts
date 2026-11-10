@@ -160,8 +160,8 @@ describe('insurance re-projection command (Q-101)', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await owner.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await owner.stop();
+    await prisma.stop();
   });
 
   it('announces every policy in force or not yet started, once, and nothing else', async () => {

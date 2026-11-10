@@ -96,7 +96,7 @@ describe('rollback of the ownership generation (#240 round 3)', () => {
     for (const schema of schemas)
       psql('public', ['-c', `DROP SCHEMA IF EXISTS "${schema}" CASCADE`]);
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const eventFor = (

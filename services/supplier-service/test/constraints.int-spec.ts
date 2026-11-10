@@ -58,7 +58,7 @@ describe('database invariants', () => {
 
   afterAll(async () => {
     await cleanup(prisma, organizations);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   describe('supplier', () => {

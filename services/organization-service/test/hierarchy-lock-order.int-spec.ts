@@ -107,7 +107,7 @@ describe('hierarchy-changing writes take row locks in one order', () => {
   });
 
   afterAll(async () => {
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   });
 
   /**
