@@ -256,6 +256,7 @@ export const workerOptions: ResolutionWorkerOptions = {
   pollIntervalMs: 60_000,
   batchSize: 100,
   leaseSeconds: 60,
+  processingBudgetMs: 1_000,
   backoffMaxSeconds: 600,
   maxRecipients: 500,
   inAppTtlDays: 60,
