@@ -435,6 +435,7 @@ export function economicLogger(
         RewardTriggerConsumer,
         LedgerBalanceAudit,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -446,6 +447,7 @@ export function economicLogger(
         rewards: RewardTriggerConsumer,
         audit: LedgerBalanceAudit,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: EconomicEnv,
       ) =>
         new OutboxShutdown({
@@ -454,6 +456,7 @@ export function economicLogger(
           workers: [reconciler, settlements, statements, rewards, audit],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

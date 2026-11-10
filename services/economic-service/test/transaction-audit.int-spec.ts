@@ -32,7 +32,7 @@ describe('transaction lifecycle audit (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [payer, payee, outsider]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asPayer = <T>(fn: () => Promise<T>) =>

@@ -1,7 +1,9 @@
 import { eligibilityClockSql } from '@rasta/testing';
 import { setEligibilityFixture } from '@rasta/testing';
 import { ulid } from 'ulid';
-import { getOrganizationId, runUnscoped } from '@rasta/nest-common';
+import { getOrganizationId, runUnscoped, WorkerAbandonedError } from '@rasta/nest-common';
+import { Logger } from '@nestjs/common';
+import { paymentIntentsTotal, paymentReconciliationTotal } from '../src/observability/metrics';
 import { PrismaClient } from '../src/generated/prisma';
 import {
   plantPaymentIntent,
@@ -25,7 +27,7 @@ import { LedgerBalanceAudit } from '../src/wallet/balance-audit';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
 import { ECONOMIC_EVENTS } from '../src/events/events';
 import type { EconomicEnv } from '../src/config/env';
-import type { PrismaService } from '../src/prisma/prisma.service';
+import type { PrismaService, ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import type { RefundRequest, RefundStatusQuery, RefundStatusResult } from '../src/payment/provider';
 
 /**
@@ -86,7 +88,7 @@ describe('the payment reconciler (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const reconcilerWith = (overrides: Partial<EconomicEnv> = {}, withProvider = provider) =>
@@ -289,12 +291,75 @@ describe('the payment reconciler (real database)', () => {
   }
 
   describe('an unknown refund: the provider is asked first', () => {
+    it.each([false, true])(
+      'replays an abandoned transaction once (committed=%s)',
+      async (committed) => {
+        const organizationId = `${org.a}-ABANDON-${committed}`;
+        const made = await unknownButRefunded(organizationId);
+        let release!: () => void;
+        let entered!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const started = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const original = prisma.transaction.bind(prisma);
+        const wait = async <T>(result: T): Promise<T> => {
+          entered();
+          await held;
+          return result;
+        };
+        jest
+          .spyOn(prisma, 'transaction')
+          .mockImplementationOnce(
+            async <T>(work: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> =>
+              committed ? wait(await original(work)) : original(async (tx) => wait(await work(tx))),
+          );
+        const log = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+        const refunds = jest.spyOn(paymentIntentsTotal, 'inc');
+        const reconciliations = jest.spyOn(paymentReconciliationTotal, 'inc');
+        const sweeper = sweeperWith();
+        const run = sweeper.runOnce();
+        const abandoned = expect(run).rejects.toBeInstanceOf(WorkerAbandonedError);
+        await started;
+        await sweeper.stop({ deadlineAt: Date.now() - 1 });
+        release();
+        await abandoned;
+        expect(log).not.toHaveBeenCalled();
+        expect(refunds).not.toHaveBeenCalled();
+        expect(reconciliations).not.toHaveBeenCalled();
+        jest.restoreAllMocks();
+        if (!committed) {
+          await runUnscoped('expire the abandoned lease for a new instance', async () =>
+            setEligibilityFixture(prisma, 'paymentExpired', await fixtureTaskIds(made.intentId)),
+          );
+        }
+        await sweeperWith().runOnce();
+        await sweeperWith().runOnce();
+        await expectRecordedRefund(made);
+        expect(
+          await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_RESOLVED),
+        ).toHaveLength(1);
+        expect(await tasksOf(made.intentId)).toEqual([
+          expect.objectContaining({ status: 'DONE', attempts: 0 }),
+        ]);
+      },
+    );
+
     it('records a refund the provider made, once, and says so', async () => {
       const organizationId = `${org.a}-REFUNDED`;
       const made = await unknownButRefunded(organizationId);
       const ask = jest.spyOn(provider, 'getRefundStatus');
+      const refunds = jest.spyOn(paymentIntentsTotal, 'inc');
+      const reconciliations = jest.spyOn(paymentReconciliationTotal, 'inc');
 
       await sweeperWith().runOnce();
+      expect(refunds).toHaveBeenCalledTimes(1);
+      expect(refunds).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'REFUNDED' }));
+      expect(reconciliations).toHaveBeenCalledWith(
+        expect.objectContaining({ result: 'resolved_refunded' }),
+      );
 
       expect(ask).toHaveBeenCalledWith(
         expect.objectContaining({

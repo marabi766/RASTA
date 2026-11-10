@@ -50,7 +50,7 @@ describe('reward recovery R1–R2 (PostgreSQL)', () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
   });
   afterAll(async () => {
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   function rule(extra: Partial<CreateRewardRuleDto> = {}) {

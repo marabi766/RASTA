@@ -48,7 +48,7 @@ describe('lock-then-read guards hold under every isolation level (real database)
 
   afterAll(async () => {
     await cleanup(prisma, [org.a]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
     await Promise.all([owner.$disconnect(), runtime.$disconnect(), other.$disconnect()]);
   });
 

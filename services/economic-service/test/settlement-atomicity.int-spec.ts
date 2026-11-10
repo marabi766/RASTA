@@ -49,7 +49,7 @@ describe('settlement atomicity (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** A held, authorised transaction ready to settle. */
