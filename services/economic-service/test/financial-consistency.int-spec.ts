@@ -53,7 +53,7 @@ describe('financial consistency (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** Every journal in the database, checked for balance per currency. */

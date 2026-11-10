@@ -46,7 +46,7 @@ describe('ledger immutability (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** A fresh, unique raw journal id. */

@@ -1068,7 +1068,7 @@ export class PaymentService {
 
     // 3. Record: return the hold and reverse the top-up, together.
     try {
-      return await this.prisma.transaction(async (tx) => {
+      const result = await this.prisma.transaction(async (tx) => {
         const { intent: row, wallet } = await this.lockForRefund(tx, intentId, organizationId);
         if (row.failureReason !== REFUND_REQUESTED && row.failureReason !== REFUNDED_NOT_REVERSED) {
           throw RastaError.internal(`Payment intent ${intentId} lost its refund marker`);
@@ -1083,6 +1083,13 @@ export class PaymentService {
         await answer?.respond(tx, view);
         return view;
       });
+      paymentIntentsTotal.inc({
+        service: SERVICE_NAME,
+        provider: this.provider.name,
+        simulated: String(this.provider.simulated),
+        outcome: 'REFUNDED',
+      });
+      return result;
     } catch (error) {
       const failure = reversalFailure(error);
       await this.markRefundUnresolved(requested.row, REFUNDED_NOT_REVERSED, failure);
@@ -1186,13 +1193,6 @@ export class PaymentService {
         simulated: this.provider.simulated,
         refundedAt: refundedAt.toISOString(),
       },
-    });
-
-    paymentIntentsTotal.inc({
-      service: SERVICE_NAME,
-      provider: this.provider.name,
-      simulated: String(this.provider.simulated),
-      outcome: 'REFUNDED',
     });
 
     return {

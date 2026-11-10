@@ -215,7 +215,7 @@ describe(`${MIGRATION}: down, then up again, over recorded obligations`, () => {
   });
 
   afterAll(async () => {
-    for (const service of services) await service.onModuleDestroy();
+    for (const service of services) await service.stop();
     for (const client of clients) await client.$disconnect();
     for (const schema of schemas) {
       // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; it names only a

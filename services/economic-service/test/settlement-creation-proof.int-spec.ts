@@ -371,7 +371,7 @@ describe('the proof of a settlement at its creation (real database, runtime role
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
     await runtime.$disconnect();
     await owner.$disconnect();
   });

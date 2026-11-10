@@ -402,7 +402,7 @@ export class PaymentReconciliationOperator {
       resolution.id,
       actor.userId,
     );
-    this.countFailure(verdict);
+    this.countEffect(verdict);
     return toResolutionView(resolution);
   }
 
@@ -424,7 +424,7 @@ export class PaymentReconciliationOperator {
       return this.answered(tx, answer, await this.approveLocked(tx, task, proposed, actor, reason));
     });
     this.logAction('APPROVED', paymentIntentId, resolution.id, actor.userId);
-    this.countFailure(verdict);
+    this.countEffect(verdict);
     return toResolutionView(resolution);
   }
 
@@ -695,14 +695,14 @@ export class PaymentReconciliationOperator {
     );
   }
 
-  /** An approved uncreditable capture failed: the same count the sweeper keeps. */
-  private countFailure(verdict: Verdict | null): void {
-    if (verdict?.action !== 'FAIL_UNCREDITED') return;
+  /** Confirmed effects only, after the approval transaction commits. */
+  private countEffect(verdict: Verdict | null): void {
+    if (verdict?.action !== 'FAIL_UNCREDITED' && verdict?.action !== 'RECORD_REFUNDED') return;
     paymentIntentsTotal.inc({
       service: SERVICE_NAME,
       provider: this.provider.name,
       simulated: String(this.provider.simulated),
-      outcome: 'FAILED',
+      outcome: verdict.action === 'RECORD_REFUNDED' ? 'REFUNDED' : 'FAILED',
     });
   }
 }

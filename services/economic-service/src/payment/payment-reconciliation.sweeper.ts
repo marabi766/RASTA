@@ -9,6 +9,9 @@ import {
   createSystemContext,
   runWithContext,
   withinDeadline,
+  WorkerBoundary,
+  WorkerAbandonedError,
+  workerOperation,
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -62,6 +65,9 @@ export interface SweepOutcome {
 @Injectable()
 export class PaymentReconciliationSweeper implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(PaymentReconciliationSweeper.name);
+  private readonly worker = new WorkerBoundary((message) =>
+    this.logger.warn(`Payment reconciliation ABANDONED/UNCONFIRMED: ${message}`),
+  );
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
   private stopping?: Promise<void>;
@@ -89,6 +95,7 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
       if (this.inFlight) return;
       this.inFlight = this.runOnce()
         .catch((error: unknown) => {
+          if (this.worker.abandoned) return;
           // A sweep that fails as a whole (the database is down) is retried
           // by the next tick; the tasks are still queued.
           this.logger.error(
@@ -113,12 +120,13 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
    * drained, and its wait came on top of the relay's.
    *
    * Past the deadline the sweep is abandoned with a warning: the reconciler
-   * settles a task with its event in one transaction, so an exit rolls back
-   * the one in flight, and the lease lets the next sweep, anywhere, take it and
-   * the rest of the batch again. Without a deadline it waits. One stop per
+   * settles a task with its event in one transaction. A submitted write's outcome
+   * is UNCONFIRMED; the next instance must reconcile the durable state under its
+   * lease before acting. Without a deadline it waits. One stop per
    * process.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.worker.stopAt(options.deadlineAt);
     this.stopping ??= this.halt(options.deadlineAt);
     return this.stopping;
   }
@@ -128,16 +136,17 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const current = this.inFlight;
+    const current = this.worker.current ?? this.inFlight;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
       return;
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.worker.abandon();
       this.logger.warn(
-        'Payment reconciliation sweep still running at the shutdown deadline; abandoned. The ' +
-          'task in flight rolls back and its lease lets the next sweep take it again',
+        'Payment reconciliation sweep ABANDONED; submitted write outcome UNCONFIRMED. ' +
+          'A later instance must reconcile durable state before acting',
       );
     }
   }
@@ -148,9 +157,18 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
-  async runOnce(): Promise<SweepOutcome> {
+  runOnce(): Promise<SweepOutcome> {
+    return this.worker.run(async () => {
+      this.worker.assertActive();
+      if (this.stopped) throw new WorkerAbandonedError();
+      return this.sweep();
+    });
+  }
+
+  private async sweep(): Promise<SweepOutcome> {
     const batch = this.env.ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE;
-    const healed = await this.tasks.heal(batch, this.healCursor);
+    const healed = await workerOperation(() => this.tasks.heal(batch, this.healCursor));
+    this.worker.assertActive();
     this.healCursor = healed.cursor;
     if (healed.opened > 0) {
       paymentReconciliationTotal.inc(
@@ -167,10 +185,8 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
       this.logger.warn(`Payment reconciler closed ${healed.closed} task(s) settled without them`);
     }
 
-    const claimed = await this.tasks.claimDue(
-      batch,
-      this.env.ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS,
-      ulid(),
+    const claimed = await workerOperation(() =>
+      this.tasks.claimDue(batch, this.env.ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS, ulid()),
     );
     const outcome: SweepOutcome = {
       claimed: claimed.length,
@@ -193,8 +209,11 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
       });
       let result: ReconcileResult;
       try {
-        result = await runWithContext(context, () => this.reconciler.reconcile(task));
+        result = await workerOperation(() =>
+          runWithContext(context, () => this.reconciler.reconcile(task)),
+        );
       } catch (error) {
+        this.worker.assertActive();
         // The reconciler handles its own failures; this is the one it could
         // not even put back. The lease expires and the task is taken again.
         this.logger.error(
@@ -203,10 +222,12 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
         );
         result = 'lost_lease';
       }
+      this.worker.assertActive();
       tally(outcome, result);
     }
 
     await this.sampleBacklog();
+    this.worker.assertActive();
     paymentReconcilerLastSweep.set({ service: SERVICE_NAME }, Date.now() / 1000);
     if (outcome.claimed > 0) {
       this.logger.log(
@@ -220,11 +241,13 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
 
   private async sampleBacklog(): Promise<void> {
     try {
-      const backlog = await this.tasks.backlog();
+      const backlog = await workerOperation(() => this.tasks.backlog());
+      this.worker.assertActive();
       paymentReconciliationOpen.set({ service: SERVICE_NAME }, backlog.open);
       paymentReconciliationEscalated.set({ service: SERVICE_NAME }, backlog.escalated);
       paymentReconciliationOldestDueAge.set({ service: SERVICE_NAME }, backlog.oldestDueAgeSeconds);
     } catch (error) {
+      this.worker.assertActive();
       this.logger.warn(
         `Payment reconciliation backlog could not be sampled: ${
           error instanceof Error ? error.message : String(error)

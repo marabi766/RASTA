@@ -139,6 +139,7 @@ for (const [service, command, exit] of reporters.filter(
   ([service, command]) =>
     service === 'asset' ||
     service === 'marketplace' ||
+    service === 'economic' ||
     (service === 'fleet' && command === 'fleet/clear-transferred'),
 )) {
   test(`${service}/${command}: unconfirmed database close refuses success`, () => {
