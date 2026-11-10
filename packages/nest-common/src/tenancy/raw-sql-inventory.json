@@ -800,7 +800,7 @@
   {
     "file": "services/document-service/src/scanning/scan.repository.ts",
     "line": 52,
-    "hash": "ac150202fd48245a922423599e56acae1cf2804b954ea7f89903e5123a450a1c",
+    "hash": "09f8aaad07acfe9247103753f9a499054d4ee21b7d3446943d30358367de4bd2",
     "occurrence": 0,
     "decision": "platform-wide: background scan worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },

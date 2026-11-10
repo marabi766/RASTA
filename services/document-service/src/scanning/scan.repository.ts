@@ -50,10 +50,7 @@ export class ScanRepository {
       'the scan worker serves every tenant and belongs to none',
       () =>
         this.prisma.client.$queryRaw<ClaimedDocument[]>`
-        UPDATE "document" AS d
-           SET "scan_lease_owner" = ${input.owner},
-               "scan_lease_expires_at" = now() + make_interval(secs => ${input.leaseSeconds}::double precision)
-          FROM (
+        WITH due AS MATERIALIZED (
             SELECT "id"
               FROM "document"
              WHERE "scan_state" = 'PENDING'
@@ -63,7 +60,11 @@ export class ScanRepository {
              ORDER BY COALESCE("scan_queued_at", "created_at")
              LIMIT ${input.limit}
              FOR UPDATE SKIP LOCKED
-          ) AS due
+        )
+        UPDATE "document" AS d
+           SET "scan_lease_owner" = ${input.owner},
+               "scan_lease_expires_at" = now() + make_interval(secs => ${input.leaseSeconds}::double precision)
+          FROM due
          WHERE d."id" = due."id"
         RETURNING d."id"              AS "id",
                   d."organization_id" AS "organizationId",

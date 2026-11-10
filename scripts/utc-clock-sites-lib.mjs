@@ -71,8 +71,9 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
-import { productionFiles, readSchemas, sqlLiterals } from './eligibility-clock-derive.mjs';
+import { productionFiles, readSchemas, sqlLiterals, sqlOf, SOURCE, SPEC } from './eligibility-clock-derive.mjs';
 import { sqlSinkTexts } from './utc-clock-sinks.mjs';
+import { parseCommands } from './ci-shell-text-lib.mjs';
 import { lex as lexSql, stripComments } from './eligibility-clock-sql.mjs';
 
 const CALLS = new Set(['now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp']);
@@ -1883,36 +1884,144 @@ export function schemaDisagreements(repository, perService) {
   return disagreements;
 }
 
-// FU-324: an IN/ANY locking subquery can be rescanned and pick more rows than LIMIT.
-// Read tokens (including nested ARRAY/tuple forms), so comments/strings cannot hide a lock.
-export function claimSubqueryProblems(sql) {
+// One claim policy, independent of clocks, replay lifetime and reviewed exemptions.
+export function claimSubqueryProblems(sql, seen = new Set()) {
+  if (seen.has(sql)) return [];
+  seen.add(sql);
   const tokens = lex(sql);
+  // Read concatenated SQL as one text, rather than checking unbalanced pieces.
   for (let i = 0; i < tokens.length; i++) {
-    if (!isWord(tokens[i], 'in', 'any', 'some', 'all') || !isOp(tokens[i + 1], '(')) continue;
-    let depth = 1;
-    const body = [];
-    for (let j = i + 2; j < tokens.length && depth > 0; j++) {
-      if (isOp(tokens[j], '(')) depth++;
-      if (isOp(tokens[j], ')')) depth--;
-      if (depth > 0) body.push(tokens[j]);
+    if (tokens[i].type !== 'string' || !isOp(tokens[i + 1], '||') || !stringValues(tokens, i)?.some(isClaimSql)) continue;
+    let end = i, values = stringValues(tokens, i);
+    while (isOp(tokens[end + 1], '||') && tokens[end + 2]) {
+      const next = tokens[end + 2].type === 'string' ? stringValues(tokens, end + 2) : ['\uE0000\uE001'];
+      values = values && next ? [...new Set(values.flatMap((a) => next.map((b) => a + b)))] : null;
+      end += 2;
     }
+    if (values) tokens.splice(i, end - i + 1, ...values.map((v) => ({ type: 'string', value: '$claim$' + v + '$claim$' })));
+  }
+  const refuse = [
+    'FU-324: locking subquery or unreadable SQL; use WITH picked AS MATERIALIZED (...) UPDATE ... FROM picked (DELETE ... USING picked)',
+  ];
+  if (tokens.some((t) => t.unterminated || t.unreadable)) return refuse;
+  let depth = 0;
+  for (const t of tokens) {
+    if (isOp(t, '(')) depth++;
+    if (isOp(t, ')') && --depth < 0) return refuse;
+  }
+  if (depth !== 0) return refuse;
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].type === 'string') {
+      const values = stringValues(tokens, i);
+      if (!values) return refuse;
+      for (const value of values) {
+        // Includes SQL/PLpgSQL bodies, DO and quoted dynamic SQL, even if later dropped.
+        if ((/^\$\w*\$/.test(tokens[i].value) || isClaimSql(value)) && claimSubqueryProblems(value, seen).length) return refuse;
+      }
+    }
+    if (!isOp(tokens[i], '(')) continue;
+    const end = closing(tokens, i);
+    const body = tokens.slice(i + 1, end);
     const selects = body.some((t) => isWord(t, 'select', 'table'));
-    const locks = body.some((t, j) => isWord(t, 'for') && isWord(body[j + 1], 'update', 'no', 'share', 'key'));
-    if (selects && locks) return ['FU-324: locking IN/ANY subquery; use WITH picked AS MATERIALIZED (...) UPDATE ... FROM picked (DELETE ... USING picked)'];
+    const locks = body.some(
+      (t, j) => isWord(t, 'for') && isWord(body[j + 1], 'update', 'no', 'share', 'key'),
+    );
+    if (!selects || !locks) continue;
+    // CTEs containing row locks cannot be inlined by PostgreSQL. A derived
+    // FROM/USING/JOIN or membership picker has no such evaluation boundary.
+    const as = isWord(tokens[i - 1], 'materialized') ? i - 2 : i - 1;
+    const cte =
+      isWord(tokens[as], 'as') &&
+      nameOf(tokens[as - 1]) !== null &&
+      (isWord(tokens[as - 2], 'with', 'recursive') || isOp(tokens[as - 2], ','));
+    if (!cte) return refuse;
   }
   return [];
 }
 
+const isClaimSql = (text) =>
+  /^(?:select|update|delete|insert|merge|create|alter|drop|do|begin|declare)\b|^values\s*\(|^with\s+(?:recursive\s+)?(?:[\w$]+|"[^"]+")\s+as\b/i.test(
+    stripComments(text).trim(),
+  );
+
+function claimFileProblems(repository) {
+  const problems = [];
+  for (const path of authoredFiles(repository)) {
+    const local = relative(repository, path);
+    if (
+      !/\.(?:sql|[cm]?[jt]sx?|sh|bash)$/.test(local) ||
+      /(?:^|\/)(?:test|tests|__tests__|e2e|fixtures)\/|\.(?:spec|test|int-spec|e2e-spec)\./.test(
+        local,
+      )
+    )
+      continue;
+    const source = readFileSync(path, 'utf8');
+    const composed = new Map();
+    if (/\.[cm]?[jt]sx?$/.test(local)) {
+      const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
+      if (ast.parseDiagnostics.length) { problems.push(`${local}: FU-324: unreadable source`); continue; }
+      const concat = (n) => ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken;
+      const textOf = (n) => concat(n) ? textOf(n.left) + textOf(n.right) : sqlOf(n)?.text ?? '\uE0000\uE001';
+      for (const { node } of sqlLiterals(ast)) {
+        let top = node;
+        while (concat(top.parent)) top = top.parent;
+        composed.set(top, { node: top, text: textOf(top) });
+      }
+    }
+    const texts = /\.[cm]?[jt]sx?$/.test(local)
+      ? [...composed.values()].filter(({ text }) => isClaimSql(text))
+      : /\.sql$/.test(local)
+        ? [{ text: source }]
+        : [...source.matchAll(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$/gm)]
+            .map((m) => ({ text: m[3] }))
+            .concat(
+              parseCommands(source).commands.flatMap(({ words }) => words)
+                .map(({ value }) => ({ text: value.replace(/^[A-Za-z_]\w*=/, '') }))
+                .filter(({ text }) => isClaimSql(text)),
+            );
+    for (const { text, node } of texts) {
+      const line = node
+        ? node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1
+        : 1;
+      for (const problem of claimSubqueryProblems(text))
+        problems.push(`${local}:${line}: ${problem}`);
+    }
+  }
+  return problems;
+}
+
 export function utcClockProblems(repository) {
   const perService = collectTables(repository);
-  const problems = schemaDisagreements(repository, perService).map(
-    (d) => `schema/migration disagreement: ${d}`,
-  );
+  const problems = [
+    ...claimFileProblems(repository),
+    ...schemaDisagreements(repository, perService).map(
+      (d) => `schema/migration disagreement: ${d}`,
+    ),
+  ];
   const reviewedUsed = new Set();
+  // PM-approved FU-324 boundary: inventory opaque sites, not their callers (FU-325).
+  // Exact argument location + callee: moved, removed or now-resolved sites go stale.
+  const inventoryPath = join(repository, 'scripts/opaque-sql-sinks.json');
+  const opaque = authoredFiles(repository).includes(inventoryPath)
+    ? JSON.parse(readFileSync(inventoryPath, 'utf8')) : {};
+  const opaqueUsed = new Set();
   const sinks = new Map();
-  for (const sink of sqlSinkTexts(repository)) {
+  const operational = authoredFiles(join(repository, 'scripts'), { optional: true })
+    .filter((p) => SOURCE.test(p) && !SPEC.test(p));
+  for (const sink of sqlSinkTexts(repository, [...productionFiles(repository), ...operational])) {
     const path = sink.node.getSourceFile().fileName;
     sinks.set(path, [...(sinks.get(path) ?? []), sink]);
+    const pos = sink.node.getSourceFile().getLineAndCharacterOfPosition(sink.node.getStart());
+    const key = `${relative(repository, path)}:${pos.line + 1}:${pos.character + 1}:${sink.sink}`;
+    if (sink.text === null && Object.hasOwn(opaque, key) && typeof opaque[key] === 'string' && opaque[key].trim()) {
+      opaqueUsed.add(key);
+      continue;
+    }
+    const found = sink.text === null ? ['FU-324: unresolved executable SQL'] : claimSubqueryProblems(sink.text);
+    for (const problem of found) problems.push(`${relative(repository, path)}:${sink.node.getSourceFile().getLineAndCharacterOfPosition(sink.node.getStart()).line + 1}: ${problem}`);
+  }
+  for (const key of Object.keys(opaque)) {
+    if (!opaqueUsed.has(key)) problems.push(`FU-324: stale or invalid opaque SQL inventory entry: ${key}`);
   }
   const allTables = new Map();
   for (const { tables } of perService.values()) {
@@ -1938,12 +2047,6 @@ export function utcClockProblems(repository) {
         const line = location.getLineAndCharacterOfPosition(literal.node.getStart()).line + 1;
         problems.push(`${local}:${line}: R0 unresolved SQL text passed to ${literal.sink}`);
         continue;
-      }
-      const claimProblems = claimSubqueryProblems(literal.text);
-      for (const problem of claimProblems) {
-        const location = literal.node.getSourceFile();
-        const line = location.getLineAndCharacterOfPosition(literal.node.getStart()).line + 1;
-        problems.push(`${local}:${line}: ${problem}`);
       }
       const found = problemsIn(literal.text, tables);
       if (found.length === 0) continue;

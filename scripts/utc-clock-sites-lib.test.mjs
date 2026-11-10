@@ -2123,3 +2123,103 @@ test('FU-324 refuses locking membership subqueries, including tuple DELETE and A
   assert.deepEqual(claimSubqueryProblems(cte), []);
   assert.deepEqual(claimSubqueryProblems(`SELECT 'IN (SELECT id FOR UPDATE)'`), []);
 });
+
+test('FU-324 PostgreSQL comment boundaries cannot hide a locking picker', () => {
+  for (const end of ['\r', '\n', '\r\n']) {
+    for (const form of [
+      'id IN (SELECT id',
+      '(id, org) IN (SELECT id, org',
+      'id = ANY(ARRAY(SELECT id',
+      'id = SOME(SELECT id',
+      'id = ALL(SELECT id',
+    ]) {
+      for (const lock of ['UPDATE', 'NO KEY UPDATE', 'SHARE', 'KEY SHARE']) {
+        const suffix = form.includes('ARRAY') ? '))' : ')';
+        for (const position of ['start', 'select', 'lock']) {
+          let sql = `DELETE FROM t WHERE ${form} FROM t LIMIT 1 FOR ${lock}${suffix}`;
+          if (position === 'start') sql = `-- comment${end}${sql}`;
+          if (position === 'select') sql = sql.replace('SELECT', `-- comment${end}SELECT`);
+          if (position === 'lock') sql = sql.replace('FOR ', `FOR -- comment${end}`);
+          assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+        }
+      }
+    }
+  }
+  assert.match(
+    claimSubqueryProblems(
+      'DELETE FROM t WHERE id IN (SELECT id /* outer /* nested */ end */ FROM t FOR UPDATE)',
+    ).join(),
+    /FU-324/,
+  );
+});
+
+test('FU-324 refuses derived locking pickers and unreadable SQL', () => {
+  for (const sql of [
+    'UPDATE t SET lease = 1 FROM (SELECT id FROM t LIMIT 1 FOR UPDATE) due WHERE t.id = due.id',
+    'DELETE FROM t USING (SELECT id FROM t LIMIT 1 FOR UPDATE) due WHERE t.id = due.id',
+    'UPDATE t SET lease = 1 FROM LATERAL (SELECT id FROM t FOR SHARE) due',
+    "DELETE FROM t WHERE id IN (SELECT 'unterminated FOR UPDATE)",
+    'DELETE FROM t /* unclosed /* nested */',
+    'DELETE FROM t WHERE id IN (SELECT id FROM t FOR UPDATE',
+    'SELECT (1',
+  ])
+    assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+  assert.deepEqual(claimSubqueryProblems('SELECT id FROM t LIMIT 1 FOR UPDATE'), []);
+});
+
+for (const [name, path, wrap] of [
+  ['source literal', 'services/x-service/src/claim.ts', (s) => `const sql = ${JSON.stringify(s)};`],
+  ['migration DML', 'services/x-service/prisma/migrations/2_claim/migration.sql', (s) => s],
+  [
+    'SQL routine',
+    'services/x-service/prisma/migrations/2_claim/migration.sql',
+    (s) => `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$${s}$$; DROP FUNCTION f();`,
+  ],
+  [
+    'PLpgSQL routine',
+    'services/x-service/prisma/migrations/2_claim/migration.sql',
+    (s) => `CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$BEGIN ${s}; END$$;`,
+  ],
+  [
+    'DO',
+    'services/x-service/prisma/migrations/2_claim/migration.sql',
+    (s) => `DO $$BEGIN ${s}; END$$;`,
+  ],
+  ['down migration', 'services/x-service/prisma/migrations/1_init/down.sql', (s) => s],
+  ['operational SQL', 'scripts/claim.sql', (s) => s],
+  ['operational JS', 'scripts/claim.mjs', (s) => `db.query(${JSON.stringify(s)});`],
+  ['opaque operational SQL', 'scripts/claim.mjs', () => 'db.$queryRawUnsafe(runtime);'],
+  ['operational shell', 'scripts/claim.sh', (s) => `psql <<'SQL'\n${s};\nSQL`],
+])
+  test(`FU-324 checks ${name} before clock exemptions`, () => {
+    const bad = 'DELETE FROM task WHERE id IN (-- comment\rSELECT id FROM task LIMIT 1 FOR UPDATE)';
+    const found = scanOf('x-service', 'CREATE TABLE task (id text);', '', { [path]: wrap(bad) });
+    assert.match(found.filter((p) => p.includes(path)).join(), /FU-324/);
+  });
+
+test('FU-324 cannot be waived by a matching reviewed DO block', () => {
+  const body = 'BEGIN DELETE FROM task WHERE id IN (SELECT id FROM task FOR UPDATE); END';
+  const entry = { service: 'x-service', migration: '1_init', sha256: contentHash(body) };
+  REVIEWED_DO_BLOCKS.push(entry);
+  try {
+    assert.match(scanOf('x-service', `DO $$${body}$$;`).join(), /FU-324/);
+  } finally { REVIEWED_DO_BLOCKS.pop(); }
+});
+
+
+test('FU-324 opaque inventory is exact, reasoned, and cannot waive readable SQL', () => {
+  const path = 'scripts/claim.mjs', source = 'db.$queryRawUnsafe(runtime);';
+  const key = `${path}:1:${source.indexOf('runtime') + 1}:$queryRawUnsafe`;
+  const inventory = (entries) => ({ 'scripts/opaque-sql-sinks.json': JSON.stringify(entries) });
+  const scan = (text, entries) => scanOf('x-service', 'CREATE TABLE task (id text);', '', {
+    [path]: text, ...inventory(entries),
+  }).filter((p) => p.includes('FU-324'));
+  const entries = { [key]: 'Test adapter, SQL supplied by caller' };
+  assert.deepEqual(scan(source, entries), []);
+  assert.match(scan(source + '\ndb.query(other);', entries).join(), /unresolved executable SQL/);
+  for (const text of ['', '\n' + source, 'db.$queryRawUnsafe("SELECT 1");'])
+    assert.match(scan(text, entries).join(), /stale or invalid opaque SQL inventory entry/);
+  assert.match(scan(source, { [key]: '' }).join(), /unresolved executable SQL/);
+  const bad = 'DELETE FROM task WHERE id IN (SELECT id FROM task FOR UPDATE)';
+  assert.match(scan(`db.$queryRawUnsafe(${JSON.stringify(bad)});`, entries).join(), /locking subquery/);
+});

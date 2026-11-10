@@ -1,0 +1,12 @@
+{
+  "scripts/outbox-b2-fixture.mjs:161:23:execute": "Test-support schema reset, validated schema name composed at runtime",
+  "scripts/outbox-b2-fixture.mjs:162:23:execute": "Test-support schema creation, validated schema name composed at runtime",
+  "scripts/outbox-b2-fixture.mjs:167:23:execute": "Test-support schema cleanup, validated schema name composed at runtime",
+  "scripts/outbox-b2-fixture.mjs:173:22:execute": "Test-support DDL deployment, SQL read from service migrations",
+  "scripts/outbox-b2-lib.mjs:775:20:query": "Operational backfill precondition, SQL returned by catalog assertion builder",
+  "scripts/outbox-b2-lib.mjs:785:34:query": "Operational backfill plan, SQL returned by plan builder",
+  "scripts/outbox-b2-prisma-port.mjs:62:50:$queryRawUnsafe": "Operational migration adapter, SQL supplied by caller with parameters",
+  "scripts/outbox-b2-prisma-port.mjs:62:91:$queryRawUnsafe": "Operational migration adapter, SQL supplied by caller without parameters",
+  "scripts/outbox-b2-prisma-port.mjs:78:48:$executeRawUnsafe": "Operational migration adapter, SQL supplied by caller",
+  "scripts/outbox-b2-vacuum.mjs:127:20:execute": "Operational maintenance, SQL built from catalog-validated table name"
+}

@@ -674,7 +674,7 @@ export function runParity(
   base,
   {
     select = scopeFromRoot,
-    execute = executeCheck,
+    execute: runCheck = executeCheck,
     read = load,
     report = (line) => process.stdout.write(`${line}\n`),
   } = {},
@@ -696,7 +696,7 @@ export function runParity(
   for (const entry of checks) {
     report(`CI quality / ${entry.ci.name ?? entry.script}: ${entry.script}`);
     const expected = { script: entry.script, command: entry.command, env: { ...env } };
-    execute(root, entry, { ...env });
+    runCheck(root, entry, { ...env });
     receipts.push(expected); // Only after successful synchronous execution.
   }
   const after = inputs();
