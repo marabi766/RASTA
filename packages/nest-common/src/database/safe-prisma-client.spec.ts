@@ -278,3 +278,21 @@ test('FU-321: disconnect permanently closes the client across extensions', async
   expect(raw.$transaction).not.toHaveBeenCalled();
   expect(raw.$connect).not.toHaveBeenCalled();
 });
+
+test('CI: an already submitted result outside an abandoned worker survives disconnect', async () => {
+  const raw = client();
+  raw.$disconnect.mockResolvedValue();
+  let finish = (): void => undefined;
+  raw.$transaction.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = () => resolve('submitted');
+      }),
+  );
+  const guarded = createSafePrismaClient(() => raw, 'DATABASE_URL_ASSET');
+  const pending = guarded.$transaction(() => Promise.resolve());
+  await guarded.$disconnect();
+  finish();
+  await expect(pending).resolves.toBe('submitted');
+  await expect(guarded.$transaction(() => Promise.resolve())).rejects.toThrow('Database shutdown');
+});

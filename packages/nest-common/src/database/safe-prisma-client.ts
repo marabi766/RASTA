@@ -83,12 +83,12 @@ function checkingTransaction(
   client: SessionCheckClient,
   [work, ...rest]: unknown[],
   prove: (transaction: unknown) => void,
-  admitted: <R>(work: () => PromiseLike<R>) => Promise<R>,
+  beforeCommit: <R>(work: () => PromiseLike<R>) => Promise<R>,
 ): { args: unknown[]; result: (value: unknown) => unknown } {
   if (typeof work === 'function') {
     const checked = async (tx: SessionCheckClient, ...more: unknown[]): Promise<unknown> => {
       await tx.$queryRawUnsafe(UTC_SESSION_CHECK_SQL);
-      return admitted(async () => (work as (...args: unknown[]) => unknown)(tx, ...more));
+      return beforeCommit(async () => (work as (...args: unknown[]) => unknown)(tx, ...more));
     };
     return { args: [checked, ...rest], result: (value) => value };
   }
@@ -133,8 +133,12 @@ export function createSafePrismaClient<T extends object>(
       if (closing) throw new Error('Database shutdown: new operation refused');
     };
     const admitted = <R>(work: () => PromiseLike<R>): Promise<R> =>
-      workerOperation(async () => {
+      workerOperation(() => {
         assertOpen();
+        return work();
+      });
+    const beforeCommit = <R>(work: () => PromiseLike<R>): Promise<R> =>
+      admitted(async () => {
         const result = await work();
         assertOpen();
         return result;
@@ -239,7 +243,7 @@ export function createSafePrismaClient<T extends object>(
                     client as unknown as SessionCheckClient,
                     args,
                     prove,
-                    admitted,
+                    beforeCommit,
                   );
                   return checked.result(
                     await (Reflect.apply(value, client, checked.args) as PromiseLike<unknown>),

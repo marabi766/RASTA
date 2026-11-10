@@ -422,7 +422,7 @@ describe('fleet-service shutdown: relay, purge and consumer by one deadline (D-0
     expect(calls.handled).toBe(1);
   }, 30_000);
 
-  it('a handler that finishes after the close: its message is not committed, and its redelivery is skipped — applied once', async () => {
+  it('a handler held past database close is refused; redelivery applies once and replay is skipped', async () => {
     const org = tenants().a;
     const assetId = id('AST');
     const event = assetCreated(org, assetId);
@@ -451,17 +451,16 @@ describe('fleet-service shutdown: relay, purge and consumer by one deadline (D-0
       expect(exits).toEqual([0]);
       expect(tookMs).toBeGreaterThanOrEqual(BUDGET_MS - 100);
 
-      // It ends now, its effect committed with its marker, after the deadline.
+      // Database shutdown refuses new work from the late continuation; no marker or effect.
       release();
       await delivered;
-      expect(outcomes).toEqual([undefined]);
+      expect(outcomes).toHaveLength(0);
       expect(first.committed).toEqual([]);
       expect(first.uncommitted).toEqual(['43']);
-      expect(await processedCount(prisma, event)).toBe(1);
+      expect(await processedCount(prisma, event)).toBe(0);
       jest.restoreAllMocks();
 
-      // The group delivers it again, to the next process: the marker stops it
-      // before any effect.
+      // The next process applies the uncommitted event; a further replay sees its marker.
       booted = await boot({
         handle: async function (this: AssetSyncConsumer, ...args) {
           const outcome = await realHandle.apply(this, args);
@@ -473,9 +472,13 @@ describe('fleet-service shutdown: relay, purge and consumer by one deadline (D-0
       });
       const effects = jest.spyOn(FleetRepository.prototype, 'upsertAssetRef');
       await booted.kafka.deliver('43', event);
-      expect(outcomes).toHaveLength(2);
-      expect(effects).not.toHaveBeenCalled();
+      expect(outcomes).toHaveLength(1);
+      expect(effects).toHaveBeenCalledTimes(1);
       expect(booted.kafka.committed).toEqual(['43']);
+      await booted.kafka.deliver('44', event);
+      expect(effects).toHaveBeenCalledTimes(1);
+      expect(outcomes).toHaveLength(2);
+      expect(booted.kafka.committed).toEqual(['43', '44']);
       expect(await processedCount(prisma, event)).toBe(1);
       const rows = await runUnscoped('test reads the replica across tenants', () =>
         prisma.client.assetRef.findMany({ where: { id: assetId } }),
