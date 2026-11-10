@@ -4,6 +4,7 @@ import { AppModule } from './app.module';
 import { MailWorker } from './channels/mail.worker';
 import { DispatcherConsumer } from './intake/dispatcher.consumer';
 import { ResolutionWorker } from './resolution/resolution.worker';
+import { PrismaService } from './prisma/prisma.service';
 import { ENV } from './tokens';
 
 /**
@@ -55,6 +56,9 @@ describe('AppModule shutdown wiring (Codex r1 on #276)', () => {
     expect(inject).toEqual(
       expect.arrayContaining([DispatcherConsumer, ResolutionWorker, MailWorker]),
     );
+    expect(inject).toContain(PrismaService);
+    expect([...stops.keys()].at(-1)).toBe(PrismaService);
+    expect('onModuleDestroy' in PrismaService.prototype).toBe(false);
     expect(stops.size).toBe(inject.length - 1);
     expect(stops.get(DispatcherConsumer)).toHaveLength(1);
     const deadlines = new Set([...stops.values()].map((calls) => calls[0]?.deadlineAt));

@@ -58,7 +58,7 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   });
 
   const sql = (statement: Prisma.Sql) =>

@@ -42,7 +42,7 @@ describe('preference changes are audited (L7-14)', () => {
       await prisma.client.notificationPreference.deleteMany({ where });
       await prisma.client.outboxMessage.deleteMany({ where });
     });
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const eventsFor = (organizationId: string, eventName: string) =>

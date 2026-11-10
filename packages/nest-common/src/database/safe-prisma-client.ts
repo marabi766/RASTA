@@ -12,6 +12,15 @@ import {
   uncheckedTransactionRefusal,
 } from './utc-session';
 
+const admissionClosers = new WeakMap<object, () => void>();
+
+/** Only guarded clients can participate in coordinated teardown. */
+export function closePrismaAdmission(client: object): void {
+  const close = admissionClosers.get(client);
+  if (!close) throw new Error('Database teardown requires a safe Prisma client');
+  close();
+}
+
 export type RuntimeDatabaseSetting = `DATABASE_URL_${(typeof DATABASE_SERVICES)[number]}`;
 
 /** A fresh diagnostic: no driver message, stack, input, metadata or cause survives. */
@@ -129,9 +138,10 @@ export function createSafePrismaClient<T extends object>(
   try {
     const raw = open();
     let closing = false;
+    let admissionClosed = false;
     const assertOpen = (): void => {
-      if (closing && hasWorkerContext()) {
-        throw new Error('Database shutdown: new worker operation refused');
+      if (admissionClosed || (closing && hasWorkerContext())) {
+        throw new Error('Database shutdown: new operation refused');
       }
     };
     const admitted = <R>(work: () => PromiseLike<R>): Promise<R> =>
@@ -221,8 +231,8 @@ export function createSafePrismaClient<T extends object>(
       }
       return guarded;
     };
-    const protect = (unchecked: object): T =>
-      new Proxy(extended(unchecked, sessionCheck) as T, {
+    const protect = (unchecked: object): T => {
+      const guarded = new Proxy(extended(unchecked, sessionCheck) as T, {
         get(client, key, receiver) {
           refuseUncheckedPredecessor(key);
           const value: unknown = Reflect.get(client, key, receiver);
@@ -288,6 +298,11 @@ export function createSafePrismaClient<T extends object>(
           return value;
         },
       });
+      admissionClosers.set(guarded, () => {
+        admissionClosed = true;
+      });
+      return guarded;
+    };
     // The extensions change diagnostics and refusals only; the generated model/method shape stays T.
     return protect(extended(raw, diagnostics));
   } catch (error) {
