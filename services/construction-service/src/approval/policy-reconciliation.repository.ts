@@ -115,8 +115,9 @@ export class PolicyReconciliationRepository {
     return runUnscoped(
       'the sweeper claims due reconciliation tasks of every tenant; each is then handled in its own tenant (Q-83)',
       () =>
-        this.prisma.client.$queryRawUnsafe<ClaimedTask[]>(
-          `UPDATE policy_reconciliation_task
+        this.prisma.transaction((tx) =>
+          tx.$queryRawUnsafe<ClaimedTask[]>(
+            `UPDATE policy_reconciliation_task
               SET lease_until = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($2::int * interval '1 second'),
                   lease_token = $3,
                   updated_at = (now() AT TIME ZONE 'UTC')
@@ -138,9 +139,10 @@ export class PolicyReconciliationRepository {
                   attempts,
                   generation,
                   lease_token AS "leaseToken"`,
-          limit,
-          leaseSeconds,
-          token,
+            limit,
+            leaseSeconds,
+            token,
+          ),
         ),
     );
   }
@@ -176,16 +178,16 @@ export class PolicyReconciliationRepository {
    * again (or the lease was lost), so the next sweep asks once more.
    */
   async markDone(task: ClaimedTask): Promise<boolean> {
-    if ((await this.complete(this.prisma.client, task, { currentGeneration: true })) > 0) {
-      return true;
-    }
-    await this.release(task);
-    return false;
+    return this.prisma.transaction(async (tx) => {
+      if ((await this.complete(tx, task, { currentGeneration: true })) > 0) return true;
+      await this.release(task, tx);
+      return false;
+    });
   }
 
   /** Lets go of the lease without finishing: the task stays open and, if due, is claimable at once. */
-  async release(task: ClaimedTask): Promise<number> {
-    return this.prisma.client.$executeRawUnsafe(
+  async release(task: ClaimedTask, tx = this.prisma.client): Promise<number> {
+    return tx.$executeRawUnsafe(
       `UPDATE policy_reconciliation_task
           SET lease_until = NULL, lease_token = NULL, updated_at = (now() AT TIME ZONE 'UTC')
         WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
@@ -224,17 +226,19 @@ export class PolicyReconciliationRepository {
 
   /** One more attempt, later, with the reason as a closed code. Fenced on the lease. */
   async retryLater(task: ClaimedTask, errorCode: string, backoffSeconds: number): Promise<number> {
-    return this.prisma.client.$executeRawUnsafe(
-      `UPDATE policy_reconciliation_task
+    return this.prisma.transaction((tx) =>
+      tx.$executeRawUnsafe(
+        `UPDATE policy_reconciliation_task
           SET attempts = attempts + 1, last_error_code = $4, updated_at = (now() AT TIME ZONE 'UTC'),
               next_attempt_at = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($5::int * interval '1 second'),
               lease_until = NULL, lease_token = NULL
         WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
-      task.organizationId,
-      task.id,
-      task.leaseToken,
-      errorCode,
-      backoffSeconds,
+        task.organizationId,
+        task.id,
+        task.leaseToken,
+        errorCode,
+        backoffSeconds,
+      ),
     );
   }
 

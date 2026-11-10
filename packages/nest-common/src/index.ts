@@ -415,3 +415,5 @@ export {
   NOT_CANONICAL_TEXT,
 } from './text/canonical-unique-text';
 export type { CanonicalUniqueTextOptions } from './text/canonical-unique-text';
+
+export { claimWhenReady } from './claim-when-ready';

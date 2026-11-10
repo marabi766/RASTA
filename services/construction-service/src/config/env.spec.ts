@@ -1,3 +1,4 @@
+import { claimedItemBudgetMs } from '@rasta/config';
 import { envEnumProbes } from '@rasta/config';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -98,7 +99,12 @@ describe('the transaction timeout', () => {
   it('accepts a value from 5 s to a minute', () => {
     for (const value of ['5000', '30000', '60000']) {
       expect(
-        load({ CONSTRUCTION_TRANSACTION_TIMEOUT_MS: value }).CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+        load({
+          CONSTRUCTION_TRANSACTION_TIMEOUT_MS: value,
+          CONSTRUCTION_RECONCILE_LEASE_SECONDS: '300',
+          CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '300',
+          CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '300',
+        }).CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
       ).toBe(Number(value));
     }
   });
@@ -739,6 +745,9 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
   it('moves with the transaction timeout, above the opening', () => {
     const slowTransactions = {
       CONSTRUCTION_TRANSACTION_TIMEOUT_MS: '60000',
+      CONSTRUCTION_RECONCILE_LEASE_SECONDS: '300',
+      CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '300',
+      CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '300',
       CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: '30000',
     };
     expect(() => load({ ...slowTransactions, DATABASE_STATEMENT_TIMEOUT_MS: '30001' })).toThrow(
@@ -846,4 +855,28 @@ describe('strict whole-number timing budgets', () => {
       }
     },
   );
+});
+
+describe('FU-320 complete claimed-item lease budget', () => {
+  it.each([
+    'CONSTRUCTION_RECONCILE_LEASE_SECONDS',
+    'CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS',
+    'CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS',
+  ])('%s refuses an infeasible lease and accepts the defaults', (field) => {
+    expect(() => load()).not.toThrow();
+    expect(() => load({ [field]: '10' })).toThrow(field);
+    const requestMs = field.includes('RECONCILE') ? 3000 : field.includes('AWARD') ? 5000 : 0;
+    const bound = claimedItemBudgetMs(15_000, requestMs);
+    expect(() => load({ [field]: String(bound / 1000) })).toThrow(field);
+    expect(() => load({ [field]: String(bound / 1000 + 1) })).not.toThrow();
+  });
+  it('refuses the 10-second lease / 60-second supplier trigger; an adequate lease accepts it', () => {
+    const trigger = {
+      CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '10',
+      CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: '60000',
+      CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: '1',
+    };
+    expect(() => load(trigger)).toThrow('CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS');
+    expect(() => load({ ...trigger, CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '120' })).not.toThrow();
+  });
 });

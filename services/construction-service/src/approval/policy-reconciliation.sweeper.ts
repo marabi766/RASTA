@@ -3,6 +3,7 @@ import {
   RastaError,
   createSystemContext,
   runWithContext,
+  claimWhenReady,
   withinDeadline,
   type OutboxStopOptions,
 } from '@rasta/nest-common';
@@ -53,7 +54,7 @@ function errorCodeOf(error: unknown): string {
 /**
  * Works the queue `OrganizationMovedConsumer` fills (Q-83, docs/23 D-041).
  *
- * Each sweep claims a bounded batch of due tasks (`FOR UPDATE SKIP LOCKED`
+ * Each sweep claims due tasks one when ready, up to its limit (`FOR UPDATE SKIP LOCKED`
  * plus a lease and a fencing token, so any number of instances may run), asks
  * organization-service whether each policy's union still governs its
  * organization — signed for the writing union, as everywhere — and:
@@ -63,8 +64,8 @@ function errorCodeOf(error: unknown): string {
  *     commit together;
  *   - **within** → DONE, nothing changed — but only if no later move coalesced
  *     into the task since the claim (its `generation`); otherwise the lookup may
- *     predate that move, so the task is released, due at once, and the next sweep
- *     asks again;
+ *     predate that move, so the task is released, due at once, and the next claim
+ *     asks afresh;
  *   - **could not confirm** → the policy is left exactly as it is, the task's
  *     attempts go up and its next attempt moves out by an exponential backoff.
  *     Nothing partial, and nothing skipped: the task stays until an answer comes.
@@ -150,14 +151,13 @@ export class PolicyReconciliationSweeper {
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
   async runOnce(): Promise<SweepOutcome> {
-    const token = ulid();
-    const tasks = await this.reconciliations.claimDue(
+    const tasks = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      token,
+      () => this.stopped,
+      () => this.reconciliations.claimDue(1, this.options.leaseSeconds, ulid()),
     );
     const outcome: SweepOutcome = {
-      claimed: tasks.length,
+      claimed: 0,
       suspended: 0,
       confirmed: 0,
       retried: 0,
@@ -165,20 +165,9 @@ export class PolicyReconciliationSweeper {
       notOwned: 0,
     };
 
-    // One question per (union, organization) pair in the batch.
-    const answers = new Map<string, Promise<boolean>>();
-    const ask = (task: ClaimedTask): Promise<boolean> => {
-      const key = `${task.unionId}\u0000${task.organizationId}`;
-      let answer = answers.get(key);
-      if (!answer) {
-        answer = this.directory.isWithin(task.unionId, task.organizationId);
-        answers.set(key, answer);
-      }
-      return answer;
-    };
-
-    for (const task of tasks) {
-      // Stopping: the rest stay claimed until their lease runs out, then any sweep takes them.
+    for await (const task of tasks) {
+      outcome.claimed += 1;
+      // Stopping: only this item holds a claim; later items have not been claimed.
       if (this.stopped) break;
       const context = createSystemContext({
         correlationId: task.correlationId,
@@ -187,7 +176,7 @@ export class PolicyReconciliationSweeper {
       });
       try {
         await runWithContext(context, async () => {
-          const within = await ask(task);
+          const within = await this.directory.isWithin(task.unionId, task.organizationId);
           if (within) {
             // Nothing about the policy changes: the task alone is finished —
             // unless a later move coalesced into it after the claim, in which

@@ -1,5 +1,10 @@
 import { Logger } from '@nestjs/common';
-import { RastaError, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import {
+  RastaError,
+  claimWhenReady,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { windowSweepTotal } from '../observability/metrics';
@@ -55,7 +60,7 @@ const METRIC_RESULT: Record<SweepResult, string> = {
 /**
  * Ends the aggregation windows whose `closes_at` has passed (ADR-070 § 2, plan PR 2), so a window
  * ends on time whether or not another demand for its product ever arrives — the shape of
- * construction's `TenderCloseSweeper` (ADR-065 § 3). Each sweep claims a bounded batch of windows
+ * construction's `TenderCloseSweeper` (ADR-065 § 3). Each sweep claims a bounded number of windows, one when ready,
  * in one statement (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any number of
  * instances may run, and sweeps each in short transactions of its own, in the window's own tenant,
  * via `WindowSweepService`: the end, then — for a window of more demands than one batch — one
@@ -137,14 +142,13 @@ export class AggregationWindowSweeper {
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
   async runOnce(): Promise<WindowSweepOutcome> {
-    const fence = ulid();
-    const claimed = await this.sweeps.claimDue(
+    const claimed = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      fence,
+      () => this.stopped,
+      () => this.sweeps.claimDue(1, this.options.leaseSeconds, ulid()),
     );
     const outcome: WindowSweepOutcome = {
-      claimed: claimed.length,
+      claimed: 0,
       ended: 0,
       followed: 0,
       noop: 0,
@@ -153,7 +157,8 @@ export class AggregationWindowSweeper {
       failed: 0,
     };
 
-    for (const window of claimed) {
+    for await (const window of claimed) {
+      outcome.claimed += 1;
       const target = {
         organizationId: window.organizationId,
         aggregationId: window.id,

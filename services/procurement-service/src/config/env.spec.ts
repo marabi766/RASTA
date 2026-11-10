@@ -1,3 +1,4 @@
+import { claimedItemBudgetMs } from '@rasta/config';
 import { envEnumProbes } from '@rasta/config';
 import { randomBytes } from 'node:crypto';
 import { MAX_QUANTITY } from '../demand/dto';
@@ -453,6 +454,19 @@ describe('strict whole-number timing budgets', () => {
       ]) {
         expect(() => load({ [name]: value })).toThrow(name);
       }
+    },
+  );
+});
+
+describe('FU-320 complete claimed-item lease budget', () => {
+  it.each(['PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS', 'PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS'])(
+    '%s refuses an infeasible lease and accepts the defaults',
+    (field) => {
+      expect(() => load()).not.toThrow();
+      expect(() => load({ [field]: '10' })).toThrow(field);
+      const bound = claimedItemBudgetMs(5000);
+      expect(() => load({ [field]: String(bound / 1000) })).toThrow(field);
+      expect(() => load({ [field]: String(bound / 1000 + 1) })).not.toThrow();
     },
   );
 });

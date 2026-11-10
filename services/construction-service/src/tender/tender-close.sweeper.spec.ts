@@ -11,7 +11,7 @@ import { TenderCloseSweeper } from './tender-close.sweeper';
 const claim = (id: string): ClaimedTender => ({ id, organizationId: `ORG_${id}`, fence: 'F1' });
 
 function sweeperWith(claimed: ClaimedTender[], results: Record<string, CloseResult | Error>) {
-  const claimDue = jest.fn().mockResolvedValue(claimed);
+  const claimDue = jest.fn(async (limit: number) => claimed.splice(0, limit));
   const close = jest.fn(async (target: { tenderId: string }) => {
     const result = results[target.tenderId] ?? 'CLOSED';
     if (result instanceof Error) throw result;
@@ -33,12 +33,33 @@ function sweeperWith(claimed: ClaimedTender[], results: Record<string, CloseResu
 }
 
 describe('TenderCloseSweeper', () => {
-  it('claims at most the configured batch, for the configured lease, under one fence', async () => {
+  it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
+    jest.useFakeTimers();
+    try {
+      const { sweeper, claimDue, close } = sweeperWith([claim('A'), claim('B')], {});
+      const originalClaim = claimDue.getMockImplementation()!;
+      const times: number[] = [];
+      claimDue.mockImplementation(async (limit: number) => {
+        times.push(Date.now());
+        return originalClaim(limit);
+      });
+      close.mockImplementation(async (_target) => {
+        jest.setSystemTime(Date.now() + 11_000);
+        return 'CLOSED';
+      });
+      expect((await sweeper.runOnce()).closed).toBe(2);
+      expect(times[1]! - times[0]!).toBe(11_000);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('claims at most the configured batch, for the configured lease, one when ready', async () => {
     const { sweeper, claimDue } = sweeperWith([], {});
 
     await sweeper.runOnce();
 
-    expect(claimDue).toHaveBeenCalledWith(7, 45, expect.stringMatching(/^[0-9A-Z]{26}$/));
+    expect(claimDue).toHaveBeenCalledWith(1, 45, expect.stringMatching(/^[0-9A-Z]{26}$/));
   });
 
   it('closes each claimed tender in its own organization, under the fence it claimed with', async () => {

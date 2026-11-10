@@ -72,8 +72,9 @@ export class TenderCloseRepository {
     return runUnscoped(
       'the close sweeper claims overdue tenders of every tenant; each is then closed in its own tenant (ADR-065 § 3)',
       () =>
-        this.prisma.client.$queryRawUnsafe<ClaimedTender[]>(
-          `UPDATE "tender"
+        this.prisma.transaction((tx) =>
+          tx.$queryRawUnsafe<ClaimedTender[]>(
+            `UPDATE "tender"
               SET "close_lease_until" = clock_timestamp() + ($2::int * interval '1 second'),
                   "close_fence" = $3
             WHERE "id" IN (
@@ -86,9 +87,10 @@ export class TenderCloseRepository {
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
         RETURNING "id", "organization_id" AS "organizationId", "close_fence" AS "fence"`,
-          limit,
-          leaseSeconds,
-          fence,
+            limit,
+            leaseSeconds,
+            fence,
+          ),
         ),
     );
   }

@@ -14,7 +14,7 @@ const step = (result: SweepStep['result'], pending = false): SweepStep => ({ res
 
 /** Each window answers its steps in order; an `Error` is a failed step. */
 function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep | Error)[]>) {
-  const claimDue = jest.fn().mockResolvedValue(claimed);
+  const claimDue = jest.fn(async (limit: number) => claimed.splice(0, limit));
   const taken = new Map<string, number>();
   const stepFn = jest.fn(async (target: SweepTarget) => {
     const index = taken.get(target.aggregationId) ?? 0;
@@ -41,12 +41,33 @@ function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep 
 const NONE = { claimed: 0, ended: 0, followed: 0, noop: 0, notDue: 0, lost: 0, failed: 0 };
 
 describe('AggregationWindowSweeper', () => {
-  it('claims at most the configured batch, for the configured lease, under one fence', async () => {
+  it('keeps later leases fresh across 11-second processing (FU-320)', async () => {
+    jest.useFakeTimers();
+    try {
+      const { sweeper, claimDue, step: stepFn } = sweeperWith([claim('A'), claim('B')], {});
+      const originalClaim = claimDue.getMockImplementation()!;
+      const times: number[] = [];
+      claimDue.mockImplementation(async (limit: number) => {
+        times.push(Date.now());
+        return originalClaim(limit);
+      });
+      stepFn.mockImplementation(async (_target) => {
+        jest.setSystemTime(Date.now() + 11_000);
+        return step('ENDED');
+      });
+      expect((await sweeper.runOnce()).ended).toBe(2);
+      expect(times[1]! - times[0]!).toBe(11_000);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('claims at most the configured batch, for the configured lease, one when ready', async () => {
     const { sweeper, claimDue } = sweeperWith([], {});
 
     await sweeper.runOnce();
 
-    expect(claimDue).toHaveBeenCalledWith(7, 45, expect.stringMatching(/^[0-9A-Z]{26}$/));
+    expect(claimDue).toHaveBeenCalledWith(1, 45, expect.stringMatching(/^[0-9A-Z]{26}$/));
   });
 
   it('sweeps each claimed window in its own organization, under the fence it claimed with, renewing with the lease', async () => {

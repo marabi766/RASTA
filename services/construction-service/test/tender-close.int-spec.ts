@@ -507,6 +507,9 @@ describe('tender close sweeper', () => {
     ): Promise<Statement> => {
       let sent: Statement | undefined;
       const recorder = {
+        transaction<T>(fn: (tx: PrismaService['client']) => Promise<T>): Promise<T> {
+          return fn(this.client as unknown as PrismaService['client']);
+        },
         client: {
           $queryRawUnsafe: (sql: string, ...params: unknown[]) => {
             sent = { sql, params };
