@@ -289,4 +289,4 @@ main()
     console.error('Organization seed failed:', error);
     process.exit(1);
   })
-  .finally(() => void database.onModuleDestroy());
+  .finally(() => void database.stop());

@@ -70,7 +70,7 @@ export async function createProtocolSchema(): Promise<void> {
       `GRANT SELECT, INSERT, UPDATE, DELETE ON "${PROTOCOL_SCHEMA}".outbox_message TO "${runtime}"`,
     );
   } finally {
-    await admin.onModuleDestroy();
+    await admin.stop();
   }
 }
 
@@ -79,7 +79,7 @@ export async function dropProtocolSchema(): Promise<void> {
   try {
     await admin.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${PROTOCOL_SCHEMA}" CASCADE`);
   } finally {
-    await admin.onModuleDestroy();
+    await admin.stop();
   }
 }
 
@@ -346,7 +346,7 @@ export async function installReleaseProbe(reader: PrismaService): Promise<Releas
       await admin.client.$executeRawUnsafe(statement);
     }
   } finally {
-    await admin.onModuleDestroy();
+    await admin.stop();
   }
   return {
     reset: async () => {
@@ -371,7 +371,7 @@ export async function installReleaseProbe(reader: PrismaService): Promise<Releas
         await owner.client.$executeRawUnsafe(`DROP FUNCTION IF EXISTS ${schema}.release_probe()`);
         await owner.client.$executeRawUnsafe(`DROP SEQUENCE IF EXISTS ${fires}, ${ms}`);
       } finally {
-        await owner.onModuleDestroy();
+        await owner.stop();
       }
     },
   };

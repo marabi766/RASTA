@@ -185,7 +185,8 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     {
       provide: PrismaService,
       inject: [ENV],
-      useFactory: (env: AuditEnv): PrismaService => new PrismaService(env.DATABASE_URL),
+      useFactory: (env: AuditEnv): PrismaService =>
+        new PrismaService(env.DATABASE_URL, env.SHUTDOWN_TIMEOUT_MS),
     },
 
     AuditRepository,

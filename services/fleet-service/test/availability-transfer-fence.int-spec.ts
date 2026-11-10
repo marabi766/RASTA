@@ -38,7 +38,7 @@ describe('availability under a pending transfer', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const created = (assetId: string): EventEnvelope => ({

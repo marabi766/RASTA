@@ -1,5 +1,10 @@
-import { createSafePrismaClient } from '@rasta/nest-common';
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import {
+  DatabaseTeardown,
+  type DatabaseCloseReport,
+  type OutboxStopOptions,
+  createSafePrismaClient,
+} from '@rasta/nest-common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
@@ -85,8 +90,9 @@ export const PLUMBING_MODELS = ['OutboxStreamSequence', 'ProcessedEvent'] as con
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()
-export class PrismaService implements OnModuleInit, OnModuleDestroy {
+export class PrismaService implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
+  private teardown?: DatabaseTeardown;
   private readonly base: PrismaClient;
 
   /** The client every repository uses. Tenant scoping is already applied. */
@@ -154,8 +160,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.base.$disconnect();
+  /** The coordinator closes this pool after workers and publishers, by its deadline. */
+  stop(options: OutboxStopOptions = {}): Promise<DatabaseCloseReport> {
+    return (this.teardown ??= new DatabaseTeardown(this.base, this.logger)).stop(options);
   }
 
   /**

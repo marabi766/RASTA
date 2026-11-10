@@ -47,7 +47,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function machine(organizationId = org.a): Promise<string> {

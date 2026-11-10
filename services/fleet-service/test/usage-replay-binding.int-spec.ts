@@ -115,7 +115,7 @@ describe('usage replay binding', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   // A fresh 8-hour window per call, a day apart, so no two tests overlap.
@@ -475,7 +475,7 @@ describe('usage replay binding', () => {
       narrowService = new UsageService(narrowRepository);
     });
 
-    afterAll(() => narrow.onModuleDestroy());
+    afterAll(() => narrow.stop());
 
     it("returns the twin's record instead of waiting for a second connection", async () => {
       // B's look before validation finds nothing; then A — the same driver,

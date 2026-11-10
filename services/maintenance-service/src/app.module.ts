@@ -323,6 +323,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         UsageConsumer,
         AssetSyncConsumer,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -332,6 +333,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         usage: UsageConsumer,
         assetSync: AssetSyncConsumer,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: MaintenanceEnv,
       ) =>
         new OutboxShutdown({
@@ -340,6 +342,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
           workers: [dueScanner, usage, assetSync],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

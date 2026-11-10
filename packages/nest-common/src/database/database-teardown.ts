@@ -1,3 +1,4 @@
+import { DEFAULT_SHUTDOWN_TIMEOUT_MS, outboxShutdownBudgetMs } from '@rasta/config';
 import type { Logger } from '@nestjs/common';
 import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
 import { closePrismaAdmission } from './safe-prisma-client';
@@ -18,7 +19,10 @@ export class DatabaseTeardown {
   stop(options: OutboxStopOptions = {}): Promise<DatabaseCloseReport> {
     if (!this.stopping) {
       closePrismaAdmission(this.client);
-      this.stopping = this.close(options.deadlineAt);
+      this.stopping = this.close(
+        options.deadlineAt ??
+          Date.now() + outboxShutdownBudgetMs({ SHUTDOWN_TIMEOUT_MS: DEFAULT_SHUTDOWN_TIMEOUT_MS }),
+      );
     }
     return this.stopping;
   }

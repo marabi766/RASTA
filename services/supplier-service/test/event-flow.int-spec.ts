@@ -145,7 +145,7 @@ describeWithKafka('supplier event flow over Kafka', () => {
     await consumer?.disconnect();
     await publisher?.stop();
     await cleanup(prisma, organizations);
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   }, 60_000);
 
   /** Every message this run delivered for one supplier, in arrival order. */

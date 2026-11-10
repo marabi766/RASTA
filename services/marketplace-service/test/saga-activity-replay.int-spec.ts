@@ -60,7 +60,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asBuyer = <T>(fn: () => Promise<T>) =>

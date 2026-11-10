@@ -82,7 +82,7 @@ describe('D-5 — the database is the only clock a persisted fact uses', () => {
   afterAll(async () => {
     jest.useRealTimers();
     await cleanup(prisma, organizations);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /**

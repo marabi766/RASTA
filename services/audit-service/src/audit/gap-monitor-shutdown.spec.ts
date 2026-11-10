@@ -1,3 +1,4 @@
+import { createSafePrismaClient } from '@rasta/nest-common';
 import { Test } from '@nestjs/testing';
 import { ENV } from '../tokens';
 import { AppModule } from '../app.module';
@@ -38,6 +39,7 @@ function slowDatabase(heldQuery = 1) {
   });
   const state = { queries: 0, queriesAfterDisconnect: 0, disconnected: false };
   const client = {
+    $extends: (_extension: unknown): object => client,
     $connect: async () => undefined,
     $disconnect: async () => {
       state.disconnected = true;
@@ -103,7 +105,9 @@ describe.each([
       jest.spyOn(metric as { set?: () => void; inc: () => void }, 'set' in metric ? 'set' : 'inc'),
     );
     const prisma = new PrismaService('postgresql://nobody:nothing@127.0.0.1:1/none');
-    Object.defineProperty(prisma, 'client', { value: client });
+    Object.defineProperty(prisma, 'client', {
+      value: createSafePrismaClient(() => client, 'DATABASE_URL_AUDIT'),
+    });
     const moduleRef = await Test.createTestingModule({
       providers: [
         { provide: PrismaService, useValue: prisma },
@@ -131,7 +135,9 @@ describe.each([
   it('finishes the sample in flight before the database disconnects: no query after $disconnect', async () => {
     const { client, state, release } = slowDatabase();
     const prisma = new PrismaService('postgresql://nobody:nothing@127.0.0.1:1/none');
-    Object.defineProperty(prisma, 'client', { value: client });
+    Object.defineProperty(prisma, 'client', {
+      value: createSafePrismaClient(() => client, 'DATABASE_URL_AUDIT'),
+    });
     const moduleRef = await Test.createTestingModule({
       providers: [
         { provide: PrismaService, useValue: prisma },

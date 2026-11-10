@@ -483,7 +483,7 @@ describe('fleet-service shutdown: relay, purge and consumer by one deadline (D-0
       expect(rows).toHaveLength(1);
     } finally {
       await cleanup(prisma, [org]);
-      await prisma.onModuleDestroy();
+      await prisma.stop();
     }
   }, 60_000);
 });

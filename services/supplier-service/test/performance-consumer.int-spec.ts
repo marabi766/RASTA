@@ -147,8 +147,8 @@ describe('performance consumer (ADR-052 step 5)', () => {
   });
 
   afterAll(async () => {
-    await prisma.onModuleDestroy();
-    await owner.onModuleDestroy();
+    await prisma.stop();
+    await owner.stop();
   });
 
   const ALL_TIME: [Date, Date] = [new Date('2000-01-01'), new Date('2100-01-01')];
@@ -707,7 +707,7 @@ describeWithKafka('performance consumer over Kafka', () => {
     await consumer?.stop();
     await dlqReader?.disconnect();
     await producer?.disconnect();
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   }, 60_000);
 
   it('records a fact marketplace published, under the supplier', async () => {

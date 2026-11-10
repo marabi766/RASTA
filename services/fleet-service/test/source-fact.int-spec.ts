@@ -76,7 +76,7 @@ describe('usage source fact', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('states the record as fleet-service stored it, with the user who recorded it', async () => {

@@ -1,3 +1,4 @@
+import { PrismaService } from './prisma/prisma.service';
 import 'reflect-metadata';
 import { OutboxShutdown } from '@rasta/nest-common';
 import {
@@ -35,6 +36,6 @@ describe('AppModule closes the Kafka publisher after the outbox drain (D-052 pha
       envToken: ENV,
     });
 
-    expect(publisherCloseProblems(stops, KafkaEventPublisher)).toEqual([]);
+    expect(publisherCloseProblems(stops, KafkaEventPublisher, [PrismaService])).toEqual([]);
   });
 });

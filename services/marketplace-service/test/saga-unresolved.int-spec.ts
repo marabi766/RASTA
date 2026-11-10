@@ -58,7 +58,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function place(): Promise<string> {

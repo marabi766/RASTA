@@ -40,7 +40,7 @@ describe('insurance:clear-transferred (Q-101)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const eventFor = (

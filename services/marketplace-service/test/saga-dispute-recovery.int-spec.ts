@@ -58,7 +58,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asBuyer = <T>(fn: () => Promise<T>) =>

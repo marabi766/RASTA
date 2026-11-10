@@ -108,7 +108,7 @@ describe('a replica never keeps an earlier tenure’s insurance (#240 r13)', () 
       ALL,
     );
     await cleanup(prisma, ALL);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const event = (
