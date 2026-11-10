@@ -58,7 +58,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * `onModuleDestroy` cannot be ordered before this one: instead the provider registers its
    * stop here, and `onModuleDestroy` below awaits every one of them, then disconnects.
    */
-  private readonly beforeDisconnectHooks: (() => Promise<void>)[] = [];
+  private readonly beforeDisconnectHooks: ((options: OutboxStopOptions) => Promise<void>)[] = [];
 
   constructor(
     databaseUrl: string,
@@ -103,7 +103,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Registers a stop that completes (boundedly) before `$disconnect`; see the field above. */
-  beforeDisconnect(stop: () => Promise<void>): void {
+  beforeDisconnect(stop: (options: OutboxStopOptions) => Promise<void>): void {
     this.beforeDisconnectHooks.push(stop);
   }
 
@@ -114,7 +114,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   private async drain(): Promise<void> {
     const deadlineAt =
       Date.now() + outboxShutdownBudgetMs({ SHUTDOWN_TIMEOUT_MS: this.shutdownTimeoutMs });
-    const hooks = Promise.allSettled(this.beforeDisconnectHooks.map(async (stop) => stop()));
+    const hooks = Promise.allSettled(
+      this.beforeDisconnectHooks.map(async (stop) => stop({ deadlineAt })),
+    );
     await withinDeadline(hooks, deadlineAt - Date.now());
     await this.stop({ deadlineAt });
   }

@@ -1,4 +1,4 @@
-import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
 import { ENV } from '../tokens';
 import { PrismaService } from '../prisma/prisma.service';
 import { SamplingLoop, type SamplingSignal } from './sampling-loop';
@@ -24,7 +24,7 @@ import { RfqEvidenceRepository } from './rfq-evidence.repository';
  * (a new gap, for the ingestion-failure alert). Identifiers of held events are never labels.
  */
 @Injectable()
-export class RfqGapMonitor implements OnModuleInit, OnModuleDestroy {
+export class RfqGapMonitor implements OnModuleInit {
   /** Held receipts already counted, so a sample every minute does not count one forever. */
   private readonly alerted = new Set<string>();
 
@@ -35,17 +35,12 @@ export class RfqGapMonitor implements OnModuleInit, OnModuleDestroy {
     @Inject(ENV) private readonly env: AuditEnv,
     prisma: PrismaService,
   ) {
-    // Ordered before the client's disconnect (Nest destroys providers concurrently, so
-    // this monitor's own hook is not enough): `PrismaService.onModuleDestroy` awaits it.
-    prisma.beforeDisconnect(() => this.loop.stop());
+    // The database coordinator owns the stop and its absolute deadline.
+    prisma.beforeDisconnect((options) => this.loop.stop(options));
   }
 
   onModuleInit(): void {
     this.loop.start();
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    await this.loop.stop();
   }
 
   async sample(signal: SamplingSignal): Promise<void> {
