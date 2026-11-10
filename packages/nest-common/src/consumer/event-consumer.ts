@@ -34,6 +34,7 @@ import { LOG_TEXT_MAX, safeLogText } from '../errors/safe-log-text';
 import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connection';
 import { kafkaShutdownDeadline } from '../kafka/bounded-disconnect';
 import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
+import { WorkerAbandonedError } from '../worker-boundary';
 
 /**
  * The consuming half of the outbox pattern (ADR-021).
@@ -712,6 +713,14 @@ export class EventConsumer {
         );
         return;
       } catch (error) {
+        // A worker's monotonic boundary also applies if the broker's epoch clock moved back.
+        if (error instanceof WorkerAbandonedError) {
+          this.abandon(
+            { topic, partition, offset },
+            'ABANDONED; submitted write outcome UNCONFIRMED',
+          );
+        }
+        this.abandonIfPastDeadline(run, { topic, partition, offset });
         // The envelope's eventId is the sender's text, so it is a quoted,
         // escaped field; the handler's message is sanitised and bounded.
         const event = `${envelope.eventName} ${logField(envelope.eventId)}`;

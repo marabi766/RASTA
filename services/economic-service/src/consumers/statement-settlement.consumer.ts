@@ -1,6 +1,10 @@
 import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
+  WorkerBoundary,
+  WorkerAbandonedError,
+  workerOperation,
+  withinDeadline,
   createSystemContext,
   invalidPayloadError,
   runWithContext,
@@ -18,7 +22,7 @@ import {
   statementApprovedSchema,
 } from '../events/consumed';
 import { SERVICE_NAME } from '../config/env';
-import { sourceVerificationsTotal } from '../observability/metrics';
+import { sourceVerificationsTotal, transactionsCreatedTotal } from '../observability/metrics';
 import {
   confirmStatementApproval,
   confirmTenant,
@@ -87,6 +91,11 @@ import type { BusinessLine } from '../generated/prisma';
 export class StatementSettlementConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(StatementSettlementConsumer.name);
   private readonly consumer: EventConsumer;
+  private readonly worker = new WorkerBoundary(() =>
+    this.logger.warn('Obligation worker ABANDONED; submitted write outcome UNCONFIRMED'),
+  );
+  private stopped = false;
+  private stopping?: Promise<void>;
 
   static readonly CONSUMER_NAME = 'economic-service.statement-settlement';
 
@@ -105,9 +114,21 @@ export class StatementSettlementConsumer implements OnModuleInit, OnApplicationS
     await this.consumer.start();
   }
 
-  /** An `OutboxShutdown` worker, as `settlement-authority` (D-052). */
-  stop(options?: OutboxStopOptions): Promise<void> {
-    return this.consumer.stop(options);
+  /** Drains broker and direct deliveries under the coordinator's one deadline. */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopped = true;
+    this.worker.stopAt(options.deadlineAt);
+    return (this.stopping ??= this.drain(options));
+  }
+
+  private async drain(options: OutboxStopOptions): Promise<void> {
+    const draining = Promise.all([this.consumer.stop(options), this.worker.current]);
+    void draining.catch(() => undefined); // Observe late disconnect rejection after abandonment.
+    if (options.deadlineAt === undefined) await draining;
+    else if ((await withinDeadline(draining, options.deadlineAt - Date.now())) === 'abandoned') {
+      this.worker.abandon();
+      this.logger.warn('Obligation worker ABANDONED; submitted write outcome UNCONFIRMED');
+    } else await draining;
   }
 
   /** Joins the stop `OutboxShutdown` began; returns at once. */
@@ -115,7 +136,15 @@ export class StatementSettlementConsumer implements OnModuleInit, OnApplicationS
     return this.stop();
   }
 
-  async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
+  handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
+    return this.worker.run(() => {
+      this.worker.assertActive();
+      if (this.stopped) throw new WorkerAbandonedError();
+      return workerOperation(() => this.process(envelope));
+    });
+  }
+
+  private async process(envelope: EventEnvelope): Promise<HandlerOutcome> {
     // The contract topic carries every contract and statement event; only the
     // financial chain's final approval is a fact this service acts on.
     if (envelope.eventName !== CONSUMED_EVENTS.STATEMENT_APPROVED) return 'SKIPPED';
@@ -147,7 +176,7 @@ export class StatementSettlementConsumer implements OnModuleInit, OnApplicationS
       }
 
       // Outside any transaction; throws on an owner that cannot be asked.
-      const fact = await this.sources.statement(tenant, payload.statementId);
+      const fact = await workerOperation(() => this.sources.statement(tenant, payload.statementId));
       const verdict = confirmStatementApproval(payload, fact);
       if (!verdict.confirmed || !fact) {
         this.refuse(payload.statementId, verdict.confirmed ? 'not_found' : verdict.mismatch);
@@ -173,8 +202,8 @@ export class StatementSettlementConsumer implements OnModuleInit, OnApplicationS
       if (!fact.approvedAt) this.refuse(payload.statementId, 'approval_mismatch');
       const approvedAt = new Date(fact.approvedAt);
 
-      const alreadyProcessed = await this.prisma.transaction(async (tx) => {
-        if (await this.alreadyProcessed(tx, envelope.eventId)) return true;
+      const outcome = await this.prisma.transaction(async (tx) => {
+        if (await this.alreadyProcessed(tx, envelope.eventId)) return null;
 
         // Every term from the owner's answer, none from the event.
         const result = await this.transactions.recordAuthorisedObligation(tx, {
@@ -192,15 +221,21 @@ export class StatementSettlementConsumer implements OnModuleInit, OnApplicationS
 
         await this.markProcessed(tx, envelope.eventId);
 
-        if (result.created) {
-          this.logger.log(`Recorded a settleable obligation for statement ${fact.statementId}`);
-        }
-        return false;
+        return result;
       });
+      this.worker.assertActive();
 
-      if (alreadyProcessed) {
+      if (outcome === null) {
         this.logger.debug(`Event ${envelope.eventId} already processed; no second effect`);
         return 'SKIPPED';
+      }
+      if (outcome.created) {
+        transactionsCreatedTotal.inc({
+          service: SERVICE_NAME,
+          type: 'CONSTRUCTION_STATEMENT',
+          source: 'event',
+        });
+        this.logger.log(`Recorded a settleable obligation for statement ${fact.statementId}`);
       }
       return undefined;
     });
