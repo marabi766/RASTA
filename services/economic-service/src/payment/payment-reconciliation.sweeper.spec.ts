@@ -1,10 +1,21 @@
 import { loadEconomicEnv, type EconomicEnv } from '../config/env';
+import { Logger } from '@nestjs/common';
+import { WorkerAbandonedError } from '@rasta/nest-common';
+import type { PrismaService } from '../prisma/prisma.service';
+import type { PaymentService } from './payment.service';
+import type { PaymentProvider } from './provider';
+import type { LedgerService } from '../ledger/ledger.service';
+import type { WalletRepository } from '../wallet/wallet.repository';
+import {
+  paymentReconciliationTotal,
+  paymentProviderRefundStatusTotal,
+} from '../observability/metrics';
 import { PaymentReconciliationSweeper } from './payment-reconciliation.sweeper';
 import type {
   PaymentReconciliationRepository,
   ClaimedTask,
 } from './payment-reconciliation.repository';
-import type { PaymentReconciler, ReconcileResult } from './payment-reconciler';
+import { PaymentReconciler, type ReconcileResult } from './payment-reconciler';
 
 /**
  * The sweeper's own behaviour, apart from the database (ADR-064 step B2): it
@@ -65,7 +76,81 @@ describe('PaymentReconciliationSweeper', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+    jest.restoreAllMocks();
   });
+
+  it.each(['transaction', 'provider'] as const)(
+    'drops both late %s outcomes without success, failure classification or retry',
+    async (stage) => {
+      for (const rejects of [false, true]) {
+        const { tasks } = build(['noop']);
+        let release!: () => void;
+        let entered!: () => void;
+        const started = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const wait = async () => {
+          entered();
+          await held;
+          if (rejects) throw new Error('late database/provider rejection');
+          return { action: 'RECORD_REFUNDED', resolution: 'REFUNDED' };
+        };
+        const retry = jest.fn().mockResolvedValue(1);
+        const transaction = jest.fn(wait);
+        const reconciler = new PaymentReconciler(
+          {
+            client: {
+              paymentIntent: {
+                findUnique: async () => ({
+                  organizationId: 'ORG-SWEEP',
+                  failureReason: stage === 'provider' ? 'REFUND_UNKNOWN' : null,
+                }),
+              },
+            },
+            transaction,
+          } as unknown as PrismaService,
+          {} as PaymentService,
+          {
+            ownershipOf: () => ({}),
+            retryLater: retry,
+          } as unknown as PaymentReconciliationRepository,
+          { getRefundStatus: wait } as unknown as PaymentProvider,
+          {} as LedgerService,
+          {} as WalletRepository,
+          env,
+        );
+        const sweeper = new PaymentReconciliationSweeper(
+          tasks as unknown as PaymentReconciliationRepository,
+          reconciler,
+          env,
+        );
+        const log = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+        const error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+        const metric = jest.spyOn(paymentReconciliationTotal, 'inc');
+        const providerMetric = jest.spyOn(paymentProviderRefundStatusTotal, 'inc');
+        const run = sweeper.runOnce(); // Operator/test entry is tracked too, without a timer.
+        const result = expect(run).rejects.toBeInstanceOf(WorkerAbandonedError);
+        await started;
+        await sweeper.stop({ deadlineAt: Date.now() - 1 });
+        release();
+        await result;
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('UNCONFIRMED'));
+        expect(log).not.toHaveBeenCalled();
+        expect(error).not.toHaveBeenCalled();
+        expect(metric).not.toHaveBeenCalled();
+        expect(providerMetric).not.toHaveBeenCalled();
+        expect(retry).not.toHaveBeenCalled();
+        expect(tasks.backlog).not.toHaveBeenCalled();
+        if (stage === 'provider') expect(transaction).not.toHaveBeenCalled();
+        await expect(sweeper.runOnce()).rejects.toBeInstanceOf(WorkerAbandonedError);
+        jest.restoreAllMocks();
+      }
+    },
+  );
 
   it('carries the heal window from one sweep to the next (Codex on #164)', async () => {
     const { sweeper, tasks } = build([]);
@@ -208,7 +293,7 @@ describe('PaymentReconciliationSweeper', () => {
     });
 
     it('returns by the deadline when the task in flight never finishes', async () => {
-      const { sweeper } = await heldInTheFirstTask();
+      const { sweeper, tasks, finish } = await heldInTheFirstTask();
 
       let stopped = false;
       const stopping = sweeper.stop({ deadlineAt: Date.now() + 300 }).then(() => {
@@ -219,6 +304,13 @@ describe('PaymentReconciliationSweeper', () => {
       await jest.advanceTimersByTimeAsync(1);
       await stopping;
       expect(stopped).toBe(true);
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+      const error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+      finish();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(tasks.backlog).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
     });
 
     it('clears its timer, returns at once when idle, and is one stop', async () => {
