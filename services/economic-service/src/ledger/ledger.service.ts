@@ -3,6 +3,7 @@ import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { reportAfterCommit } from '../prisma/commit-reporting';
 import { LedgerRepository } from './ledger.repository';
 import { accountCodeFor, isPlatformPurpose, naturalBalance, PURPOSE_TYPE } from './accounts';
 import { assertBalanced, reverseEntries, singleCurrency, type DraftEntry } from './journal';
@@ -233,11 +234,13 @@ export class LedgerService {
       },
     });
 
-    journalsPostedTotal.inc({
-      service: SERVICE_NAME,
-      type: draft.reverses ? 'REVERSAL' : draft.journalType,
+    reportAfterCommit(tx, () => {
+      journalsPostedTotal.inc({
+        service: SERVICE_NAME,
+        type: draft.reverses ? 'REVERSAL' : draft.journalType,
+      });
+      ledgerEntriesTotal.inc({ service: SERVICE_NAME }, rows.length);
     });
-    ledgerEntriesTotal.inc({ service: SERVICE_NAME }, rows.length);
 
     return { id: journalId, postedAt, currency, entries: rows };
   }
