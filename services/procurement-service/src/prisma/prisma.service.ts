@@ -3,7 +3,7 @@ import {
   PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
 } from '@rasta/config';
 import { createSafePrismaClient } from '@rasta/nest-common';
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
   createTenantGuardExtension,
@@ -53,7 +53,7 @@ export const TENANT_SCOPE_EXEMPT_MODELS = Object.keys(TENANT_SCOPE_EXEMPTIONS) a
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()
-export class PrismaService implements OnModuleInit, OnModuleDestroy {
+export class PrismaService implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
   private readonly base: PrismaClient;
 
@@ -119,7 +119,8 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async onModuleDestroy(): Promise<void> {
+  /** Closed only by OutboxShutdown, after workers and publishers have drained. */
+  async stop(): Promise<void> {
     await this.base.$disconnect();
   }
 

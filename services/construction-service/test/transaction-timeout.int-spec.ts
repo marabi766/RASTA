@@ -148,7 +148,7 @@ describe('the interactive transaction timeout', () => {
 
   afterAll(async () => {
     await observer.$disconnect();
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** Returns once no connection under test is inside a transaction. */
@@ -227,7 +227,7 @@ describe('the interactive transaction timeout', () => {
         expect(await startedBy((s) => s.transaction(one), longer)).toEqual([BUDGET_MS * 4]);
         expect(await startedBy((s) => s.snapshot(one), longer)).toEqual([BUDGET_MS * 4]);
       } finally {
-        await longer.onModuleDestroy();
+        await longer.stop();
       }
     });
 
@@ -264,7 +264,7 @@ describe('the interactive transaction timeout', () => {
         expect(endedByTimeout(observation, BUDGET_MS)).toBe(false);
         expect(endedByTimeout(observation, BUDGET_MS * 4)).toBe(true);
       } finally {
-        await longer.onModuleDestroy();
+        await longer.stop();
       }
     });
   });

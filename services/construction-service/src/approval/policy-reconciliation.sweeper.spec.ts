@@ -1,4 +1,4 @@
-import { expectLateAcknowledgementIgnored } from '@rasta/testing';
+import { expectLateAcknowledgementIgnored, expectAbandonedWorkerDrops } from '@rasta/testing';
 import type { OrganizationDirectory } from '../organization/organization-directory';
 import type {
   ClaimedTask,
@@ -32,13 +32,15 @@ const task = (id: string, organizationId: string): ClaimedTask => ({
 function build(tasks: ClaimedTask[]) {
   const reconciliations = {
     claimDue: jest.fn(async (limit: number) => tasks.splice(0, limit)),
+    retryLater: jest.fn(async () => undefined),
     markDone: jest.fn(async () => true),
     backlog: jest.fn(async () => ({ open: 1, due: 1, oldestDueAgeSeconds: 1 })),
   };
   const directory = { isWithin: jest.fn(async (): Promise<boolean> => true) };
+  const suspension = { suspend: jest.fn(async () => 'SUSPENDED') };
   const sweeper = new PolicyReconciliationSweeper(
     reconciliations as unknown as PolicyReconciliationRepository,
-    {} as unknown as PolicySuspensionService,
+    suspension as unknown as PolicySuspensionService,
     directory as unknown as OrganizationDirectory,
     {
       intervalMs: INTERVAL_MS,
@@ -49,10 +51,22 @@ function build(tasks: ClaimedTask[]) {
       backoffMaxSeconds: 100,
     },
   );
-  return { sweeper, reconciliations, directory };
+  return { sweeper, reconciliations, directory, suspension };
 }
 
 describe('PolicyReconciliationSweeper.stop', () => {
+  it.each(['reject', 'resolve', 'suspend'] as const)(
+    'FU-321: drops late %s after stop returns',
+    async (how) => {
+      const h = build([task('A', 'ORG_A')]);
+      await expectAbandonedWorkerDrops(h.sweeper, h.directory.isWithin, how !== 'suspend', how, [
+        h.reconciliations.retryLater,
+        h.reconciliations.markDone,
+        h.suspension.suspend,
+        h.reconciliations.backlog,
+      ]);
+    },
+  );
   it.each([50001, 120001])(
     'discards a delayed commit acknowledgement at %i ms',
     async (elapsed) => {

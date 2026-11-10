@@ -569,7 +569,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       idempotency,
       approvalRepository,
     ),
-    close: () => prisma.onModuleDestroy(),
+    close: () => prisma.stop(),
   };
 }
 

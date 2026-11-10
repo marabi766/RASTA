@@ -1,4 +1,5 @@
-import { expectLateAcknowledgementIgnored } from '@rasta/testing';
+import { AwardStandingCheckService as RealStandingCheckService } from './award-standing-check.service';
+import { expectLateAcknowledgementIgnored, expectAbandonedWorkerDrops } from '@rasta/testing';
 import type { AwardStandingCheckRepository, ClaimedCheck } from './award-standing-check.repository';
 import type {
   AwardStandingCheckService,
@@ -45,10 +46,35 @@ function sweeperWith(claimed: ClaimedCheck[]) {
       retryBackoffMaxSeconds: 900,
     },
   );
-  return { sweeper, claimDue, process };
+  return { sweeper, claimDue, process, recordFailure };
 }
 
 describe('AwardStandingCheckSweeper.stop', () => {
+  it.each(['reject', 'resolve'] as const)(
+    'FU-321: drops late %s after stop returns',
+    async (how) => {
+      const h = sweeperWith([claim('A')]);
+      const transaction = jest.fn();
+      const windowReport = jest.fn();
+      type Dependencies = ConstructorParameters<typeof RealStandingCheckService>;
+      const service = new RealStandingCheckService(
+        { transaction } as unknown as Dependencies[0],
+        {} as Dependencies[1],
+        {} as Dependencies[2],
+        { windowReport } as unknown as Dependencies[3],
+      );
+      h.process.mockImplementation((item) =>
+        service.process(item, { baseSeconds: 10, maxSeconds: 900 }),
+      );
+      await expectAbandonedWorkerDrops(
+        h.sweeper,
+        windowReport,
+        { suspensionCount: 0, qualificationRemoved: false },
+        how,
+        [h.recordFailure, transaction],
+      );
+    },
+  );
   it.each([35001, 120001])(
     'discards a delayed commit acknowledgement at %i ms',
     async (elapsed) => {

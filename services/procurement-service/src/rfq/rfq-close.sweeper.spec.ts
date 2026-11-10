@@ -1,4 +1,4 @@
-import { expectLateAcknowledgementIgnored } from '@rasta/testing';
+import { expectLateAcknowledgementIgnored, expectAbandonedWorkerDrops } from '@rasta/testing';
 import { RastaError } from '@rasta/nest-common';
 import type { ClaimedRfq, RfqRepository } from './rfq.repository';
 import type { RfqCloseResult, RfqCloseService, RfqCloseTarget } from './rfq-close.service';
@@ -36,6 +36,13 @@ function sweeperWith(claimed: ClaimedRfq[], results: Record<string, RfqCloseResu
 }
 
 describe('RfqCloseSweeper', () => {
+  it.each(['reject', 'resolve'] as const)(
+    'FU-321: drops late %s after stop returns',
+    async (how) => {
+      const h = sweeperWith([claim('A')], {});
+      await expectAbandonedWorkerDrops(h.sweeper, h.close, 'CLOSED', how, [h.recordFailure]);
+    },
+  );
   it.each([35001, 120001])(
     'discards a delayed commit acknowledgement at %i ms',
     async (elapsed) => {

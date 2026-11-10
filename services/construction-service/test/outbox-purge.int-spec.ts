@@ -187,7 +187,7 @@ describe('construction-service outbox purge (D-052)', () => {
            TO "${runtimeRole()}"`,
       );
     } finally {
-      await owner.onModuleDestroy();
+      await owner.stop();
     }
     runtime = new PrismaService(schemaUrl(), TRANSACTION_TIMEOUT_MS);
     holder = new PrismaService(schemaUrl(), TRANSACTION_TIMEOUT_MS);
@@ -202,13 +202,13 @@ describe('construction-service outbox purge (D-052)', () => {
   });
 
   afterAll(async () => {
-    await runtime?.onModuleDestroy();
-    await holder?.onModuleDestroy();
+    await runtime?.stop();
+    await holder?.stop();
     const owner = new PrismaService(ownerUrl(), TRANSACTION_TIMEOUT_MS);
     try {
       await owner.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`);
     } finally {
-      await owner.onModuleDestroy();
+      await owner.stop();
     }
   });
 
@@ -381,7 +381,7 @@ describe('construction-service outbox purge (D-052)', () => {
     } finally {
       letGo();
       await holding;
-      await starved.onModuleDestroy();
+      await starved.stop();
     }
     // The pool free again, the same row goes.
     expect(await purge().runOnce()).toMatchObject({ outcome: 'completed', deleted: 1 });

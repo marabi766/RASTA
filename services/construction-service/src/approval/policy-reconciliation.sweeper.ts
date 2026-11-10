@@ -1,3 +1,4 @@
+import { WorkerBoundary, workerOperation } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import {
   RastaError,
@@ -82,6 +83,7 @@ function errorCodeOf(error: unknown): string {
  */
 export class PolicyReconciliationSweeper {
   private readonly logger = new Logger(PolicyReconciliationSweeper.name);
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
   private stopping?: Promise<void>;
@@ -121,10 +123,9 @@ export class PolicyReconciliationSweeper {
    * after the relay, a sweep kept writing outbox rows while the relay drained,
    * and its wait came on top of the relay's.
    *
-   * Past the deadline the sweep is abandoned with a warning: a suspension, its
-   * event and the task's completion commit together, so an exit rolls back the
-   * one in flight, and the lease lets the next sweep, anywhere, take it and the
-   * rest of the batch again. Without a deadline it waits. One stop per process.
+   * At the deadline the shared worker boundary refuses further database work and drops late
+   * results. Submitted operations remain unconfirmed; leases/fences govern recovery.
+   * Without a deadline it waits. One stop per process.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
@@ -133,25 +134,30 @@ export class PolicyReconciliationSweeper {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
       return;
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
-        'Reconciliation sweep still running at the shutdown deadline; abandoned. The task in ' +
-          'flight rolls back and its lease lets the next sweep take it again',
+        'Sweep abandoned at shutdown deadline; in-flight outcome unconfirmed; lease/fence govern recovery',
       );
     }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
-  async runOnce(): Promise<SweepOutcome> {
+  runOnce(): Promise<SweepOutcome> {
+    return this.boundary.run(() => this.sweep());
+  }
+
+  private async sweep(): Promise<SweepOutcome> {
     const tasks = claimWhenReady(
       this.options.batchSize,
       () => this.stopped,
@@ -179,7 +185,9 @@ export class PolicyReconciliationSweeper {
       });
       try {
         await runWithContext(context, async () => {
-          const within = await this.directory.isWithin(task.unionId, task.organizationId);
+          const within = await workerOperation(() =>
+            this.directory.isWithin(task.unionId, task.organizationId),
+          );
           if (within) {
             // Nothing about the policy changes: the task alone is finished —
             // unless a later move coalesced into it after the claim, in which
@@ -214,13 +222,14 @@ export class PolicyReconciliationSweeper {
           });
         });
       } catch (error) {
+        if (this.boundary.abandoned) return outcome;
         outcome.retried += 1;
         policyReconciliationTotal.inc({ service: SERVICE_NAME, result: 'retried' });
         await this.retryLater(task, error);
       }
     }
 
-    if (outcome.claimed > 0) {
+    if (outcome.claimed > 0 && !this.boundary.abandoned) {
       const backlog = await this.reconciliations.backlog().catch(() => undefined);
       this.logger.log(
         `Reconciliation sweep: claimed ${outcome.claimed}, suspended ${outcome.suspended}, ` +

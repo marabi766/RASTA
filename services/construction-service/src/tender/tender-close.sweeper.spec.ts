@@ -1,4 +1,4 @@
-import { expectLateAcknowledgementIgnored } from '@rasta/testing';
+import { expectLateAcknowledgementIgnored, expectAbandonedWorkerDrops } from '@rasta/testing';
 import type { ClaimedTender, TenderCloseRepository } from './tender-close.repository';
 import type { CloseResult, TenderCloseService } from './tender-close.service';
 import { TenderCloseSweeper } from './tender-close.sweeper';
@@ -35,6 +35,13 @@ function sweeperWith(claimed: ClaimedTender[], results: Record<string, CloseResu
 }
 
 describe('TenderCloseSweeper', () => {
+  it.each(['reject', 'resolve'] as const)(
+    'FU-321: drops late %s after stop returns',
+    async (how) => {
+      const h = sweeperWith([claim('A')], {});
+      await expectAbandonedWorkerDrops(h.sweeper, h.close, 'CLOSED', how, [h.recordFailure]);
+    },
+  );
   it.each([35001, 120001])(
     'discards a delayed commit acknowledgement at %i ms',
     async (elapsed) => {
