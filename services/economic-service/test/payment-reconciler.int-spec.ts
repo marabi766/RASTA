@@ -773,6 +773,38 @@ describe('the payment reconciler (real database)', () => {
     });
   });
 
+  it('bounds concurrent claims across many due rows and never leases a task twice', async () => {
+    const other = newPrisma();
+    const made: string[] = [];
+    try {
+      for (let i = 0; i < 20; i++) {
+        const { intentId } = await topUp(i % 2 ? org.a : org.b, 1000n);
+        made.push(intentId);
+        await asActor({ organizationId: i % 2 ? org.a : org.b }, () =>
+          prisma.transaction((tx) =>
+            wiring.paymentReconciliation.open(tx, {
+              organizationId: i % 2 ? org.a : org.b,
+              paymentIntentId: intentId,
+              kind: 'REFUND',
+              due: 'NOW',
+              outcome: 'TEST',
+            }),
+          ),
+        );
+      }
+      const repositories = [wiring.paymentReconciliation, wire(other).paymentReconciliation];
+      const batches = await Promise.all(repositories.map((r) => r.claimDue(1, 600, ulid())));
+      for (const batch of batches) expect(batch).toHaveLength(1);
+      expect(new Set(batches.flat().map((row) => row.paymentIntentId)).size).toBe(2);
+    } finally {
+      await plantPaymentTask([
+        'DELETE FROM payment_reconciliation_task WHERE payment_intent_id = ANY($1::text[])',
+        made,
+      ]);
+      await other.stop();
+    }
+  });
+
   describe('concurrency: each resolution happens once', () => {
     it('lets two sweepers on the same due set resolve each intent once', async () => {
       const organizationId = `${org.c}-TWO-SWEEPERS`;

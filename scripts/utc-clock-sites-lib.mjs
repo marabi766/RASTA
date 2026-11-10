@@ -1883,6 +1883,26 @@ export function schemaDisagreements(repository, perService) {
   return disagreements;
 }
 
+// FU-324: an IN/ANY locking subquery can be rescanned and pick more rows than LIMIT.
+// Read tokens (including nested ARRAY/tuple forms), so comments/strings cannot hide a lock.
+export function claimSubqueryProblems(sql) {
+  const tokens = lex(sql);
+  for (let i = 0; i < tokens.length; i++) {
+    if (!isWord(tokens[i], 'in', 'any', 'some', 'all') || !isOp(tokens[i + 1], '(')) continue;
+    let depth = 1;
+    const body = [];
+    for (let j = i + 2; j < tokens.length && depth > 0; j++) {
+      if (isOp(tokens[j], '(')) depth++;
+      if (isOp(tokens[j], ')')) depth--;
+      if (depth > 0) body.push(tokens[j]);
+    }
+    const selects = body.some((t) => isWord(t, 'select', 'table'));
+    const locks = body.some((t, j) => isWord(t, 'for') && isWord(body[j + 1], 'update', 'no', 'share', 'key'));
+    if (selects && locks) return ['FU-324: locking IN/ANY subquery; use WITH picked AS MATERIALIZED (...) UPDATE ... FROM picked (DELETE ... USING picked)'];
+  }
+  return [];
+}
+
 export function utcClockProblems(repository) {
   const perService = collectTables(repository);
   const problems = schemaDisagreements(repository, perService).map(
@@ -1918,6 +1938,12 @@ export function utcClockProblems(repository) {
         const line = location.getLineAndCharacterOfPosition(literal.node.getStart()).line + 1;
         problems.push(`${local}:${line}: R0 unresolved SQL text passed to ${literal.sink}`);
         continue;
+      }
+      const claimProblems = claimSubqueryProblems(literal.text);
+      for (const problem of claimProblems) {
+        const location = literal.node.getSourceFile();
+        const line = location.getLineAndCharacterOfPosition(literal.node.getStart()).line + 1;
+        problems.push(`${local}:${line}: ${problem}`);
       }
       const found = problemsIn(literal.text, tables);
       if (found.length === 0) continue;

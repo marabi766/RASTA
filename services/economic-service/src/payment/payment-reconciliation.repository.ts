@@ -137,18 +137,20 @@ export class PaymentReconciliationRepository {
       'the payment reconciler claims due tasks of every tenant; each is then worked in its own tenant (ADR-064)',
       () =>
         this.prisma.client.$queryRawUnsafe<ClaimedTask[]>(
-          `UPDATE payment_reconciliation_task
-              SET lease_until = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($2::int * interval '1 second'),
-                  lease_token = $3,
-                  updated_at = (now() AT TIME ZONE 'UTC')
-            WHERE id IN (
-                  SELECT id FROM payment_reconciliation_task
+          `WITH picked AS MATERIALIZED (
+                  SELECT id AS picked_id FROM payment_reconciliation_task
                    WHERE status = 'PENDING'
                      AND next_attempt_at <= (now() AT TIME ZONE 'UTC')
                      AND (lease_until IS NULL OR lease_until <= (now() AT TIME ZONE 'UTC'))
                    ORDER BY next_attempt_at, id
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
+            UPDATE payment_reconciliation_task
+              SET lease_until = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($2::int * interval '1 second'),
+                  lease_token = $3,
+                  updated_at = (now() AT TIME ZONE 'UTC')
+             FROM picked
+            WHERE payment_reconciliation_task.id = picked.picked_id
         RETURNING id,
                   organization_id AS "organizationId",
                   payment_intent_id AS "paymentIntentId",

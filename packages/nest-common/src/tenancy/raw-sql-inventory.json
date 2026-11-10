@@ -51,7 +51,7 @@
   {
     "file": "services/asset-service/src/asset/asset.repository.ts",
     "line": 306,
-    "hash": "d12ec918571fb93eefeaa357165adf920dda27d48224b48df7322a4a475a1079",
+    "hash": "813b4b2fc857187fe5ded1a00fa57d1ccc9838fe3a00a371a9095f0fe51fceb2",
     "occurrence": 0,
     "decision": "platform-wide: insurance expiry worker claims or counts due policies across tenants, preserving each row tenant for subsequent event processing"
   },
@@ -352,7 +352,7 @@
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
     "line": 118,
-    "hash": "07098317db964d3fddae6bb8ed9c1810ca7c359d00818828d41e9e2ec8b05879",
+    "hash": "6cdece31217237f79403a788b8595623eb0c037b54facb2096596fa0bcb0c1e3",
     "occurrence": 0,
     "decision": "platform-wide: background policy-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -450,7 +450,7 @@
   {
     "file": "services/construction-service/src/tender/award-standing-check.repository.ts",
     "line": 66,
-    "hash": "9c0bf2c63ac4068daef63894ef3b12439ce568711e0f5c3b27e68dff43c0a86c",
+    "hash": "ace0b4d68e1cd6ca497a6dd74f28a63240456505166d8738a69fb975e152249c",
     "occurrence": 0,
     "decision": "platform-wide: background award-standing-check worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -562,7 +562,7 @@
   {
     "file": "services/construction-service/src/tender/tender-close.repository.ts",
     "line": 75,
-    "hash": "48bb9f1244dfa6b5ccdb7b01f5411b295eea502040d70e0107cc0469c14fa75b",
+    "hash": "8bc5c03a3b12e7d4b942d8a86cc22534ec6807ec6d0f56e860d161f02fc17916",
     "occurrence": 0,
     "decision": "platform-wide: background tender-close worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -653,7 +653,7 @@
   {
     "file": "services/contract-service/src/policy/policy-reconciliation.repository.ts",
     "line": 183,
-    "hash": "0234d38b8570753e83be28388123bdbb24e55bf8c27eaf1eda269474b69a085e",
+    "hash": "58daca8e7b2585b254a8d51f58901c4b979adcd933a931834c735ac5e825ae64",
     "occurrence": 0,
     "decision": "platform-wide: background policy-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -856,7 +856,7 @@
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
     "line": 139,
-    "hash": "519babb8fc1debfb77509308ab5118fd630daeb1d274d5a831741d6f4eaa804e",
+    "hash": "0b09225431b5d3f07d8235ebf0768073db5a482244bb7e773c3b3e3327f80d70",
     "occurrence": 0,
     "decision": "platform-wide: background payment-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -1227,7 +1227,7 @@
   {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 558,
-    "hash": "fa0a34db5eb25db9e8e177675c1650a19b346e21127c58d1255617298dab56cb",
+    "hash": "bc9fa8556ab393bc5005b711b2be4e1ba592628944ef11af051eb28efb797a60",
     "occurrence": 0,
     "decision": "platform-wide: asset transfer fences and release tombstones follow the global machine across owners; keyed by asset and fence, with bounded expiry"
   },
@@ -2291,7 +2291,7 @@
   {
     "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
     "line": 572,
-    "hash": "fa0a34db5eb25db9e8e177675c1650a19b346e21127c58d1255617298dab56cb",
+    "hash": "bc9fa8556ab393bc5005b711b2be4e1ba592628944ef11af051eb28efb797a60",
     "occurrence": 0,
     "decision": "platform-wide: asset transfer fences and release tombstones follow the global machine across owners; keyed by asset and fence, with bounded expiry"
   },
@@ -2914,7 +2914,7 @@
   {
     "file": "services/procurement-service/src/demand/window-sweep.repository.ts",
     "line": 64,
-    "hash": "52db04d4cee88564f908f0b3fc7114b7c3663e9046a3e7f4a02e1f603a960f50",
+    "hash": "11051f56ae598e6f62e7b01274399107184c4c0e4c3e688ef5cb4ba1027ac707",
     "occurrence": 0,
     "decision": "platform-wide: background window-sweep worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -2998,7 +2998,7 @@
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",
     "line": 303,
-    "hash": "8478380eb2feee01de9a9c3ccea5c8b6663a90fdbdaad5061275498a21ef46da",
+    "hash": "9f19eaf3b106902bd2c12daedd6b2dc0f35f94a6c48acf714418d695a2839aa4",
     "occurrence": 0,
     "decision": "platform-wide: background rfq worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },

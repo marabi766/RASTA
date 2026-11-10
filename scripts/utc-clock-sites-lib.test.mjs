@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  claimSubqueryProblems,
   REVIEWED_DO_BLOCKS,
   definitionBinding,
   REVIEWED_FUNCTIONS,
@@ -2104,4 +2105,21 @@ for (const [name, args, expected] of [
   assert.match(sinkTextsOf(source).join(), expected);
   const migration = 'CREATE TABLE task (id text, at timestamp(3));';
   assert.match(scanOf('x-service', migration, source).join(), /R1/);
+});
+
+test('FU-324 refuses locking membership subqueries, including tuple DELETE and ANY ARRAY', () => {
+  const from = 'FROM t LIMIT 1 /* gap */ LOCK';
+  const forms = [`id IN (SELECT id ${from})`, `(id, org) IN (SELECT id, org ${from})`,
+    `id = ANY(ARRAY(SELECT id ${from}))`, `id = ALL(SELECT id ${from})`];
+  for (const membership of forms) {
+    for (const lock of ['FOR UPDATE', 'FOR NO KEY UPDATE SKIP LOCKED', 'FOR SHARE']) {
+      const sql = `DELETE FROM t WHERE ${membership.replace('LOCK', lock)}`;
+      assert.match(claimSubqueryProblems(sql).join(), /WITH picked AS MATERIALIZED/);
+    }
+  }
+  assert.match(claimSubqueryProblems('DELETE FROM t WHERE id IN (TABLE t LIMIT 1 FOR UPDATE)').join(), /MATERIALIZED/);
+  const cte = `WITH picked AS MATERIALIZED (SELECT id FROM t LIMIT 1 FOR UPDATE SKIP LOCKED)
+    UPDATE t SET lease = 1 FROM picked WHERE t.id = picked.id`;
+  assert.deepEqual(claimSubqueryProblems(cte), []);
+  assert.deepEqual(claimSubqueryProblems(`SELECT 'IN (SELECT id FOR UPDATE)'`), []);
 });
