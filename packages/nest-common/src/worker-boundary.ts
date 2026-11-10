@@ -53,6 +53,11 @@ export class WorkerBoundary {
   }
 }
 
+/** Internal database admission scope; legacy worker adoption is explicit. */
+export function hasWorkerContext(): boolean {
+  return workers.getStore() !== undefined;
+}
+
 export function assertWorkerActive(): void {
   workers.getStore()?.assertActive();
 }

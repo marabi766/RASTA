@@ -1,4 +1,4 @@
-import { assertWorkerActive, workerOperation } from '../worker-boundary';
+import { assertWorkerActive, hasWorkerContext, workerOperation } from '../worker-boundary';
 import type { DATABASE_SERVICES } from '@rasta/config';
 import { clientFailureCode } from './client-failure';
 import {
@@ -130,7 +130,9 @@ export function createSafePrismaClient<T extends object>(
     const raw = open();
     let closing = false;
     const assertOpen = (): void => {
-      if (closing) throw new Error('Database shutdown: new operation refused');
+      if (closing && hasWorkerContext()) {
+        throw new Error('Database shutdown: new worker operation refused');
+      }
     };
     const admitted = <R>(work: () => PromiseLike<R>): Promise<R> =>
       workerOperation(() => {

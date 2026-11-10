@@ -266,15 +266,16 @@ test('FU-321: nested transaction continuations and late outcomes are refused', a
   expect(warn).toHaveBeenCalled();
 });
 
-test('FU-321: disconnect permanently closes the client across extensions', async () => {
+test('FU-321: disconnect permanently refuses worker operations across extensions', async () => {
   const raw = client();
   raw.$disconnect.mockResolvedValue();
   const guarded = createSafePrismaClient(() => raw, 'DATABASE_URL_ASSET');
   await guarded.$disconnect();
-  await expect(guarded.$extends({}).$transaction(() => Promise.resolve())).rejects.toThrow(
-    'Database shutdown',
-  );
-  await expect(guarded.$connect()).rejects.toThrow('Database shutdown');
+  const worker = new WorkerBoundary(jest.fn());
+  await expect(
+    worker.run(() => guarded.$extends({}).$transaction(() => Promise.resolve())),
+  ).rejects.toThrow('Database shutdown');
+  await expect(worker.run(() => guarded.$connect())).rejects.toThrow('Database shutdown');
   expect(raw.$transaction).not.toHaveBeenCalled();
   expect(raw.$connect).not.toHaveBeenCalled();
 });
@@ -294,5 +295,8 @@ test('CI: an already submitted result outside an abandoned worker survives disco
   await guarded.$disconnect();
   finish();
   await expect(pending).resolves.toBe('submitted');
-  await expect(guarded.$transaction(() => Promise.resolve())).rejects.toThrow('Database shutdown');
+  const worker = new WorkerBoundary(jest.fn());
+  await expect(worker.run(() => guarded.$transaction(() => Promise.resolve()))).rejects.toThrow(
+    'Database shutdown',
+  );
 });

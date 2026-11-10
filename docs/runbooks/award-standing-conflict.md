@@ -56,7 +56,8 @@ shutdown starts no further claim. There is no background renewal task to outlive
 The five construction/procurement sweepers inherit a shared worker boundary through nested services
 and database callbacks. Once their shutdown deadline expires, new database operations are refused;
 late responses are dropped with a warning, including failures, completion, settlement and backlog reads.
-Database disconnect also permanently closes admission on that client, across extensions.
+Database disconnect also permanently refuses new worker operations on that client, across extensions.
+Legacy operations outside an adopted worker context keep their existing shutdown/drain contract.
 Already submitted database operations/commits are not cancelled: their outcome remains unconfirmed.
 Fences and leases govern recovery; abandonment alone is not evidence of rollback.
 Contract, economic, document, notification and outbox worker adoption remains separate follow-up work.

@@ -24,9 +24,14 @@ it('FU-321: refuses lazy model/raw queries, transaction continuations and reconn
     ).rejects.toBeInstanceOf(WorkerAbandonedError);
     expect(await prisma.client.processedEvent.count({ where: { eventId } })).toBe(0);
     // Another worker is unaffected, even on the same client.
-    await expect(prisma.client.$queryRaw`SELECT 1`).resolves.toEqual([{ '?column?': 1 }]);
+    const other = new WorkerBoundary(jest.fn());
+    await expect(other.run(() => prisma.client.$queryRaw`SELECT 1`)).resolves.toEqual([
+      { '?column?': 1 },
+    ]);
     await prisma.onModuleDestroy();
-    await expect(prisma.client.$queryRaw`SELECT 1`).rejects.toThrow('Database shutdown');
+    await expect(other.run(() => prisma.client.$queryRaw`SELECT 1`)).rejects.toThrow(
+      'Database shutdown',
+    );
   } finally {
     await prisma.onModuleDestroy();
   }
