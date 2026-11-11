@@ -5,7 +5,12 @@ import {
   type OnApplicationShutdown,
   type OnModuleInit,
 } from '@nestjs/common';
-import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import {
+  WorkerBoundary,
+  WorkerDrain,
+  workerOperation,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { LedgerService } from '../ledger/ledger.service';
 import { WalletRepository } from './wallet.repository';
 import { balancesFrom, isConsistent } from './balances';
@@ -59,8 +64,10 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(LedgerBalanceAudit.name);
   private timer?: NodeJS.Timeout;
   private stopped = false;
-  private stopping?: Promise<void>;
-  private readonly inFlight = new Set<Promise<Deviation[]>>();
+  private readonly worker = new WorkerBoundary(() => undefined);
+  private readonly drain = new WorkerDrain(this.worker, { stop: async () => undefined }, () =>
+    this.logger.warn('Wallet/ledger reconciliation ABANDONED; incomplete pass gauges suppressed'),
+  );
 
   constructor(
     private readonly wallets: WalletRepository,
@@ -69,6 +76,7 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
   ) {}
 
   onModuleInit(): void {
+    if (this.stopped) return;
     if (!this.env.ECONOMIC_BALANCE_AUDIT_ENABLED) {
       this.logger.warn('Wallet/ledger reconciliation is disabled by configuration');
       return;
@@ -87,40 +95,12 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
     return this.stop();
   }
 
-  /**
-   * Stops the timer at once, lets a pass in flight start no further page, and
-   * waits for the page being read — at most until `deadlineAt`, the shutdown's
-   * shared deadline (`OutboxShutdown`). Past it the pass is abandoned with a
-   * warning. That leaves nothing behind to misread: a page is a READ ONLY
-   * snapshot that an exit rolls back, and a pass keeps its position and its
-   * findings in memory only. The two gauges are written once, when a pass has
-   * covered every wallet, so a pass cut short never publishes a partial count
-   * (which would read as fewer deviations, or fewer open wallets, than there
-   * are). The next pass — on this instance's successor or any replica — starts
-   * again from the first wallet. Without a deadline it waits. One stop.
-   */
+  /** One coordinator deadline, tightened by repeated stops; late pages cannot report. */
   stop(options: OutboxStopOptions = {}): Promise<void> {
-    this.stopping ??= this.halt(options.deadlineAt);
-    return this.stopping;
-  }
-
-  private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-
-    if (this.inFlight.size === 0) return;
-    const current = Promise.allSettled([...this.inFlight]);
-    if (deadlineAt === undefined) {
-      await current;
-      return;
-    }
-    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
-      this.logger.warn(
-        'Wallet/ledger reconciliation still running at the shutdown deadline; abandoned. The ' +
-          'page in flight rolls back and no gauge was written; the next pass starts over',
-      );
-    }
+    return this.drain.stop(options);
   }
 
   /**
@@ -131,10 +111,8 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
    * during an incident and read the answer.
    */
   run(): Promise<Deviation[]> {
-    const current = this.pass();
-    this.inFlight.add(current);
-    void current.finally(() => this.inFlight.delete(current));
-    return current;
+    if (this.stopped) return Promise.resolve([]);
+    return this.worker.run(() => this.pass());
   }
 
   private async pass(): Promise<Deviation[]> {
@@ -148,10 +126,9 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
       for (;;) {
         // Before every page, the first included: after a stop none begins.
         if (this.stopped) {
-          this.logDeviations(deviations);
           return deviations;
         }
-        const { size, found } = await this.auditPage(skip, batchSize);
+        const { size, found } = await workerOperation(() => this.auditPage(skip, batchSize));
         checked += size;
         deviations.push(...found);
 
@@ -159,11 +136,15 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
         skip += batchSize;
       }
 
+      if (this.stopped) return deviations;
+      this.worker.assertActive();
       walletsOpenTotal.set({ service: SERVICE_NAME }, checked);
+      this.worker.assertActive();
       walletLedgerDeviationsTotal.set({ service: SERVICE_NAME }, deviations.length);
 
       this.logDeviations(deviations);
     } catch (error) {
+      if (this.worker.abandoned) return [];
       // Reconciliation must never take the service down. A failed pass is
       // itself worth knowing about, so it is logged rather than swallowed.
       this.logger.error(
@@ -180,6 +161,7 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
     // needs to know which wallets to look at, and the figures are in the
     // database where they are already under authorization.
     for (const deviation of deviations) {
+      this.worker.assertActive();
       this.logger.error(
         `Wallet ${deviation.walletId} disagrees with its ledger (${deviation.kind})`,
       );
@@ -202,7 +184,7 @@ export class LedgerBalanceAudit implements OnModuleInit, OnApplicationShutdown {
     return this.wallets.client.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
-        const page = await this.wallets.pageForAudit(skip, take, tx);
+        const page = await workerOperation(() => this.wallets.pageForAudit(skip, take, tx));
         const found: Deviation[] = [];
         for (const wallet of page) {
           const deviation = await this.check(wallet, tx as ExtendedPrismaClient);
