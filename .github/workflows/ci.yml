@@ -76,7 +76,7 @@ jobs:
       - run: pnpm run db:generate
 
       - name: Prisma generation retries only transient network errors
-        run: node --test scripts/prisma-generate.test.mjs
+        run: pnpm run test:prisma-generate
 
       - name: Prepush affected-package selection
         run: pnpm run test:prepush-scope

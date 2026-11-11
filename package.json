@@ -38,6 +38,7 @@
     "test:url-parsing-guard": "node --test --test-timeout=300000 scripts/url-parsing-guard.test.mjs",
     "prepush:scope": "node scripts/prepush-scope.mjs",
     "test:prepush-scope": "node --test --test-timeout=300000 scripts/prepush-scope.test.mjs",
+    "test:prisma-generate": "node --test --test-timeout=60000 scripts/prisma-generate.test.mjs",
     "test:ci-temporal-cache": "node --test --test-timeout=60000 scripts/ci-temporal-cache.test.mjs",
     "test:unit-step-concurrency": "node --test --test-timeout=540000 --require ./scripts/test-stall-watchdog.mjs scripts/check-unit-step-concurrency.test.mjs scripts/test-stall-watchdog.test.mjs && node scripts/check-unit-step-concurrency.mjs",
     "test:credential-fetch": "node --test --test-timeout=300000 scripts/credential-fetch.test.mjs",
