@@ -432,6 +432,8 @@ export const CLI_CONTRACT = Object.freeze({
       '-p',
     ],
   },
+  // FU-335: takes no arguments and refuses any.
+  'scripts/ci-playwright-version.mjs': { positionals: [] },
   // Fixed curl/tar flags; the installer accepts only a mode and reviewed tool name.
   'scripts/ci-tool-download.mjs': {
     positionals: ['enum', 'enum'],

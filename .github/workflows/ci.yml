@@ -1378,8 +1378,37 @@ jobs:
 
       # Chromium only. A second engine doubles the job for a page whose
       # critical behavior is server-rendered HTML and a native form post.
+      #
+      # No apt on the ordinary path (FU-335): the runner image already has the
+      # libraries Chromium links, and `--with-deps` made every run depend on
+      # the image's Ubuntu mirror (2026-11-11: the mirror stopped resolving,
+      # this step failed after ten minutes and the suite never ran). The
+      # build is cached under the exact Playwright version the lockfile pins
+      # for apps/web. The cache is never trusted: the install step below
+      # always asks Playwright for the build (a no-op when it is there) and
+      # always launches it.
+      - name: Read the locked Playwright version
+        id: playwright
+        run: node scripts/ci-playwright-version.mjs
+
+      - name: Cache the Chromium build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
+
       - name: Install the browser
-        run: pnpm --filter @rasta/web exec playwright install --with-deps chromium
+        # `scripts/ci-install-browser.sh` exits 0 only after the installed
+        # Chromium was launched headless and wrote a screenshot. If that proof
+        # fails it installs Playwright's system packages (apt, bounded
+        # retries) and proves again; anything else fails this step, so the
+        # suite below never runs against a browser that was not seen to
+        # start, and is never skipped with the job green. Neither step has an
+        # `if:` (`pnpm run test:ci-pull-image` keeps it so). The script bounds
+        # itself: every download, apt and proof attempt runs under a time
+        # limit, 18 minutes on the longest path and seconds on the ordinary
+        # one.
+        run: scripts/ci-install-browser.sh
 
       - name: Run the browser suite
         run: pnpm --filter @rasta/web exec playwright test

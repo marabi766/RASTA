@@ -393,6 +393,14 @@ export const REVIEWED_PROGRAMS = new Map([
     },
   ],
   [
+    'scripts/ci-install-browser.sh',
+    {
+      programs: ['pnpm'],
+      reason:
+        'three literal `pnpm --filter @rasta/web exec playwright` lines, apps/web’s locked Playwright CLI: `install chromium`, `install-deps chromium`, and `screenshot` of an inline page into the script’s own mktemp directory; none starts a container',
+    },
+  ],
+  [
     'infrastructure/docker/postgres/00-init-databases.sh',
     {
       programs: ['psql'],
