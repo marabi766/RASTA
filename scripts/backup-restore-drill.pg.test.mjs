@@ -173,8 +173,9 @@ before(async () => {
     CREATE POLICY drill_ledger_policy ON public.ledger_entry USING (organization_id = current_setting('rasta.organization_id', true));
     ALTER TABLE public.ledger_entry ENABLE ROW LEVEL SECURITY;
     COMMENT ON FUNCTION public.reject_ledger_mutation() IS 'drill comment must survive';
-    CREATE TABLE drill_metadata.deparse_sample (a integer, b integer,
-      CONSTRAINT drill_deparse_check CHECK (a BETWEEN 0 AND 10 AND b >= 0));
+    CREATE TABLE drill_metadata.deparse_sample (a integer, b integer, kind character varying,
+      CONSTRAINT drill_deparse_check CHECK (a BETWEEN 0 AND 10 AND b >= 0),
+      CONSTRAINT drill_array_check CHECK (kind IN ('A', 'B')));
     CREATE TABLE drill_metadata.sample (id integer);
     CREATE FUNCTION drill_metadata.in_range(v integer) RETURNS boolean LANGUAGE sql IMMUTABLE
       RETURN v BETWEEN 0 AND 10 AND v <> 5;
@@ -211,7 +212,7 @@ after(() => {
 });
 
 test('unchanged migrated fixture passes its first restore against REF, with real CHECK deparse drift', () => {
-  assert.equal(initialSnapshot.reference.checkLinesDifferent, 1);
+  assert.equal(initialSnapshot.reference.checkLinesDifferent, 2);
   // FU-327: PostgreSQL stores BETWEEN as a nested AND and reads its own dump back as one list, in
   // a SQL-standard body and a view as in the CHECK above; that fold is the only non-CHECK change.
   assert.deepEqual(initialSnapshot.reference.foldedBooleanLists, folded);
@@ -239,6 +240,31 @@ test('unchanged migrated fixture passes its first restore against REF, with real
   assert.equal(initialRestores[1].input.content.equals(initialRestores[0].input.content), false);
   // A database compared with itself is not a restore: the restored side needs its own provenance.
   assert.throws(() => compareSnapshots(initialSnapshot, initialSnapshot));
+});
+
+test('real same-name CHECK drift refuses SOURCE/REF, including array casts and operands', async () => {
+  const ref = (await baselineSnapshot()).reference.reference;
+  const replace = (body) =>
+    sql(`ALTER TABLE drill_metadata.deparse_sample DROP CONSTRAINT drill_array_check;
+    ALTER TABLE drill_metadata.deparse_sample ADD CONSTRAINT drill_array_check CHECK (${body})`);
+  try {
+    for (const body of [
+      `kind IN ('A', 'B', 'C')`,
+      `kind NOT IN ('A', 'B')`,
+      `kind::varchar[] = ARRAY['A', 'B']::varchar[]`,
+      `kind::char = ANY (ARRAY['A', 'B']::char[])`,
+      `b >= 1`,
+    ]) {
+      replace(body);
+      assert.throws(
+        () => checkSourceReference(schemaDump().evidence, ref, database),
+        /CHECK difference/,
+      );
+    }
+  } finally {
+    replace(`kind IN ('A', 'B')`);
+  }
+  checkSourceReference(schemaDump().evidence, ref, database);
 });
 
 test('real inventory separates extension rows and detects equal-count value changes', async () => {
