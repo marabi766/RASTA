@@ -426,3 +426,5 @@ export {
 } from './worker-boundary';
 
 export { DatabaseTeardown, type DatabaseCloseReport } from './database/database-teardown';
+
+export { WorkerDrain } from './worker-drain';

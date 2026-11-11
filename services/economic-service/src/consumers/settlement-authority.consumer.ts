@@ -1,6 +1,10 @@
 import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
+  WorkerBoundary,
+  WorkerAbandonedError,
+  workerOperation,
+  WorkerDrain,
   createSystemContext,
   invalidPayloadError,
   runWithContext,
@@ -19,7 +23,7 @@ import {
   maintenanceApprovedSchema,
 } from '../events/consumed';
 import { SERVICE_NAME } from '../config/env';
-import { sourceVerificationsTotal } from '../observability/metrics';
+import { sourceVerificationsTotal, transactionsCreatedTotal } from '../observability/metrics';
 import {
   confirmApproval,
   confirmTenant,
@@ -98,6 +102,17 @@ import type { SourceFacts } from '../provenance/source-facts.client';
 export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(SettlementAuthorityConsumer.name);
   private readonly consumer: EventConsumer;
+  private readonly worker = new WorkerBoundary(() =>
+    this.logger.warn('Obligation worker ABANDONED; submitted write outcome UNCONFIRMED'),
+  );
+  private stopped = false;
+  private readonly drain = new WorkerDrain(
+    this.worker,
+    {
+      stop: (options) => this.consumer.stop(options),
+    },
+    () => this.logger.warn('Obligation worker ABANDONED; submitted write outcome UNCONFIRMED'),
+  );
 
   static readonly CONSUMER_NAME = 'economic-service.settlement-authority';
 
@@ -114,18 +129,10 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
     await this.consumer.start();
   }
 
-  /**
-   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
-   * relay, the purge and the payment sweep, by the shutdown's one deadline; an
-   * approval still in flight (the owner's answer, or the obligation's
-   * transaction) is abandoned uncommitted and delivered again, and its
-   * `processed_event` marker keeps a second obligation out. Before, this
-   * class's own `onApplicationShutdown` stopped it with no bound, after the
-   * relay had drained, so the waits added up past SHUTDOWN_TIMEOUT_MS (Codex r1
-   * on #277). One stop per process; a later call joins it.
-   */
-  stop(options?: OutboxStopOptions): Promise<void> {
-    return this.consumer.stop(options);
+  /** Drains broker and direct deliveries under the coordinator's one deadline. */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopped = true;
+    return this.drain.stop(options);
   }
 
   /** Joins the stop `OutboxShutdown` began; returns at once. */
@@ -133,7 +140,15 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
     return this.stop();
   }
 
-  async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
+  handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
+    return this.worker.run(() => {
+      this.worker.assertActive();
+      if (this.stopped) throw new WorkerAbandonedError();
+      return workerOperation(() => this.process(envelope));
+    });
+  }
+
+  private async process(envelope: EventEnvelope): Promise<HandlerOutcome> {
     if (envelope.eventName !== CONSUMED_EVENTS.MAINTENANCE_APPROVED) return 'SKIPPED';
 
     // A known event whose payload fails its schema is a producer defect no
@@ -174,7 +189,9 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
       }
 
       // Throws on an owner that cannot be asked: retried, never acted on.
-      const fact = await this.sources.maintenanceRequest(tenant, payload.requestId);
+      const fact = await workerOperation(() =>
+        this.sources.maintenanceRequest(tenant, payload.requestId),
+      );
       const verdict = confirmApproval(payload, fact);
       if (!verdict.confirmed || !fact) {
         this.refuse(payload.requestId, verdict.confirmed ? 'not_found' : verdict.mismatch);
@@ -203,8 +220,8 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
       // Narrowed by `noObligationReason`: a workshop other than the payer.
       const payeeOrganizationId = fact.workshopOrganizationId!;
 
-      const alreadyProcessed = await this.prisma.transaction(async (tx) => {
-        if (await this.alreadyProcessed(tx, envelope.eventId)) return true;
+      const outcome = await this.prisma.transaction(async (tx) => {
+        if (await this.alreadyProcessed(tx, envelope.eventId)) return null;
 
         // Every figure from the owner's answer. `confirmApproval` has just
         // proved it equal to the event's, so this changes no outcome. It
@@ -230,17 +247,23 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
         // neither does (ADR-021).
         await this.markProcessed(tx, envelope.eventId);
 
-        if (result.created) {
-          this.logger.log(
-            `Recorded a settleable obligation for maintenance request ${payload.requestId}`,
-          );
-        }
-        return false;
+        return result;
       });
+      this.worker.assertActive();
 
-      if (alreadyProcessed) {
+      if (outcome === null) {
         this.logger.debug(`Event ${envelope.eventId} already processed; no second effect`);
         return 'SKIPPED';
+      }
+      if (outcome.created) {
+        transactionsCreatedTotal.inc({
+          service: SERVICE_NAME,
+          type: 'MAINTENANCE_SERVICE',
+          source: 'event',
+        });
+        this.logger.log(
+          `Recorded a settleable obligation for maintenance request ${payload.requestId}`,
+        );
       }
 
       return undefined;

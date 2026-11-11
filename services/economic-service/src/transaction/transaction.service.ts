@@ -382,12 +382,6 @@ export class TransactionService {
       },
     );
 
-    transactionsCreatedTotal.inc({
-      service: SERVICE_NAME,
-      type: input.transactionType,
-      source: 'event',
-    });
-
     return { id, created: true };
   }
 
