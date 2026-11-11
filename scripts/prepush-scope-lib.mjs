@@ -7,7 +7,12 @@ import ts from 'typescript';
 // Planning only: no task is executed and no .env file is sourced. Discard child
 // diagnostics: a Git/Turbo error may include a configured remote or environment.
 export function scopeRunner(cwd) {
-  const env = { NODE_ENV: 'test', CI: 'true', TURBO_TELEMETRY_DISABLED: '1' };
+  const env = {
+    NODE_ENV: 'test',
+    CI: 'true',
+    TURBO_TELEMETRY_DISABLED: '1',
+    PRISMA_SKIP_POSTINSTALL_GENERATE: 'true', // FU-329: as every rebuilt child environment
+  };
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'SystemRoot']) {
     if (process.env[key]) env[key] = process.env[key];
   }

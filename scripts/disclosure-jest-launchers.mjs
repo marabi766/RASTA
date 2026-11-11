@@ -49,9 +49,9 @@ export const JEST_LAUNCHERS = {
       'Git fixture commands and Node environment probe; Turbo selection is mocked or --dry=json and missing-binary refusal never enters its JS launcher. No Jest or task execution.',
     sha256: {
       'scripts/prepush-scope.test.mjs':
-        '0b4a445f1f742b33b051723952b7d8ee74bd76648ef1e3c80e5a2a63aaf7028a',
+        '9e1d0b3364ec2bf5dbd1728f85f3ee8109a6bae4d6187341e02e42b5cf79a03b',
       'scripts/prepush-scope-lib.mjs':
-        'a7cb60ff2283945e9eee8a7bc9b83cbe05cdb680af0ea74e54afc561f3e66e13',
+        'dad1932e62a0228c13dae235312bf512738dfce4e2b1260ccaffa66592495a36',
     },
   },
   'scripts/verify-test-independence.mjs': {
@@ -182,6 +182,15 @@ export const JEST_LAUNCHERS = {
         '4a0ac5adf88137158ffd155892450f0f11f6e3b3bbed78710f2dc05e135ddd27',
     },
   },
+  'scripts/prisma-turbo-env.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'node:test only. Real children: the root `pnpm run db:migrate` for one service against port 1 (prisma.mjs refuses before Prisma starts), and the installed Turbo binary in a temporary one-package workspace holding a copy of turbo.json, where every task script is one `node -e` that prints a variable (FU-329). No Jest and no repository test task.',
+    sha256: {
+      'scripts/prisma-turbo-env.test.mjs':
+        '2fe33731aecda4cf33aac1ddfd3bd39ae4df667ef9e12954a6391aa8b16797d0',
+    },
+  },
   'scripts/service-env-turbo.test.mjs': {
     kind: 'non-jest',
     reaches:
@@ -227,7 +236,7 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-integration-split.test.mjs':
         '570d992f035ae9f6e8813330dfb709902af1dd973120e2f0b851b04ce9b13e0b',
       'scripts/ci-integration-split-lib.mjs':
-        'c0fcee9186064ba5885571134295acd019abb4a608dba1435eefeb9d07f5ddbb',
+        'f54797e41eca49e9ef7ff69626601a1a2660650ab668fcfd09c7df1171993312',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },

@@ -261,6 +261,7 @@ test('real child ignores root .env and inherited Node options/credentials, and n
       assert.equal(process.env.NODE_ENV, 'test');
       assert.equal(process.env.NODE_OPTIONS, undefined);
       assert.equal(process.env.SERVICE_ENV_WITHHELD_BASE, '${sha}');
+      assert.equal(process.env.PRISMA_SKIP_POSTINSTALL_GENERATE, 'true');
       assert.equal(Object.keys(process.env).some(k => /PASSWORD|TOKEN|SECRET|DATABASE_URL/.test(k)), false);
     `,
     );

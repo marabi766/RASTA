@@ -215,9 +215,9 @@ test('runner withholds inherited Node options and never loads a fixture .env', (
   process.env.NODE_OPTIONS = '--require=/nonexistent-prepush-sentinel';
   const output = scopeRunner(root)(process.execPath, [
     '-e',
-    'process.stdout.write(JSON.stringify([process.env.NODE_ENV, process.env.NODE_OPTIONS, process.env.PREPUSH_SENTINEL]))',
+    'process.stdout.write(JSON.stringify([process.env.NODE_ENV, process.env.NODE_OPTIONS, process.env.PREPUSH_SENTINEL, process.env.PRISMA_SKIP_POSTINSTALL_GENERATE]))',
   ]);
-  assert.deepEqual(JSON.parse(output), ['test', null, null]);
+  assert.deepEqual(JSON.parse(output), ['test', null, null, 'true']);
 });
 
 test('Turbo root pseudo-package broadens selection instead of being executed', () => {
