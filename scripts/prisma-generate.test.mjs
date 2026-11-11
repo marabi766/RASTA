@@ -138,8 +138,18 @@ const DEV_SERVICES = new Set(
     'supplier',
   ].map((name) => `services/${name}-service/package.json`),
 );
-// Exact inert examples only; additional calls even in these files are refused.
+// Exact exclusions only; additional calls even in these files are refused.
+const TEMPORARY_DRILL_EXCEPTION = {
+  reason: 'FU-327: drill moves to the wrapper together with its repair',
+  caller: 'scripts/backup-restore-drill-main.mjs',
+  workflow: '.github/workflows/backup-drill-monthly.yml',
+};
 const EXAMPLES = new Map([
+  // One live temporary exception, exact call only; install hooks stay unchanged too.
+  [
+    TEMPORARY_DRILL_EXCEPTION.caller,
+    ["await run('pnpm', ['exec', 'prisma', 'generate'], { cwd, env: dbEnv });"],
+  ],
   [
     'scripts/fixtures/marketplace-pre-protocol-package.json',
     [
@@ -207,7 +217,11 @@ test('authored generation callers and install hooks use the enforced boundary', 
         /PRISMA_SKIP_POSTINSTALL_GENERATE=true pnpm install --frozen-lockfile/,
         path,
       );
-    if (path.startsWith('.github/workflows/') && source.includes('pnpm install --frozen-lockfile'))
+    if (
+      path.startsWith('.github/workflows/') &&
+      path !== TEMPORARY_DRILL_EXCEPTION.workflow &&
+      source.includes('pnpm install --frozen-lockfile')
+    )
       assert.match(source, /PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'/, path);
   }
 });
