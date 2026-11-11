@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { generate } from './prisma-generate.mjs';
 
 async function probe(results) {
@@ -65,10 +68,11 @@ test('signals and process errors never retry even with transient stderr', async 
 });
 
 test('every service generation and build uses the shared boundary', () => {
-  for (const service of readdirSync(new URL('../services/', import.meta.url))) {
-    const pkg = JSON.parse(
-      readFileSync(new URL(`../services/${service}/package.json`, import.meta.url)),
-    );
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  for (const file of authoredFiles(root)) {
+    const service = relative(root, file).replaceAll('\\', '/');
+    if (!/^services\/[^/]+\/package\.json$/.test(service)) continue;
+    const pkg = JSON.parse(readFileSync(file));
     if (!pkg.scripts['db:generate']) continue;
     assert.equal(pkg.scripts['db:generate'], 'node ../../scripts/prisma-generate.mjs', service);
     assert.ok(pkg.scripts.build.startsWith(`${pkg.scripts['db:generate']} &&`), service);
