@@ -225,6 +225,13 @@ export const REVIEWED_SITES = [
       'from/to are the utilization window: query input or new Date() (availability.service.ts:318-322)',
   },
   {
+    site: 'services/fleet-service/src/fleet/fleet.repository.ts#findCoveringAssignment',
+    columns: ['started_at', 'ended_at'],
+    verdict: 'not-db-clock',
+    reason:
+      'periodStart/periodEnd = new Date(dto.periodStart/periodEnd) in UsageService.resolveOperator: reported request interval, not a database clock reading',
+  },
+  {
     site: 'services/fleet-service/src/fleet/fleet.repository.ts#findOverlappingUsage',
     columns: ['period_start', 'period_end'],
     verdict: 'not-db-clock',

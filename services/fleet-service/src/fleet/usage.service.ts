@@ -128,7 +128,6 @@ export class UsageService {
       if (existing) return this.replay(existing, dto, binding.hash);
     }
 
-    let operator: { driverId: string | null; assignmentId: string | null };
     try {
       const asset = await this.repository.findAssetRef(organizationId, dto.assetId);
       if (!asset) {
@@ -136,12 +135,10 @@ export class UsageService {
         // platform follows for a resource in another tenant.
         throw RastaError.notFound('Asset', dto.assetId);
       }
-
-      operator = await this.resolveOperator(dto);
     } catch (refusal) {
-      // Refused on the machine's or the operator's state *now*. A twin of
+      // Refused on the machine's state *now*. A twin of
       // this request may have committed after the look above and before that
-      // state changed — the assignment ended, the machine transferred — and
+      // state changed — the machine transferred — and
       // then this is a replay the state no longer matters to (#372 r1 F2).
       // So the reference once more, under the reference lock a twin in
       // flight holds until it commits, and with the same binding and read
@@ -154,7 +151,6 @@ export class UsageService {
       }
       throw refusal;
     }
-    const { driverId, assignmentId } = operator;
 
     const periodStart = new Date(dto.periodStart);
     const periodEnd = new Date(dto.periodEnd);
@@ -208,6 +204,10 @@ export class UsageService {
         if (!locked) {
           throw RastaError.notFound('Asset', dto.assetId);
         }
+
+        // Attribution and SELF authorization see the assignment state after
+        // acquiring the asset lock; row share locks keep it stable to commit.
+        const { driverId, assignmentId } = await this.resolveOperator(dto, tx);
 
         const overlapping = await this.repository.findOverlappingUsage(
           tx,
@@ -349,11 +349,12 @@ export class UsageService {
    */
   private async resolveOperator(
     dto: RecordUsageDto,
+    tx: FleetTransaction,
   ): Promise<{ driverId: string | null; assignmentId: string | null }> {
     const scope = currentFleetScope();
 
     if (scope.kind === 'SELF') {
-      const own = await this.repository.findDriverByUserId(scope.userId);
+      const own = await this.repository.findDriverByUserId(scope.userId, tx);
       if (!own) {
         throw RastaError.forbidden('Only a registered driver may record usage for a machine');
       }
@@ -361,34 +362,38 @@ export class UsageService {
         throw RastaError.forbidden('You may only record usage under your own driver record');
       }
 
-      const active = await this.repository.findActiveAssignmentForDriver(own.id);
+      const active = await this.repository.findActiveAssignmentForUsage(tx, own.id);
       if (!active || active.assetId !== dto.assetId) {
         // Absent rather than forbidden: the caller learns nothing about which
         // machines exist or who else is holding them.
         throw RastaError.notFound('Asset', dto.assetId);
       }
 
-      return { driverId: own.id, assignmentId: active.id };
+      return {
+        driverId: own.id,
+        assignmentId:
+          active.startedAt.getTime() <= new Date(dto.periodStart).getTime() ? active.id : null,
+      };
     }
 
-    if (!dto.driverId) {
-      // A supervisor may record usage with no driver named — a contractor's
-      // operator, or a reading taken from the meter after the fact. Losing
-      // that usage would be worse than not knowing who produced it.
-      const active = await this.repository.findActiveAssignmentForAsset(dto.assetId);
-      return { driverId: active?.driverId ?? null, assignmentId: active?.id ?? null };
+    if (dto.driverId) {
+      const driver = await this.repository.findDriverById(dto.driverId, tx);
+      if (!driver) throw RastaError.notFound('Driver', dto.driverId);
     }
 
-    const driver = await this.repository.findDriverById(dto.driverId);
-    if (!driver) throw RastaError.notFound('Driver', dto.driverId);
-
-    const active = await this.repository.findActiveAssignmentForDriver(dto.driverId);
-    // Linked only when the assignment is for this machine. A driver holding a
-    // different machine gets a record with no assignment rather than one
-    // attributed to the wrong job.
-    const assignmentId = active && active.assetId === dto.assetId ? active.id : null;
-
-    return { driverId: dto.driverId, assignmentId };
+    const covering = await this.repository.findCoveringAssignment(
+      tx,
+      dto.assetId,
+      new Date(dto.periodStart),
+      new Date(dto.periodEnd),
+      dto.driverId,
+    );
+    // A named driver remains validated even when the assignment is unknown.
+    // Without a name, only a unique covering assignment proves either field.
+    return {
+      driverId: dto.driverId ?? covering?.driverId ?? null,
+      assignmentId: covering?.id ?? null,
+    };
   }
 }
 

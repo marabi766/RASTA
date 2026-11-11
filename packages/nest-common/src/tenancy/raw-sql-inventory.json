@@ -1135,6 +1135,20 @@
   },
   {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 190,
+    "hash": "311f52e4291738a117867563984fb7f98d9cdfb4a43e2aec79355e6b4aaab944",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 205,
+    "hash": "2f9d3fb6b375d29863041300e173a1baf85ee803b11ce5b585cc470df77d2504",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 341,
     "hash": "c34032d3ad4ed017ee261922279fe4bf6011924bd7ad453bcf9294851e7f54a6",
     "occurrence": 0,

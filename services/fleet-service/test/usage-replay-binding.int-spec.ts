@@ -438,25 +438,27 @@ describe('usage replay binding', () => {
     });
 
     it('still waits for a twin of its own in flight, and replays it', async () => {
-      // A is held inside its transaction under both locks. The assignment
-      // then ends, so B — the same driver, the same body — is refused 404
-      // before its transaction, re-checks, and must wait for A's reference
-      // lock rather than find nothing and let the 404 stand.
+      // A holds its reference, asset and assignment locks. Ending queues on
+      // the assignment; B queues on the reference. Neither can invalidate A's
+      // attribution, and B must return A's stored result after it commits.
       const { end } = await assign(driverA, raceAssetId);
       const body = reading({ assetId: raceAssetId });
       const { held, release } = holdNextSubmission();
       const first = asActor(driverUserA, () => service.record(body));
       await held;
-      await end();
-
+      const ending = Promise.resolve(end());
       const second = asActor(driverUserA, () => service.record(body));
-      await waitForBlocked(1);
-      release();
-      const [a, b] = await Promise.all([first, second]);
-
-      expect(b).toEqual(a);
-      expect(await rowsUnder(body.clientReference!)).toHaveLength(1);
-      expect(await eventsFor(a.id)).toBe(1);
+      try {
+        await waitForBlocked(2);
+        release();
+        const [a, b] = await Promise.all([first, second, ending]);
+        expect(b).toEqual(a);
+        expect(await rowsUnder(body.clientReference!)).toHaveLength(1);
+        expect(await eventsFor(a.id)).toBe(1);
+      } finally {
+        release();
+        await Promise.allSettled([first, second, ending]);
+      }
     });
   });
 
