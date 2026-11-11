@@ -871,6 +871,27 @@ describe('transfer clearance', () => {
       ]);
 
     describe('tombstones expire (#1)', () => {
+      it('bounds two concurrent purges over many due tuple keys', async () => {
+        const other = newPrisma();
+        const assetId = await machine();
+        try {
+          await insertTransferFixture(
+            prisma.client,
+            'releaseExpired',
+            org.a,
+            Array.from({ length: 250 }, () => ({ assetId, fenceId: fence() })),
+          );
+          const before = await tombstones(assetId);
+          const counts = await Promise.all(
+            [repository, new MaintenanceRepository(other)].map((r) => r.purgeExpiredReleases()),
+          );
+          expect(counts).toEqual([100, 100]);
+          expect(await tombstones(assetId)).toBeGreaterThanOrEqual(before - 200);
+        } finally {
+          await other.stop();
+        }
+      });
+
       it('purges expired tombstones of any machine on a release, and keeps live ones', async () => {
         const stale = [await machine(), await machine()];
         for (const assetId of stale) await tombstone(assetId, fence(), true);

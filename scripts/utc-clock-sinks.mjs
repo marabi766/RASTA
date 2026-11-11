@@ -20,8 +20,7 @@ const nameOf = (n) => ts.isIdentifier(n) ? n.text :
     ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression)
       ? n.argumentExpression.text : null;
 
-export function sqlSinkTexts(repository) {
-  const files = productionFiles(repository);
+export function sqlSinkTexts(repository, files = productionFiles(repository)) {
   const authored = authoredFiles(repository);
   // Execution sites are authored source; generated declarations only prove bound values.
   const options = { allowJs: true, strict: true, moduleDetection: ts.ModuleDetectionKind.Force,

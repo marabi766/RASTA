@@ -63,11 +63,8 @@ export class WindowSweepRepository {
       () =>
         this.prisma.transaction((tx) =>
           tx.$queryRawUnsafe<ClaimedWindow[]>(
-            `UPDATE "demand_aggregation"
-              SET "sweep_lease_until" = clock_timestamp() + ($2::int * interval '1 second'),
-                  "sweep_fence" = $3
-            WHERE "id" IN (
-                  SELECT "id" FROM "demand_aggregation"
+            `WITH picked AS MATERIALIZED (
+                  SELECT "id" AS picked_id FROM "demand_aggregation"
                    WHERE (("status" = 'OPEN' AND "closes_at" <= clock_timestamp())
                           OR "demands_to_follow" > 0 OR "end_digest_state" IS NOT NULL)
                      AND ("sweep_lease_until" IS NULL OR "sweep_lease_until" <= clock_timestamp())
@@ -75,6 +72,11 @@ export class WindowSweepRepository {
                    ORDER BY "closes_at", "id"
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
+            UPDATE "demand_aggregation"
+              SET "sweep_lease_until" = clock_timestamp() + ($2::int * interval '1 second'),
+                  "sweep_fence" = $3
+             FROM picked
+            WHERE "demand_aggregation"."id" = picked.picked_id
         RETURNING "id", "organization_id" AS "organizationId", "sweep_fence" AS "fence"`,
             limit,
             leaseSeconds,
