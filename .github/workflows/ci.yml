@@ -22,6 +22,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Explicit generation must succeed through the retry wrapper.
+  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'
   NODE_VERSION: '22'
   # Must match `packageManager` in package.json exactly. pnpm/action-setup
   # refuses to run when the two disagree, which is how every run before

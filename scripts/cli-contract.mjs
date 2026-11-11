@@ -548,7 +548,7 @@ export const CLI_CONTRACT = Object.freeze({
     positionals: [],
     accepts: { '--all': 'switch', '--service': 'identifier' },
   },
-  'scripts/prisma-generate.mjs': { positionals: [] },
+  'scripts/prisma-generate.mjs': { positionals: [], accepts: { '--schema': 'path' } },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },
   // The name of a DATABASE_URL_* variable, never its value, then the few flags it passes on to psql.

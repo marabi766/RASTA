@@ -735,7 +735,7 @@ try {
     });
     if (pkg.scripts['db:seed']) {
       progress(`generate and demo seed ${service}`);
-      await run('pnpm', ['exec', 'prisma', 'generate'], { cwd, env: dbEnv });
+      await run(process.execPath, [join(ROOT, 'scripts/prisma-generate.mjs')], { cwd, env: dbEnv });
       // Keep migrator credentials out of the runtime seed's environment.
       const seedEnv = Object.fromEntries(
         Object.entries(dbEnv).filter(([key]) => !key.endsWith('_MIGRATOR')),

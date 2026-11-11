@@ -32,6 +32,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Explicit generation must succeed through the retry wrapper.
+  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'
   NODE_VERSION: '22'
   # Must match `packageManager` in package.json and ci.yml (pnpm/action-setup refuses otherwise).
   PNPM_VERSION: '11.22.0'
