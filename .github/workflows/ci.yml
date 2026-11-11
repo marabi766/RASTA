@@ -19,7 +19,9 @@ concurrency:
   # Every push range needs its own scan, including otherwise displaced pending
   # runs. PR updates can supersede earlier runs because they scan base..head.
   group: ci-${{ github.event_name == 'push' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A running full drill owns disposable resources and must finish teardown.
+  # New PR runs may replace pending runs in this group, never a running one.
+  cancel-in-progress: false
 
 env:
   # Explicit generation must succeed through the retry wrapper.
@@ -43,6 +45,13 @@ env:
   TRIVY_VERSION: 'v0.70.0'
 
 jobs:
+  # No test/build dependencies: the ~10 minute drill starts beside the other jobs.
+  backup-drill:
+    name: Full backup restore drill
+    permissions:
+      contents: read
+    uses: ./.github/workflows/backup-drill-monthly.yml
+
   # ---------------------------------------------------------------------------
   # Fast feedback. Everything here runs without Docker, so it fails in ~2
   # minutes rather than after a container pull.

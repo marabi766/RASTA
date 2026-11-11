@@ -1,0 +1,123 @@
+// Full-drill inputs traced from backup-restore-drill-main.mjs (preflight, bootstrap,
+// migration and seed), prisma.mjs and the seeds' repository imports. Deliberately
+// cover whole input families, including future services and bootstrap scripts.
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export const DRILL_PATHS = [
+  '**/*.prisma',
+  '**/migrations/**',
+  'services/*/prisma/**',
+  '**/docker-compose*.yml',
+  '**/docker-compose*.yaml',
+  'infrastructure/docker/postgres/**',
+  '.github/workflows/ci.yml',
+  '.github/workflows/backup-drill-monthly.yml',
+  'scripts/backup-restore-drill*',
+  'scripts/prisma*',
+  'scripts/infra-preflight-lib.mjs',
+  'scripts/check-kafka-credential-scope-lib.mjs',
+  'scripts/database-services.mjs',
+  '.env*',
+  'services/*/.env*',
+  'services/*/package.json',
+  'services/*/tsconfig*.json',
+  // Seeds import config/nest-common; the build includes their workspace dependencies.
+  'packages/**',
+  // The organization seed uses its repository/service; economic seeds the cutover.
+  'services/organization-service/src/**',
+  'services/economic-service/src/reward/evaluation-cutover.ts',
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  '.npmrc',
+  'turbo.json',
+  'tsconfig*.json',
+];
+
+const match = (path, glob) => {
+  const expression = glob
+    .split(/(\*\*\/|\*\*|\*)/)
+    .map((part) =>
+      part === '**/'
+        ? '(?:.*/)?'
+        : part === '**'
+          ? '.*'
+          : part === '*'
+            ? '[^/]*'
+            : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    )
+    .join('');
+  return new RegExp(`^${expression}$`).test(path);
+};
+
+// Only a proven ordinary PR may skip. Missing/malformed/fork metadata runs the
+// drill; mq/train-* is unconditional, before any diff (including docs-only).
+export function ordinaryPr(eventName, event, repository) {
+  const pr = event?.pull_request;
+  return (
+    eventName === 'pull_request' &&
+    typeof pr?.head?.ref === 'string' &&
+    /^[\w./-]+$/.test(pr.head.ref) &&
+    !pr.head.ref.startsWith('mq/') &&
+    pr.head.repo?.full_name === repository &&
+    typeof repository === 'string' &&
+    repository.length > 0 &&
+    pr.base?.ref === 'main' &&
+    [pr.base.sha, pr.head.sha].every((sha) => /^[a-f0-9]{40}$/.test(sha ?? ''))
+  );
+}
+
+export function shouldRun(eventName, event, repository, diff) {
+  if (!ordinaryPr(eventName, event, repository)) return true;
+  try {
+    const paths = diff(event.pull_request.base.sha, event.pull_request.head.sha);
+    if (!Array.isArray(paths) || !paths.length) return true;
+    return paths.some(
+      (path) =>
+        typeof path !== 'string' ||
+        !path ||
+        path.startsWith('/') ||
+        path.split('/').includes('..') ||
+        DRILL_PATHS.some((glob) => match(path, glob)),
+    );
+  } catch {
+    return true;
+  }
+}
+
+export function gatePassed(eventName, event, repository, needs) {
+  // A selector failure or missing answer never proves permission to skip.
+  if (needs?.scope?.result !== 'success') return false;
+  const selection = needs.scope.outputs?.run;
+  if (selection === 'true') return needs.drill?.result === 'success';
+  return (
+    selection === 'false' &&
+    ordinaryPr(eventName, event, repository) &&
+    needs.drill?.result === 'skipped'
+  );
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+  const { GITHUB_EVENT_NAME: name, GITHUB_REPOSITORY: repository } = process.env;
+  if (process.argv[2] === '--gate') {
+    const passed = gatePassed(name, event, repository, JSON.parse(process.env.NEEDS));
+    process.stdout.write(`Full backup restore drill gate: ${passed ? 'passed' : 'FAILED'}\n`);
+    process.exitCode = passed ? 0 : 1;
+  } else {
+    const run = shouldRun(name, event, repository, (base, head) => {
+      const output = execFileSync(
+        'git',
+        ['diff', '--no-renames', '--name-only', '-z', `${base}...${head}`, '--'],
+        { encoding: 'utf8', timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
+      );
+      if (!output.endsWith('\0')) throw new Error('Incomplete diff');
+      return output.slice(0, -1).split('\0');
+    });
+    appendFileSync(process.env.GITHUB_OUTPUT, `run=${run}\n`);
+    process.stdout.write(`Full backup restore drill selected: ${run}\n`);
+  }
+}

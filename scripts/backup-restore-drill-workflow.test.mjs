@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import YAML from 'yaml';
+import { DRILL_PATHS, shouldRun, gatePassed } from './backup-restore-drill-scope.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const read = (path) => readFileSync(join(root, path), 'utf8');
@@ -36,26 +37,220 @@ const DRILL = 'Run the full drill';
 const SUMMARY = 'Summary (allowlisted fields only)';
 const CLEANUP = 'Remove anything the drill left';
 
-test('triggers: one monthly off-the-hour schedule, manual dispatch, and the path-limited pull request', () => {
+test('triggers: CI calls the shared drill in parallel; nightly includes monthly, dispatch remains', () => {
   assert.deepEqual(Object.keys(workflow.on).sort(), [
-    'pull_request',
     'schedule',
+    'workflow_call',
     'workflow_dispatch',
   ]);
-  assert.equal(workflow.on.schedule.length, 1);
-  const [minute, hour, day, month, weekday] = workflow.on.schedule[0].cron.split(/\s+/);
-  assert.match(minute, /^(?!0$)\d{1,2}$/, 'off the hour');
-  assert.match(hour, /^\d{1,2}$/);
-  assert.match(day, /^\d{1,2}$/, 'one day of the month');
-  assert.equal(month, '*');
-  assert.equal(weekday, '*');
-  assert.deepEqual(workflow.on.pull_request.paths, [
+  assert.deepEqual(workflow.on.schedule, [{ cron: '17 3 * * *' }]);
+  assert.deepEqual(ci.on, { push: { branches: ['main'] }, pull_request: { branches: ['main'] } });
+  assert.deepEqual(ci.jobs['backup-drill'], {
+    name: 'Full backup restore drill',
+    permissions: { contents: 'read' },
+    uses: `./${WORKFLOW}`,
+  });
+  assert.deepEqual(job.needs, ['scope']);
+  assert.equal(job.if, "${{ always() && needs.scope.outputs.run != 'false' }}");
+  assert.deepEqual(workflow.jobs.gate.needs, ['scope', 'drill']);
+  assert.equal(workflow.jobs.gate.if, '${{ always() }}');
+  assert.equal(
+    workflow.jobs.gate.steps.at(-1).run,
+    'node scripts/backup-restore-drill-scope.mjs --gate',
+  );
+  assert.deepEqual(workflow.jobs.gate.steps.at(-1).env, { NEEDS: '${{ toJSON(needs) }}' });
+  assert.equal(workflow.jobs.scope.outputs.run, '${{ steps.scope.outputs.run }}');
+  const selector = workflow.jobs.scope.steps.at(-1);
+  assert.equal(selector.id, 'scope');
+  assert.equal(selector.run, 'node scripts/backup-restore-drill-scope.mjs');
+  assert.equal(workflow.jobs.scope.steps[0].with['fetch-depth'], 0);
+  assert.doesNotMatch(text, /pull_request_target|workflow_run/);
+});
+
+const repository = 'owner/repo';
+const event = (ref = 'fix/ordinary') => ({
+  pull_request: {
+    head: { ref, sha: 'a'.repeat(40), repo: { full_name: repository } },
+    base: { ref: 'main', sha: 'b'.repeat(40) },
+  },
+});
+const select = (paths, metadata = event(), name = 'pull_request') =>
+  shouldRun(name, metadata, repository, () => paths);
+const verdict = (run, result, metadata = event(), scopeResult = 'success') =>
+  gatePassed('pull_request', metadata, repository, {
+    scope: { result: scopeResult, outputs: { run } },
+    drill: { result },
+  });
+
+test('exact input families: dropping any path refuses the guard', () => {
+  assert.deepEqual(DRILL_PATHS, [
+    '**/*.prisma',
+    '**/migrations/**',
+    'services/*/prisma/**',
+    '**/docker-compose*.yml',
+    '**/docker-compose*.yaml',
+    'infrastructure/docker/postgres/**',
+    '.github/workflows/ci.yml',
     '.github/workflows/backup-drill-monthly.yml',
     'scripts/backup-restore-drill*',
+    'scripts/prisma*',
+    'scripts/infra-preflight-lib.mjs',
+    'scripts/check-kafka-credential-scope-lib.mjs',
+    'scripts/database-services.mjs',
+    '.env*',
+    'services/*/.env*',
+    'services/*/package.json',
+    'services/*/tsconfig*.json',
+    'packages/**',
+    'services/organization-service/src/**',
+    'services/economic-service/src/reward/evaluation-cutover.ts',
+    'package.json',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    '.npmrc',
+    'turbo.json',
+    'tsconfig*.json',
   ]);
-  assert.deepEqual(workflow.on.pull_request.branches, ['main']);
-  // pull_request_target and workflow_run run with more than the pull request's own token.
-  assert.doesNotMatch(text, /pull_request_target|workflow_run/);
+  for (const glob of DRILL_PATHS) {
+    const path = glob.replaceAll('**/', '').replaceAll('**', 'nested/input').replaceAll('*', 'new');
+    assert.equal(select([path]), true, glob);
+  }
+  for (const path of [
+    'services/new-service/prisma/migrations/id/down.sql',
+    'services/new-service/prisma/seed.ts',
+    'services/new-service/prisma/.env',
+    'nested/docker-compose.override.yaml',
+    '.env.migrator.example',
+    'packages/config/src/url-reader.js',
+    'scripts/prisma-generate.mjs',
+  ])
+    assert.equal(select([path]), true, path);
+  for (const path of [
+    'docs/guide.md',
+    'apps/web/src/app/page.tsx',
+    'services/asset-service/src/asset.service.ts',
+  ])
+    assert.equal(select([path]), false, path);
+});
+
+test('every train runs even on docs-only changes; uncertainty runs without relying on a diff', () => {
+  for (const metadata of [
+    event('mq/train-1'),
+    event('mq/train-any-name'),
+    event('mq/unknown'),
+    {},
+    { pull_request: {} },
+    event('invalid ref'),
+  ]) {
+    assert.equal(select(['docs/guide.md'], metadata), true);
+    assert.equal(
+      shouldRun('pull_request', metadata, repository, () => {
+        throw Error('unreadable');
+      }),
+      true,
+    );
+  }
+  const fork = event();
+  fork.pull_request.head.repo.full_name = 'fork/repo';
+  const badSha = event();
+  badSha.pull_request.base.sha = 'missing';
+  for (const metadata of [fork, badSha]) assert.equal(select(['docs/guide.md'], metadata), true);
+  for (const name of ['push', 'schedule', 'workflow_dispatch', 'unknown'])
+    assert.equal(select(['docs/guide.md'], {}, name), true);
+  for (const paths of [undefined, [], ['../unknown'], [null]]) assert.equal(select(paths), true);
+  assert.equal(
+    shouldRun('pull_request', event(), repository, () => {
+      throw Error('diff failed');
+    }),
+    true,
+  );
+});
+
+test('skip-on-train is red, and missing/failed selection or non-success drill never passes', () => {
+  for (const metadata of [event('mq/train-1'), {}]) {
+    assert.equal(verdict('false', 'skipped', metadata), false);
+    assert.equal(verdict('true', 'success', metadata), true);
+  }
+  for (const result of ['failure', 'cancelled', 'skipped', undefined])
+    assert.equal(verdict('true', result), false);
+  for (const result of ['failure', 'cancelled', 'skipped', null])
+    assert.equal(verdict('false', 'skipped', event(), result), false);
+  for (const run of [undefined, '', 'unknown']) assert.equal(verdict(run, 'success'), false);
+  assert.equal(verdict('false', 'skipped'), true, 'proven ordinary irrelevant PR');
+});
+
+test('selector CLI uses a complete NUL-separated diff, covers deleted/renamed inputs and fails closed', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-scope-'));
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: directory, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  try {
+    git('init', '--initial-branch=main');
+    writeFileSync(join(directory, '.env.example'), 'synthetic');
+    git('add', '.');
+    git(
+      '-c',
+      'user.name=Drill test',
+      '-c',
+      'user.email=drill@example.invalid',
+      'commit',
+      '-m',
+      'base',
+    );
+    const base = git('rev-parse', 'HEAD');
+    git('mv', '.env.example', 'guide.md');
+    git(
+      '-c',
+      'user.name=Drill test',
+      '-c',
+      'user.email=drill@example.invalid',
+      'commit',
+      '-m',
+      'rename',
+    );
+    const metadata = event();
+    metadata.pull_request.base.sha = base;
+    metadata.pull_request.head.sha = git('rev-parse', 'HEAD');
+    const eventPath = join(directory, 'event.json');
+    const output = join(directory, 'output');
+    const run = (extra = [], needs) => {
+      writeFileSync(eventPath, JSON.stringify(metadata));
+      writeFileSync(output, '');
+      return spawnSync(
+        process.execPath,
+        [join(root, 'scripts/backup-restore-drill-scope.mjs'), ...extra],
+        {
+          cwd: directory,
+          encoding: 'utf8',
+          env: {
+            PATH: process.env.PATH,
+            GITHUB_EVENT_PATH: eventPath,
+            GITHUB_OUTPUT: output,
+            GITHUB_EVENT_NAME: 'pull_request',
+            GITHUB_REPOSITORY: repository,
+            NEEDS: JSON.stringify(needs ?? {}),
+          },
+        },
+      );
+    };
+    assert.equal(run().status, 0);
+    assert.equal(readFileSync(output, 'utf8'), 'run=true\n', 'old name of renamed env input');
+    metadata.pull_request.base.sha = '0'.repeat(40);
+    assert.equal(run().status, 0);
+    assert.equal(readFileSync(output, 'utf8'), 'run=true\n', 'unavailable diff runs');
+    metadata.pull_request.head.ref = 'mq/train-1';
+    assert.equal(
+      run(['--gate'], {
+        scope: { result: 'success', outputs: { run: 'false' } },
+        drill: { result: 'skipped' },
+      }).status,
+      1,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('least privilege: contents read only, no secret anywhere, no outbound alert or upload', () => {
@@ -69,10 +264,22 @@ test('least privilege: contents read only, no secret anywhere, no outbound alert
   assert.doesNotMatch(code, /upload-artifact|actions\/cache|download-artifact/);
   assert.doesNotMatch(code, /curl|wget|webhook|telegram|api\.github\.com|gh (api|issue|pr)/i);
   assert.doesNotMatch(code, /continue-on-error/);
-  for (const candidate of job.steps) {
-    if (candidate.uses?.startsWith('actions/checkout'))
-      assert.equal(candidate.with['persist-credentials'], false);
+  for (const [id, candidateJob] of Object.entries(workflow.jobs)) {
+    assert.equal(candidateJob['continue-on-error'], undefined, id);
+    assert.ok(
+      Number.isInteger(candidateJob['timeout-minutes']) &&
+        candidateJob['timeout-minutes'] > 0 &&
+        candidateJob['timeout-minutes'] <= 30,
+      id,
+    );
+    assert.equal(candidateJob.environment, undefined, id);
+    for (const candidate of candidateJob.steps) {
+      if (candidate.uses?.startsWith('actions/checkout'))
+        assert.equal(candidate.with['persist-credentials'], false);
+      if (![SUMMARY, CLEANUP].includes(candidate.name)) assert.equal(candidate.if, undefined);
+    }
   }
+  assert.equal(workflow.jobs.scope.if, undefined);
 });
 
 test('actions are pinned by commit and are the ones ci.yml already uses', () => {
@@ -103,9 +310,10 @@ test('versions and image: Node and pnpm as in ci.yml and package.json, the compo
   assert.match(compose, /@sha256:[0-9a-f]{64}$/);
 });
 
-test('bounded and never cancelled while running: one group per ref, step limit under the job limit', () => {
+test('bounded and never cancelled while running: isolated calls, step limit under the job limit', () => {
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
-  assert.match(workflow.concurrency.group, /\$\{\{ github\.ref \}\}/);
+  assert.match(workflow.concurrency.group, /\$\{\{ github\.run_id \}\}/);
+  assert.equal(ci.concurrency['cancel-in-progress'], false, 'caller cannot cancel teardown');
   assert.ok(Number.isInteger(job['timeout-minutes']) && job['timeout-minutes'] <= 60);
   const drill = step(DRILL);
   // Apart from the 5-minute PostgreSQL tests of ci.yml, and inside the job's limit.
