@@ -185,18 +185,20 @@ export class PolicyReconciliationRepository {
             movedVersion: bigint | null;
           })[]
         >(
-          `UPDATE policy_reconciliation_task
-              SET lease_until = now() + ($2::int * interval '1 second'),
-                  lease_token = $3,
-                  updated_at = now()
-            WHERE id IN (
-                  SELECT id FROM policy_reconciliation_task
+          `WITH picked AS MATERIALIZED (
+                  SELECT id AS picked_id FROM policy_reconciliation_task
                    WHERE status = 'PENDING'
                      AND next_attempt_at <= now()
                      AND (lease_until IS NULL OR lease_until <= now())
                    ORDER BY next_attempt_at, id
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
+            UPDATE policy_reconciliation_task
+              SET lease_until = now() + ($2::int * interval '1 second'),
+                  lease_token = $3,
+                  updated_at = now()
+             FROM picked
+            WHERE policy_reconciliation_task.id = picked.picked_id
         RETURNING id,
                   organization_id AS "organizationId",
                   policy_id AS "policyId",

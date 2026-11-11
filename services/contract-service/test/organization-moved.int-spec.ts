@@ -210,6 +210,24 @@ describe('a signing policy follows an organization move', () => {
     api.hierarchy.asked.length = 0;
   });
 
+  it('bounds concurrent claims over many due policies without duplicate leases', async () => {
+    const other = wire();
+    try {
+      const union = newOrg();
+      for (let i = 0; i < 20; i++) await activeUnionPolicy(union, newOrg());
+      await consumer.handle(moved(union));
+      const repositories = [
+        api.app.get(PolicyReconciliationRepository),
+        new PolicyReconciliationRepository(other.prisma),
+      ];
+      const batches = await Promise.all(repositories.map((r) => r.claimDue(1, 600, ulid())));
+      for (const batch of batches) expect(batch).toHaveLength(1);
+      expect(new Set(batches.flat().map((row) => row.policyId)).size).toBe(2);
+    } finally {
+      await other.close();
+    }
+  });
+
   describe('the handler only queues; the sweeper asks and suspends', () => {
     it('queues one task per union-written policy, none for a platform-written one, and a replay coalesces into the open task', async () => {
       const union = newOrg();

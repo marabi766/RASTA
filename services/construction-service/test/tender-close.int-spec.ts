@@ -255,6 +255,23 @@ describe('tender close sweeper', () => {
   });
 
   describe('two sweepers', () => {
+    it('bounds concurrent claims across many due rows and never leases a row twice', async () => {
+      const other = wire();
+      try {
+        for (let i = 0; i < 20; i++) {
+          const row = await setup();
+          await makeOverdue(row.tenderId);
+        }
+        const batches = await Promise.all(
+          [w, other].map((db) => db.tenderCloses.claimDue(1, 600, ulid())),
+        );
+        for (const batch of batches) expect(batch).toHaveLength(1);
+        expect(new Set(batches.flat().map((row) => row.id)).size).toBe(2);
+      } finally {
+        await other.close();
+      }
+    });
+
     it('close every tender once between them, and one event each', async () => {
       const made = [await setup(), await setup(), await setup(), await setup()];
       for (const { tenderId } of made) await makeOverdue(tenderId);
