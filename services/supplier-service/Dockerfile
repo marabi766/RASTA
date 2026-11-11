@@ -43,7 +43,7 @@ COPY . .
 
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && \
-    pnpm install --frozen-lockfile
+    PRISMA_SKIP_POSTINSTALL_GENERATE=true pnpm install --frozen-lockfile
 
 # ---- build ------------------------------------------------------------------
 FROM deps AS build

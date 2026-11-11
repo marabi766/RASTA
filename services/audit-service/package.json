@@ -5,7 +5,7 @@
   "description": "Append-only audit evidence store. AUD-001 (domain projector), AUD-002 (tenant-safe read API), AUD-003 (per tenant-month hash chain plus GET /v1/audit-events/verify, and correction records linked both ways by correctionOf/correctedBy) and AUD-004 Phase B (validating, idempotent consumer of AUDIT_EVENT_RECORDED v1 on rasta.audit.trail.v1 as audit-service.trail). identity-service is the only producer on the trail today: nine windowed-aggregated refusal sites and the POST /v1/audit-corrections command. This service has no write endpoint by design, does not originate corrections, offers only an internal correction-target lookup to identity-service, and has no export and no chain signature.",
   "main": "dist/main.js",
   "scripts": {
-    "build": "prisma generate && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",
+    "build": "node ../../scripts/prisma-generate.mjs && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",
     "clean": "rimraf dist .turbo",
     "dev": "prisma generate && node -r @swc-node/register -r ./dev/telemetry.ts --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --selectProjects unit",
     "test:unit": "jest --selectProjects unit",
-    "db:generate": "prisma generate",
+    "db:generate": "node ../../scripts/prisma-generate.mjs",
     "db:migrate": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate deploy",
     "db:migrate:dev": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate dev",
     "test:integration": "jest --selectProjects integration --runInBand",
