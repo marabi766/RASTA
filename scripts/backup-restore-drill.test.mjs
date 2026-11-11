@@ -28,6 +28,7 @@ import {
   dumpPath,
   collectSchemaReference,
   checkSourceReference,
+  foldLeadingBooleanLists,
   schemaReferenceEvidence,
   schemaDiffSummary,
   drillPassed,
@@ -477,6 +478,7 @@ test('SOURCE/REF allowance scopes identities by database/schema/table/name and p
       { schema: 'public', table: 'sample', name: 'same_name' },
       { schema: 'audit', table: 'sample', name: 'same_name' },
     ],
+    foldedBooleanLists: [],
   });
   // Honest trust boundary: even a different bound passes this structural guard.
   assert.equal(
@@ -525,6 +527,7 @@ test('a multi-line CHECK may differ on its own lines only, once per constraint',
     database: 'rasta_test',
     checkLinesDifferent: 1,
     checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+    foldedBooleanLists: [],
   });
   // Two of its lines differ: still one constraint.
   const two = evidence(
@@ -534,6 +537,7 @@ test('a multi-line CHECK may differ on its own lines only, once per constraint',
     database: 'rasta_test',
     checkLinesDifferent: 2,
     checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+    foldedBooleanLists: [],
   });
   // Separated differences (the first WHEN and the ELSE, the line between them unchanged): still
   // one entry, as adjacent ones are.
@@ -544,6 +548,7 @@ test('a multi-line CHECK may differ on its own lines only, once per constraint',
     database: 'rasta_test',
     checkLinesDifferent: 2,
     checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+    foldedBooleanLists: [],
   });
   // Every line of the span, with and without gaps: one entry.
   const everyOther = evidence(
@@ -556,6 +561,7 @@ test('a multi-line CHECK may differ on its own lines only, once per constraint',
     database: 'rasta_test',
     checkLinesDifferent: 3,
     checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+    foldedBooleanLists: [],
   });
   // Two ADJACENT constraints that both changed (the last line of one, the line of the next):
   // two entries, one per constraint.
@@ -571,6 +577,7 @@ test('a multi-line CHECK may differ on its own lines only, once per constraint',
       { schema: 'public', table: 'intake', name: 'ck_actor' },
       { schema: 'public', table: 'intake', name: 'ck_other' },
     ],
+    foldedBooleanLists: [],
   });
   for (const body of [
     // outside the constraint: the column, the closing line
@@ -602,6 +609,199 @@ test('CHECK-looking lines in functions, comments, COMMENT strings and nested SQL
       ),
     );
   }
+});
+
+// FU-327. The real shape (contract's deduction_rule_name_is_canonical): BETWEEN first in an AND
+// list of a SQL-standard body. SOURCE prints the stored tree, REF the tree PostgreSQL read back.
+const nested = `((("length"("candidate") >= 1) AND ("length"("candidate") <= 200)) AND ("candidate" ~ '^[(a-z)]+$'::"text") AND ("candidate" !~ '  '::"text"))`;
+const flat = `(("length"("candidate") >= 1) AND ("length"("candidate") <= 200) AND ("candidate" ~ '^[(a-z)]+$'::"text") AND ("candidate" !~ '  '::"text"))`;
+const objectBodies = (expression) => `--
+-- Name: is_canonical("text"); Type: FUNCTION; Schema: public; Owner: owner
+--
+
+CREATE FUNCTION "public"."is_canonical"("candidate" "text") RETURNS boolean
+    LANGUAGE "sql" IMMUTABLE
+    RETURN ${expression};
+
+--
+-- Name: canonical_names; Type: VIEW; Schema: audit; Owner: owner
+--
+
+CREATE VIEW "audit"."canonical_names" AS
+ SELECT "candidate"
+   FROM "public"."names"
+  WHERE ${expression};
+
+--
+-- Name: names_canonical; Type: INDEX; Schema: public; Owner: owner
+--
+
+CREATE INDEX "names_canonical" ON "public"."names" USING "btree" ("candidate") WHERE ${expression};
+`;
+test('a leading AND/OR list that PostgreSQL folds on reading is one line in SOURCE and REF, in every object', () => {
+  const source = evidence(checkBody + objectBodies(nested));
+  assert.deepEqual(
+    checkSourceReference(source, evidence(checkBody + objectBodies(flat)), 'rasta_test'),
+    {
+      database: 'rasta_test',
+      checkLinesDifferent: 0,
+      checkConstraints: [],
+      foldedBooleanLists: [
+        'public.is_canonical("text") (FUNCTION)',
+        'audit.canonical_names (VIEW)',
+        'public.names_canonical (INDEX)',
+      ],
+    },
+  );
+  // The fold and nothing with it: a changed bound, operator or pattern on the same line refuses.
+  for (const [from, to] of [
+    ['<= 200', '<= 201'],
+    ['>= 1', '> 1'],
+    ["'  '", "' '"],
+    ['("candidate" !~', '(NOT "candidate" !~'],
+  ])
+    assert.throws(
+      () =>
+        checkSourceReference(
+          source,
+          evidence(checkBody + objectBodies(flat.replace(from, to))),
+          'rasta_test',
+        ),
+      /non-CHECK difference/,
+    );
+  for (const [text, folded] of [
+    // Recursive, as the grammar's left recursion is; OR as AND; keywords in any case.
+    ['((((a) AND (b)) AND (c)) AND (d))', '((a) AND (b) AND (c) AND (d))'],
+    ['f((((a) or (b)) OR (c)), 1)', 'f(((a) or (b) OR (c)), 1)'],
+    // BETWEEN SYMMETRIC: an OR of two ANDs leading an AND keeps its own parentheses.
+    ['((((a) AND (b)) OR ((c) AND (d))) AND (e))', '((((a) AND (b)) OR ((c) AND (d))) AND (e))'],
+    ['((((a) AND (b)) OR ((c) AND (d))) OR (e))', '(((a) AND (b)) OR ((c) AND (d)) OR (e))'],
+  ])
+    assert.equal(foldLeadingBooleanLists(text), folded);
+});
+
+test('every regrouping other than the leading same-connective list keeps its bytes and refuses', () => {
+  const pair = (source, reference) => [
+    evidence(checkBody + objectBodies(source)),
+    evidence(checkBody + objectBodies(reference)),
+  ];
+  for (const [source, reference] of [
+    // Parentheses alone can change the boolean: these four differ by parentheses only.
+    ['(((a) OR (b)) AND (c))', '((a) OR ((b) AND (c)))'],
+    ['(((a) OR (b)) AND (c))', '((a) OR (b) AND (c))'],
+    ['(((a) AND (b)) OR (c))', '((a) AND ((b) OR (c)))'],
+    ['((NOT ((a) AND (b))) AND (c))', '((NOT (a) AND (b)) AND (c))'],
+    // Not what the grammar folds: a list that does not lead, is mixed, or is not the whole operand.
+    ['((c) AND ((a) AND (b)))', '((c) AND (a) AND (b))'],
+    ['((c) AND ((a) AND (b)) AND (d))', '((c) AND (a) AND (b) AND (d))'],
+    ['(x BETWEEN ((a) AND (b)) AND (c))', '(x BETWEEN (a) AND (b) AND (c))'],
+    ['(((a) AND (b) OR (c)) AND (d))', '((a) AND (b) OR (c) AND (d))'],
+    ['(((a) AND (b)) IS TRUE AND (c))', '((a) AND (b) IS TRUE AND (c))'],
+    ['((((a) AND (b)))::boolean AND (c))', '(((a) AND (b))::boolean AND (c))'],
+    // Not a list of parenthesised operands: a subquery, a frame, bare operands, a comment.
+    ['((SELECT (a) AND (b)) AND (c))', '(SELECT (a) AND (b) AND (c))'],
+    ['((x BETWEEN (a) AND (b)) AND (c))', '(x BETWEEN (a) AND (b) AND (c))'],
+    ['(("a" AND "b") AND (c))', '("a" AND "b" AND (c))'],
+    ['(((a) AND /* c */ (b)) AND (c))', '((a) AND /* c */ (b) AND (c))'],
+    ['((((a) AND (b))) AND (c))', '((a) AND (b) AND (c))'],
+    // Stored text is never an expression tree: a string, a dollar body, a quoted identifier.
+    [`f('(((a) AND (b)) AND (c))')`, `f('((a) AND (b) AND (c))')`],
+    ['f($$(((a) AND (b)) AND (c))$$)', 'f($$((a) AND (b) AND (c))$$)'],
+    ['"(((a) AND (b)) AND (c))"', '"((a) AND (b) AND (c))"'],
+    // Unbalanced text is not SQL PostgreSQL restored: nothing in it is folded.
+    ['(((a) AND (b)) AND (c)) )', '((a) AND (b) AND (c)) )'],
+    ['( (((a) AND (b)) AND (c))', '( ((a) AND (b) AND (c))'],
+  ]) {
+    assert.equal(foldLeadingBooleanLists(source), source);
+    assert.throws(
+      () => checkSourceReference(...pair(source, reference), 'rasta_test'),
+      /non-CHECK difference/,
+      source,
+    );
+  }
+  // Parentheses that are not a folded list are bytes like any others.
+  assert.throws(
+    () =>
+      checkSourceReference(...pair('((a) AND (b) AND (c))', '(a) AND (b) AND (c)'), 'rasta_test'),
+    /non-CHECK difference/,
+  );
+});
+
+// #1078 r1 F1. Two groupings of one multi-line expression: for a..e = F,F,F,T,T the first is
+// false and the second true. Their bytes differ on the second and fourth line only, and the fold
+// of the first makes exactly those two lines equal to the second — while it takes a parenthesis
+// from the first and third line, whose bytes matched.
+const regrouped = [
+  '(((a)\nAND (((b)\nOR (c))\nOR (d)))\nAND (e))',
+  '(((a)\nAND ((b)\nOR (c))\nOR (d))\nAND (e))',
+];
+// The same pair with every operand a CASE, which PostgreSQL prints over several lines.
+const overCase = (text) =>
+  text
+    .replaceAll('\n', ' ')
+    .replace(/\(([a-e])\)/g, '(CASE\n WHEN true THEN $1\n ELSE false\nEND)');
+const connectivesSwapped = (text) => text.replace(/AND|OR/g, (w) => (w === 'AND' ? 'OR' : 'AND'));
+// Every place a dump stores an expression tree.
+const storedExpressions = [
+  (x) => `CREATE FUNCTION "public"."f"() RETURNS boolean\n    LANGUAGE "sql"\n    RETURN ${x};\n`,
+  (x) =>
+    `CREATE FUNCTION "public"."f"() RETURNS boolean\n    LANGUAGE "sql"\n    BEGIN ATOMIC\n SELECT ${x} AS "ok";\nEND;\n`,
+  (x) => `CREATE VIEW "public"."v" AS\n SELECT ${x} AS "ok";\n`,
+  (x) => `CREATE MATERIALIZED VIEW "public"."m" AS\n SELECT ${x} AS "ok"\n  WITH NO DATA;\n`,
+  (x) =>
+    `CREATE TRIGGER "t" BEFORE UPDATE ON "public"."sample" FOR EACH ROW WHEN (${x}) EXECUTE FUNCTION "public"."f"();\n`,
+  (x) => `CREATE INDEX "i" ON "public"."sample" USING "btree" ("amount") WHERE ${x};\n`,
+  (x) => `CREATE POLICY "p" ON "public"."sample" USING (${x});\n`,
+  (x) => `ALTER TABLE ONLY "public"."sample" ALTER COLUMN "ok" SET DEFAULT ${x};\n`,
+  (x) => `CREATE TABLE "public"."g" (\n    "ok" boolean GENERATED ALWAYS AS (${x}) STORED\n);\n`,
+];
+test('every non-CHECK line is compared after the fold, also a line whose bytes matched', () => {
+  const pairs = [regrouped, regrouped.map(overCase)].flatMap((pair) => [
+    pair,
+    pair.map(connectivesSwapped),
+  ]);
+  let refused = 0;
+  for (const stored of storedExpressions) {
+    for (const pair of pairs) {
+      const [source, reference] = pair.map((x) => checkBody + stored(x));
+      // The shape itself, so this test cannot pass on a pair that never reached the gap: every
+      // line whose bytes differ is equal after the fold, and a line whose bytes match is not.
+      const [raw, folded] = [(x) => x, foldLeadingBooleanLists].map((f) =>
+        [source, reference].map((x) => f(x).split('\n')),
+      );
+      const lines = raw[0].map((line, i) => ({
+        bytes: line === raw[1][i],
+        folded: folded[0][i] === folded[1][i],
+      }));
+      assert.equal(raw[0].length, raw[1].length);
+      assert.ok(lines.some((line) => !line.bytes));
+      assert.ok(lines.every((line) => line.bytes || line.folded));
+      assert.ok(lines.some((line) => line.bytes && !line.folded));
+      for (const [from, to] of [
+        [source, reference],
+        [reference, source],
+      ]) {
+        assert.throws(
+          () => checkSourceReference(evidence(from), evidence(to), 'rasta_test'),
+          /^Error: SOURCE\/REF non-CHECK difference$/,
+          from,
+        );
+        refused++;
+      }
+    }
+    // The fold alone still passes across lines, in either direction.
+    const [nestedLines, flatLines] = ['(((a)\nAND (b))\nAND (c))', '((a)\nAND (b)\nAND (c))'].map(
+      (x) => evidence(checkBody + stored(x)),
+    );
+    for (const [from, to] of [
+      [nestedLines, flatLines],
+      [flatLines, nestedLines],
+    ])
+      assert.deepEqual(checkSourceReference(from, to, 'rasta_test').foldedBooleanLists, [
+        'database schema',
+      ]);
+  }
+  assert.equal(refused, 72);
 });
 
 test('missing REF, fixed point or allowance and unstable REF cannot pass operator acceptance', () => {
