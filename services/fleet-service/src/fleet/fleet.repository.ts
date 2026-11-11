@@ -5,6 +5,7 @@ import {
   allocateStreamSeqSql,
   buildOutboxRow,
   createSystemContext,
+  getOrganizationId,
   runUnscoped,
   runWithContext,
   type OutboxMessageInput,
@@ -171,6 +172,42 @@ export class FleetRepository {
 
   async findActiveAssignmentForDriver(driverId: string, tx?: ExtendedPrismaClient) {
     return (tx ?? this.client).assignment.findFirst({ where: { driverId, endedAt: null } });
+  }
+
+  /**
+   * Exactly one covering assignment, or unknown. The asset lock serializes
+   * inserts/transfers; FOR SHARE also orders assignment endings (which do not
+   * all take the asset lock). Raw reads therefore carry the tenant explicitly.
+   * Two rows suffice to prove ambiguity without reading the whole history.
+   */
+  async findCoveringAssignment(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    periodStart: Date,
+    periodEnd: Date,
+    driverId?: string,
+  ): Promise<{ id: string; driverId: string } | null> {
+    const rows = await tx.$queryRaw<{ id: string; driverId: string }[]>`
+      SELECT id, driver_id AS "driverId" FROM assignment
+      WHERE organization_id = ${getOrganizationId()} AND asset_id = ${assetId}
+        AND started_at <= ${periodStart}
+        AND (ended_at IS NULL OR ${periodEnd} <= ended_at)
+        AND (${driverId ?? null}::text IS NULL OR driver_id = ${driverId ?? null})
+      LIMIT 2 FOR SHARE`;
+    return rows.length === 1 ? (rows[0] ?? null) : null;
+  }
+
+  /** Active assignment authorization for usage, stable until its write commits. */
+  async findActiveAssignmentForUsage(
+    tx: ExtendedPrismaClient,
+    driverId: string,
+  ): Promise<{ id: string; assetId: string; startedAt: Date } | null> {
+    const rows = await tx.$queryRaw<{ id: string; assetId: string; startedAt: Date }[]>`
+      SELECT id, asset_id AS "assetId", started_at AS "startedAt" FROM assignment
+      WHERE organization_id = ${getOrganizationId()} AND driver_id = ${driverId}
+        AND ended_at IS NULL
+      LIMIT 1 FOR SHARE`;
+    return rows[0] ?? null;
   }
 
   /**
