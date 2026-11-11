@@ -131,6 +131,9 @@ test('install coverage comes from workspace configuration and all tracked packag
 });
 
 test('new config references, unsupported config and unknown paths select the drill', () => {
+  // YAML data lives outside the shell-fixture sources scanned by the drill guard.
+  const aliasConfig = read('scripts/fixtures/backup-drill-workspace-alias.yaml');
+  assert.equal(YAML.parse(aliasConfig).patchedDependencies['dep@1'], 'docs/dependency.md');
   const configured = (source) =>
     shouldRun(
       'pull_request',
@@ -145,7 +148,7 @@ test('new config references, unsupported config and unknown paths select the dri
   );
   for (const source of [
     '',
-    'packages:\n  - apps/*\ncatalog:\n  dep: &patch docs/dependency.md\npatchedDependencies:\n  dep@1: *patch',
+    aliasConfig,
     'packages:\n  - apps/*\nfutureSetting: true',
     'packages:\n  - apps/*\nglobalPnpmfile: docs/dependency.md',
     'packages:\n  - apps/*\noverrides:\n  dep: file:docs/dependency.md',

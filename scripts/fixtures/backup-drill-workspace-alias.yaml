@@ -1,0 +1,6 @@
+packages:
+  - apps/*
+catalog:
+  dep: &patch docs/dependency.md
+patchedDependencies:
+  dep@1: *patch
