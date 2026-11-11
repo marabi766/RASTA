@@ -1,0 +1,121 @@
+[
+  {
+    "database": "rasta_analytics",
+    "schema": "public",
+    "table": "baseline_metric",
+    "source": "    CONSTRAINT \"ck_baseline_metric_scope\" CHECK (((\"scope_kind\")::\"text\" = ANY ((ARRAY['ORGANIZATION'::character varying, 'GOVERNANCE_ROOT'::character varying])::\"text\"[]))),",
+    "reference": "    CONSTRAINT \"ck_baseline_metric_scope\" CHECK (((\"scope_kind\")::\"text\" = ANY (ARRAY[('ORGANIZATION'::character varying)::\"text\", ('GOVERNANCE_ROOT'::character varying)::\"text\"]))),"
+  },
+  {
+    "database": "rasta_audit",
+    "schema": "audit",
+    "table": "bid_access_evidence",
+    "source": "    CONSTRAINT \"ck_bid_access_evidence_shape\" CHECK ((((\"outcome\")::\"text\" = ANY ((ARRAY['GRANTED'::character varying, 'REFUSED'::character varying])::\"text\"[])) AND (\"btrim\"((\"purpose\")::\"text\") <> ''::\"text\")))",
+    "reference": "    CONSTRAINT \"ck_bid_access_evidence_shape\" CHECK ((((\"outcome\")::\"text\" = ANY (ARRAY[('GRANTED'::character varying)::\"text\", ('REFUSED'::character varying)::\"text\"])) AND (\"btrim\"((\"purpose\")::\"text\") <> ''::\"text\")))"
+  },
+  {
+    "database": "rasta_audit",
+    "schema": "audit",
+    "table": "payment_reconciliation_evidence",
+    "source": "    CONSTRAINT \"ck_payment_reconciliation_evidence_shape\" CHECK (((((\"event_name\")::\"text\" = 'PAYMENT_RECONCILIATION_RESOLVED'::\"text\") AND (\"resolution\" IS NOT NULL) AND (\"resolved_by\" IS NOT NULL) AND (\"operator_action\" IS NULL) AND (\"actor\" IS NULL) AND (\"requeue_id\" IS NULL) AND (\"provider_outcome\" IS NULL) AND (((\"resolution_id\" IS NULL) AND (\"proposed_by\" IS NULL) AND (\"approved_by\" IS NULL) AND (\"evidence_reference\" IS NULL) AND (\"four_eyes\" IS NULL)) OR ((\"resolution_id\" IS NOT NULL) AND (\"proposed_by\" IS NOT NULL) AND (\"approved_by\" IS NOT NULL) AND (\"evidence_reference\" IS NOT NULL) AND (\"four_eyes\" IS NOT NULL)))) OR (((\"event_name\")::\"text\" = 'PAYMENT_RECONCILIATION_OPERATOR_ACTION'::\"text\") AND (\"operator_action\" IS NOT NULL) AND (\"actor\" IS NOT NULL) AND (\"four_eyes\" IS NOT NULL) AND (\"resolution\" IS NULL) AND (\"resolved_by\" IS NULL) AND (\"approved_by\" IS NULL) AND ((((\"operator_action\")::\"text\" = 'REQUEUED'::\"text\") AND (\"requeue_id\" IS NOT NULL) AND (\"resolution_id\" IS NULL) AND (\"provider_outcome\" IS NULL) AND (\"evidence_reference\" IS NULL) AND (\"proposed_by\" IS NULL)) OR (((\"operator_action\")::\"text\" = ANY ((ARRAY['PROPOSED'::character varying, 'REJECTED'::character varying])::\"text\"[])) AND (\"requeue_id\" IS NULL) AND (\"resolution_id\" IS NOT NULL) AND (\"provider_outcome\" IS NOT NULL) AND (\"evidence_reference\" IS NOT NULL) AND (\"proposed_by\" IS NOT NULL)))))),",
+    "reference": "    CONSTRAINT \"ck_payment_reconciliation_evidence_shape\" CHECK (((((\"event_name\")::\"text\" = 'PAYMENT_RECONCILIATION_RESOLVED'::\"text\") AND (\"resolution\" IS NOT NULL) AND (\"resolved_by\" IS NOT NULL) AND (\"operator_action\" IS NULL) AND (\"actor\" IS NULL) AND (\"requeue_id\" IS NULL) AND (\"provider_outcome\" IS NULL) AND (((\"resolution_id\" IS NULL) AND (\"proposed_by\" IS NULL) AND (\"approved_by\" IS NULL) AND (\"evidence_reference\" IS NULL) AND (\"four_eyes\" IS NULL)) OR ((\"resolution_id\" IS NOT NULL) AND (\"proposed_by\" IS NOT NULL) AND (\"approved_by\" IS NOT NULL) AND (\"evidence_reference\" IS NOT NULL) AND (\"four_eyes\" IS NOT NULL)))) OR (((\"event_name\")::\"text\" = 'PAYMENT_RECONCILIATION_OPERATOR_ACTION'::\"text\") AND (\"operator_action\" IS NOT NULL) AND (\"actor\" IS NOT NULL) AND (\"four_eyes\" IS NOT NULL) AND (\"resolution\" IS NULL) AND (\"resolved_by\" IS NULL) AND (\"approved_by\" IS NULL) AND ((((\"operator_action\")::\"text\" = 'REQUEUED'::\"text\") AND (\"requeue_id\" IS NOT NULL) AND (\"resolution_id\" IS NULL) AND (\"provider_outcome\" IS NULL) AND (\"evidence_reference\" IS NULL) AND (\"proposed_by\" IS NULL)) OR (((\"operator_action\")::\"text\" = ANY (ARRAY[('PROPOSED'::character varying)::\"text\", ('REJECTED'::character varying)::\"text\"])) AND (\"requeue_id\" IS NULL) AND (\"resolution_id\" IS NOT NULL) AND (\"provider_outcome\" IS NOT NULL) AND (\"evidence_reference\" IS NOT NULL) AND (\"proposed_by\" IS NOT NULL)))))),"
+  },
+  {
+    "database": "rasta_audit",
+    "schema": "audit",
+    "table": "payment_reconciliation_evidence",
+    "source": "    CONSTRAINT \"ck_payment_reconciliation_evidence_values\" CHECK (((\"btrim\"((\"organization_id\")::\"text\") <> ''::\"text\") AND (\"btrim\"((\"payment_intent_id\")::\"text\") <> ''::\"text\") AND (\"btrim\"((\"source_event_id\")::\"text\") <> ''::\"text\") AND (\"btrim\"((\"audit_event_id\")::\"text\") <> ''::\"text\") AND ((\"event_name\")::\"text\" = ANY ((ARRAY['PAYMENT_RECONCILIATION_RESOLVED'::character varying, 'PAYMENT_RECONCILIATION_OPERATOR_ACTION'::character varying])::\"text\"[])) AND ((\"kind\")::\"text\" = ANY ((ARRAY['REFUND'::character varying, 'UNCREDITED_REFUND'::character varying])::\"text\"[])) AND ((\"operator_action\" IS NULL) OR ((\"operator_action\")::\"text\" = ANY ((ARRAY['REQUEUED'::character varying, 'PROPOSED'::character varying, 'REJECTED'::character varying])::\"text\"[]))) AND ((\"provider_outcome\" IS NULL) OR ((\"provider_outcome\")::\"text\" = ANY ((ARRAY['REFUNDED'::character varying, 'DECLINED'::character varying, 'NOT_REACHED'::character varying])::\"text\"[]))) AND ((\"resolution\" IS NULL) OR ((\"resolution\")::\"text\" = ANY ((ARRAY['REFUNDED'::character varying, 'REFUND_DECLINED'::character varying, 'REFUND_NOT_REACHED'::character varying, 'UNCREDITED_REFUNDED'::character varying, 'UNCREDITED_DECLINED'::character varying, 'UNCREDITED_NOT_REACHED'::character varying, 'NOTHING_TO_RECONCILE'::character varying])::\"text\"[]))) AND ((\"actor\" IS NULL) OR ((\"actor\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"resolved_by\" IS NULL) OR ((\"resolved_by\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"proposed_by\" IS NULL) OR ((\"proposed_by\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"approved_by\" IS NULL) OR ((\"approved_by\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"resolution_id\" IS NULL) OR ((\"resolution_id\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"requeue_id\" IS NULL) OR ((\"requeue_id\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"evidence_reference\" IS NULL) OR ((\"evidence_reference\")::\"text\" ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$'::\"text\")))),",
+    "reference": "    CONSTRAINT \"ck_payment_reconciliation_evidence_values\" CHECK (((\"btrim\"((\"organization_id\")::\"text\") <> ''::\"text\") AND (\"btrim\"((\"payment_intent_id\")::\"text\") <> ''::\"text\") AND (\"btrim\"((\"source_event_id\")::\"text\") <> ''::\"text\") AND (\"btrim\"((\"audit_event_id\")::\"text\") <> ''::\"text\") AND ((\"event_name\")::\"text\" = ANY (ARRAY[('PAYMENT_RECONCILIATION_RESOLVED'::character varying)::\"text\", ('PAYMENT_RECONCILIATION_OPERATOR_ACTION'::character varying)::\"text\"])) AND ((\"kind\")::\"text\" = ANY (ARRAY[('REFUND'::character varying)::\"text\", ('UNCREDITED_REFUND'::character varying)::\"text\"])) AND ((\"operator_action\" IS NULL) OR ((\"operator_action\")::\"text\" = ANY (ARRAY[('REQUEUED'::character varying)::\"text\", ('PROPOSED'::character varying)::\"text\", ('REJECTED'::character varying)::\"text\"]))) AND ((\"provider_outcome\" IS NULL) OR ((\"provider_outcome\")::\"text\" = ANY (ARRAY[('REFUNDED'::character varying)::\"text\", ('DECLINED'::character varying)::\"text\", ('NOT_REACHED'::character varying)::\"text\"]))) AND ((\"resolution\" IS NULL) OR ((\"resolution\")::\"text\" = ANY (ARRAY[('REFUNDED'::character varying)::\"text\", ('REFUND_DECLINED'::character varying)::\"text\", ('REFUND_NOT_REACHED'::character varying)::\"text\", ('UNCREDITED_REFUNDED'::character varying)::\"text\", ('UNCREDITED_DECLINED'::character varying)::\"text\", ('UNCREDITED_NOT_REACHED'::character varying)::\"text\", ('NOTHING_TO_RECONCILE'::character varying)::\"text\"]))) AND ((\"actor\" IS NULL) OR ((\"actor\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"resolved_by\" IS NULL) OR ((\"resolved_by\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"proposed_by\" IS NULL) OR ((\"proposed_by\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"approved_by\" IS NULL) OR ((\"approved_by\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"resolution_id\" IS NULL) OR ((\"resolution_id\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"requeue_id\" IS NULL) OR ((\"requeue_id\")::\"text\" ~ '^[!-~]+$'::\"text\")) AND ((\"evidence_reference\" IS NULL) OR ((\"evidence_reference\")::\"text\" ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$'::\"text\")))),"
+  },
+  {
+    "database": "rasta_economic",
+    "schema": "public",
+    "table": "payment_reconciliation_requeue",
+    "source": "    CONSTRAINT \"ck_payment_requeue_text\" CHECK ((((\"char_length\"(\"btrim\"(\"reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"reason\")) <= 500)) AND (\"btrim\"(\"requested_by\") <> ''::\"text\") AND (\"btrim\"(\"requested_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"requested_by_subject\") <> ''::\"text\") AND (\"btrim\"(\"correlation_id\") <> ''::\"text\")))",
+    "reference": "    CONSTRAINT \"ck_payment_requeue_text\" CHECK (((\"char_length\"(\"btrim\"(\"reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"reason\")) <= 500) AND (\"btrim\"(\"requested_by\") <> ''::\"text\") AND (\"btrim\"(\"requested_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"requested_by_subject\") <> ''::\"text\") AND (\"btrim\"(\"correlation_id\") <> ''::\"text\")))"
+  },
+  {
+    "database": "rasta_economic",
+    "schema": "public",
+    "table": "payment_reconciliation_resolution",
+    "source": "    CONSTRAINT \"ck_payment_resolution_text\" CHECK ((((\"char_length\"(\"btrim\"(\"reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"reason\")) <= 500)) AND (\"btrim\"(\"proposed_by\") <> ''::\"text\") AND (\"btrim\"(\"correlation_id\") <> ''::\"text\") AND (\"btrim\"(\"proposed_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"proposed_by_subject\") <> ''::\"text\") AND ((\"decided_by\" IS NULL) OR (\"btrim\"(\"decided_by\") <> ''::\"text\")) AND ((\"decided_by_issuer\" IS NULL) OR (\"btrim\"(\"decided_by_issuer\") <> ''::\"text\")) AND ((\"decided_by_subject\" IS NULL) OR (\"btrim\"(\"decided_by_subject\") <> ''::\"text\")) AND ((\"decision_reason\" IS NULL) OR ((\"char_length\"(\"btrim\"(\"decision_reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"decision_reason\")) <= 500)))))",
+    "reference": "    CONSTRAINT \"ck_payment_resolution_text\" CHECK (((\"char_length\"(\"btrim\"(\"reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"reason\")) <= 500) AND (\"btrim\"(\"proposed_by\") <> ''::\"text\") AND (\"btrim\"(\"correlation_id\") <> ''::\"text\") AND (\"btrim\"(\"proposed_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"proposed_by_subject\") <> ''::\"text\") AND ((\"decided_by\" IS NULL) OR (\"btrim\"(\"decided_by\") <> ''::\"text\")) AND ((\"decided_by_issuer\" IS NULL) OR (\"btrim\"(\"decided_by_issuer\") <> ''::\"text\")) AND ((\"decided_by_subject\" IS NULL) OR (\"btrim\"(\"decided_by_subject\") <> ''::\"text\")) AND ((\"decision_reason\" IS NULL) OR ((\"char_length\"(\"btrim\"(\"decision_reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"decision_reason\")) <= 500)))))"
+  },
+  {
+    "database": "rasta_economic",
+    "schema": "public",
+    "table": "settlement_reversal",
+    "source": "    CONSTRAINT \"ck_settlement_reversal_text\" CHECK ((((\"char_length\"(\"btrim\"(\"reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"reason\")) <= 500)) AND (\"evidence_reference\" ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$'::\"text\") AND ((\"char_length\"(\"btrim\"(\"rejection_reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"rejection_reason\")) <= 500)) AND (\"btrim\"(\"proposed_by\") <> ''::\"text\") AND (\"btrim\"(\"proposed_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"proposed_by_subject\") <> ''::\"text\") AND (\"btrim\"(\"approved_by\") <> ''::\"text\") AND (\"btrim\"(\"approved_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"approved_by_subject\") <> ''::\"text\") AND (\"btrim\"(\"rejected_by\") <> ''::\"text\") AND (\"btrim\"(\"rejected_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"rejected_by_subject\") <> ''::\"text\")))",
+    "reference": "    CONSTRAINT \"ck_settlement_reversal_text\" CHECK (((\"char_length\"(\"btrim\"(\"reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"reason\")) <= 500) AND (\"evidence_reference\" ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$'::\"text\") AND ((\"char_length\"(\"btrim\"(\"rejection_reason\")) >= 3) AND (\"char_length\"(\"btrim\"(\"rejection_reason\")) <= 500)) AND (\"btrim\"(\"proposed_by\") <> ''::\"text\") AND (\"btrim\"(\"proposed_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"proposed_by_subject\") <> ''::\"text\") AND (\"btrim\"(\"approved_by\") <> ''::\"text\") AND (\"btrim\"(\"approved_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"approved_by_subject\") <> ''::\"text\") AND (\"btrim\"(\"rejected_by\") <> ''::\"text\") AND (\"btrim\"(\"rejected_by_issuer\") <> ''::\"text\") AND (\"btrim\"(\"rejected_by_subject\") <> ''::\"text\")))"
+  },
+  {
+    "database": "rasta_identity",
+    "schema": "public",
+    "table": "registration_intake",
+    "source": "    CONSTRAINT \"ck_registration_intake_actor\" CHECK (\nCASE\n    WHEN ((\"actor_type\")::\"text\" = 'ANONYMOUS'::\"text\") THEN (\"actor_id\" IS NULL)\n    WHEN ((\"actor_type\")::\"text\" = ANY ((ARRAY['USER'::character varying, 'SERVICE'::character varying])::\"text\"[])) THEN ((\"actor_id\" IS NOT NULL) AND ((\"actor_id\")::\"text\" ~ '^[!-~]+$'::\"text\"))\n    ELSE false\nEND),",
+    "reference": "    CONSTRAINT \"ck_registration_intake_actor\" CHECK (\nCASE\n    WHEN ((\"actor_type\")::\"text\" = 'ANONYMOUS'::\"text\") THEN (\"actor_id\" IS NULL)\n    WHEN ((\"actor_type\")::\"text\" = ANY (ARRAY[('USER'::character varying)::\"text\", ('SERVICE'::character varying)::\"text\"])) THEN ((\"actor_id\" IS NOT NULL) AND ((\"actor_id\")::\"text\" ~ '^[!-~]+$'::\"text\"))\n    ELSE false\nEND),"
+  },
+  {
+    "database": "rasta_identity",
+    "schema": "public",
+    "table": "security_event_outbox",
+    "source": "    CONSTRAINT \"ck_security_event_outbox_actor_type\" CHECK (((\"actor_type\")::\"text\" = ANY ((ARRAY['USER'::character varying, 'SERVICE'::character varying, 'SYSTEM'::character varying])::\"text\"[]))),",
+    "reference": "    CONSTRAINT \"ck_security_event_outbox_actor_type\" CHECK (((\"actor_type\")::\"text\" = ANY (ARRAY[('USER'::character varying)::\"text\", ('SERVICE'::character varying)::\"text\", ('SYSTEM'::character varying)::\"text\"]))),"
+  },
+  {
+    "database": "rasta_notification",
+    "schema": "public",
+    "table": "notification_quiet_hours",
+    "source": "    CONSTRAINT \"ck_quiet_hours_minutes_in_day\" CHECK ((((\"start_minute\" >= 0) AND (\"start_minute\" <= 1439)) AND ((\"end_minute\" >= 0) AND (\"end_minute\" <= 1439)))),",
+    "reference": "    CONSTRAINT \"ck_quiet_hours_minutes_in_day\" CHECK (((\"start_minute\" >= 0) AND (\"start_minute\" <= 1439) AND ((\"end_minute\" >= 0) AND (\"end_minute\" <= 1439)))),"
+  },
+  {
+    "database": "rasta_procurement",
+    "schema": "public",
+    "table": "demand_aggregation",
+    "source": "    CONSTRAINT \"ck_demand_aggregation_counts\" CHECK ((((\"total_quantity\" >= 0) AND (\"total_quantity\" <= 2147483647)) AND (\"demand_count\" >= 0) AND (\"extension_count\" >= 0) AND ((\"demand_count\" = 0) = (\"total_quantity\" = 0)))),",
+    "reference": "    CONSTRAINT \"ck_demand_aggregation_counts\" CHECK (((\"total_quantity\" >= 0) AND (\"total_quantity\" <= 2147483647) AND (\"demand_count\" >= 0) AND (\"extension_count\" >= 0) AND ((\"demand_count\" = 0) = (\"total_quantity\" = 0)))),"
+  },
+  {
+    "database": "rasta_procurement",
+    "schema": "public",
+    "table": "demand_aggregation",
+    "source": "    CONSTRAINT \"ck_demand_aggregation_follow\" CHECK ((((\"demands_to_follow\" >= 0) AND (\"demands_to_follow\" <= \"demand_count\")) AND ((\"demands_to_follow\" = 0) OR (\"status\" = ANY (ARRAY['REFERRED'::\"text\", 'LAPSED'::\"text\"]))))),",
+    "reference": "    CONSTRAINT \"ck_demand_aggregation_follow\" CHECK (((\"demands_to_follow\" >= 0) AND (\"demands_to_follow\" <= \"demand_count\") AND ((\"demands_to_follow\" = 0) OR (\"status\" = ANY (ARRAY['REFERRED'::\"text\", 'LAPSED'::\"text\"]))))),"
+  },
+  {
+    "database": "rasta_procurement",
+    "schema": "public",
+    "table": "demand_aggregation",
+    "source": "    CONSTRAINT \"ck_demand_aggregation_snapshot\" CHECK ((((\"min_quantity\" >= 0) AND (\"min_quantity\" <= 2147483647)) AND (\"shortfall_policy\" = ANY (ARRAY['EXTEND'::\"text\", 'REFER'::\"text\", 'CLOSE'::\"text\"])) AND ((\"setting_version\" IS NULL) OR (\"setting_version\" >= 1)))),",
+    "reference": "    CONSTRAINT \"ck_demand_aggregation_snapshot\" CHECK (((\"min_quantity\" >= 0) AND (\"min_quantity\" <= 2147483647) AND (\"shortfall_policy\" = ANY (ARRAY['EXTEND'::\"text\", 'REFER'::\"text\", 'CLOSE'::\"text\"])) AND ((\"setting_version\" IS NULL) OR (\"setting_version\" >= 1)))),"
+  },
+  {
+    "database": "rasta_procurement",
+    "schema": "public",
+    "table": "quotation_receipt",
+    "source": "    CONSTRAINT \"ck_quotation_receipt_shape\" CHECK ((((\"seq\" >= 1) AND (\"seq\" <= 10000)) AND ((\"revision\" >= 1) AND (\"revision\" <= 20)) AND (\"receipt\" ~ '^[0-9a-f]{64}$'::\"text\") AND (\"previous_receipt\" ~ '^[0-9a-f]{64}$'::\"text\") AND (\"receipt\" <> \"previous_receipt\") AND (\"content_commitment\" ~ '^[0-9a-f]{64}$'::\"text\") AND (\"ciphertext_sha256\" ~ '^[0-9a-f]{64}$'::\"text\")))",
+    "reference": "    CONSTRAINT \"ck_quotation_receipt_shape\" CHECK (((\"seq\" >= 1) AND (\"seq\" <= 10000) AND ((\"revision\" >= 1) AND (\"revision\" <= 20)) AND (\"receipt\" ~ '^[0-9a-f]{64}$'::\"text\") AND (\"previous_receipt\" ~ '^[0-9a-f]{64}$'::\"text\") AND (\"receipt\" <> \"previous_receipt\") AND (\"content_commitment\" ~ '^[0-9a-f]{64}$'::\"text\") AND (\"ciphertext_sha256\" ~ '^[0-9a-f]{64}$'::\"text\")))"
+  },
+  {
+    "database": "rasta_procurement",
+    "schema": "public",
+    "table": "rfq",
+    "source": "    CONSTRAINT \"ck_rfq_contents\" CHECK ((((\"criteria_count\" >= 1) AND (\"criteria_count\" <= 50)) AND ((\"invitation_count\" >= 1) AND (\"invitation_count\" <= 500)) AND (\"criteria_digest\" ~ '^[0-9a-f]{64}$'::\"text\"))),",
+    "reference": "    CONSTRAINT \"ck_rfq_contents\" CHECK (((\"criteria_count\" >= 1) AND (\"criteria_count\" <= 50) AND ((\"invitation_count\" >= 1) AND (\"invitation_count\" <= 500)) AND (\"criteria_digest\" ~ '^[0-9a-f]{64}$'::\"text\"))),"
+  },
+  {
+    "database": "rasta_procurement",
+    "schema": "public",
+    "table": "rfq_criterion",
+    "source": "    CONSTRAINT \"ck_rfq_criterion_values\" CHECK ((((\"position\" >= 1) AND (\"position\" <= 50)) AND (\"code\" ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$'::\"text\") AND ((\"char_length\"(\"btrim\"(\"label\")) >= 1) AND (\"char_length\"(\"btrim\"(\"label\")) <= 200)) AND ((\"weight_bp\" >= 1) AND (\"weight_bp\" <= 10000)) AND (\"scoring_method\" = ANY (ARRAY['MANUAL_SCORE'::\"text\", 'PASS_FAIL'::\"text\"])) AND ((\"max_score\" >= 1) AND (\"max_score\" <= 1000000)) AND ((\"scoring_method\" <> 'PASS_FAIL'::\"text\") OR (\"max_score\" = 1))))",
+    "reference": "    CONSTRAINT \"ck_rfq_criterion_values\" CHECK (((\"position\" >= 1) AND (\"position\" <= 50) AND (\"code\" ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$'::\"text\") AND ((\"char_length\"(\"btrim\"(\"label\")) >= 1) AND (\"char_length\"(\"btrim\"(\"label\")) <= 200)) AND ((\"weight_bp\" >= 1) AND (\"weight_bp\" <= 10000)) AND (\"scoring_method\" = ANY (ARRAY['MANUAL_SCORE'::\"text\", 'PASS_FAIL'::\"text\"])) AND ((\"max_score\" >= 1) AND (\"max_score\" <= 1000000)) AND ((\"scoring_method\" <> 'PASS_FAIL'::\"text\") OR (\"max_score\" = 1))))"
+  },
+  {
+    "database": "rasta_supplier",
+    "schema": "public",
+    "table": "performance_score_component",
+    "source": "    CONSTRAINT \"ck_score_component_ranges\" CHECK ((((\"configured_weight_bp\" >= 1) AND (\"configured_weight_bp\" <= 10000)) AND ((\"effective_weight_bp\" IS NULL) OR ((\"effective_weight_bp\" >= 1) AND (\"effective_weight_bp\" <= 10000))) AND ((\"component_score_centis\" IS NULL) OR ((\"component_score_centis\" >= 0) AND (\"component_score_centis\" <= 10000))) AND (\"sample_count\" >= 0)))",
+    "reference": "    CONSTRAINT \"ck_score_component_ranges\" CHECK (((\"configured_weight_bp\" >= 1) AND (\"configured_weight_bp\" <= 10000) AND ((\"effective_weight_bp\" IS NULL) OR ((\"effective_weight_bp\" >= 1) AND (\"effective_weight_bp\" <= 10000))) AND ((\"component_score_centis\" IS NULL) OR ((\"component_score_centis\" >= 0) AND (\"component_score_centis\" <= 10000))) AND (\"sample_count\" >= 0)))"
+  }
+]
