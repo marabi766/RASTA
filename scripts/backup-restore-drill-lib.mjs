@@ -447,16 +447,25 @@ export function checkSourceReference(source, reference, database) {
   const reported = new Set();
   // Objects (dump identities, no SQL) with a line that differs by the fold alone.
   const foldedBooleanLists = [];
-  let folded, identityAt;
+  // Both COMPLETE dumps are folded, and EVERY line outside a CHECK constraint must be equal after
+  // it — also a line whose original bytes already matched. A fold takes two parentheses, often
+  // on two lines: where SOURCE and REF group a multi-line expression differently, one side can
+  // lose a parenthesis on a line that was byte-equal while the lines that differed come out
+  // equal, and that is a different boolean (#1078 r1 F1). The fold drops parentheses, never a
+  // newline, so line i of a folded dump is line i of the dump.
+  const folded = [a, b].map(({ text }) => foldLeadingBooleanLists(text).split('\n'));
+  if (folded.some((lines) => lines.length !== a.lines.length))
+    throw new Error('SOURCE/REF non-CHECK difference');
+  let identityAt;
   for (let i = 0; i < a.lines.length; i++) {
-    if (a.lines[i] === b.lines[i]) continue;
     if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i)) {
-      folded ??= [a, b].map(({ text }) => foldLeadingBooleanLists(text).split('\n'));
       if (folded[0][i] !== folded[1][i]) throw new Error('SOURCE/REF non-CHECK difference');
+      if (a.lines[i] === b.lines[i]) continue;
       const identity = (identityAt ??= dumpIdentities(a.text))(a.starts[i]);
       if (!foldedBooleanLists.includes(identity)) foldedBooleanLists.push(identity);
       continue;
     }
+    if (a.lines[i] === b.lines[i]) continue;
     checkLinesDifferent++;
     // Once per constraint, however many of its lines differ and wherever they sit in its span.
     if (reported.has(a.checks.get(i))) continue;

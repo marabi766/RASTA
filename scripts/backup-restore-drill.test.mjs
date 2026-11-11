@@ -727,6 +727,83 @@ test('every regrouping other than the leading same-connective list keeps its byt
   );
 });
 
+// #1078 r1 F1. Two groupings of one multi-line expression: for a..e = F,F,F,T,T the first is
+// false and the second true. Their bytes differ on the second and fourth line only, and the fold
+// of the first makes exactly those two lines equal to the second — while it takes a parenthesis
+// from the first and third line, whose bytes matched.
+const regrouped = [
+  '(((a)\nAND (((b)\nOR (c))\nOR (d)))\nAND (e))',
+  '(((a)\nAND ((b)\nOR (c))\nOR (d))\nAND (e))',
+];
+// The same pair with every operand a CASE, which PostgreSQL prints over several lines.
+const overCase = (text) =>
+  text
+    .replaceAll('\n', ' ')
+    .replace(/\(([a-e])\)/g, '(CASE\n WHEN true THEN $1\n ELSE false\nEND)');
+const connectivesSwapped = (text) => text.replace(/AND|OR/g, (w) => (w === 'AND' ? 'OR' : 'AND'));
+// Every place a dump stores an expression tree.
+const storedExpressions = [
+  (x) => `CREATE FUNCTION "public"."f"() RETURNS boolean\n    LANGUAGE "sql"\n    RETURN ${x};\n`,
+  (x) =>
+    `CREATE FUNCTION "public"."f"() RETURNS boolean\n    LANGUAGE "sql"\n    BEGIN ATOMIC\n SELECT ${x} AS "ok";\nEND;\n`,
+  (x) => `CREATE VIEW "public"."v" AS\n SELECT ${x} AS "ok";\n`,
+  (x) => `CREATE MATERIALIZED VIEW "public"."m" AS\n SELECT ${x} AS "ok"\n  WITH NO DATA;\n`,
+  (x) =>
+    `CREATE TRIGGER "t" BEFORE UPDATE ON "public"."sample" FOR EACH ROW WHEN (${x}) EXECUTE FUNCTION "public"."f"();\n`,
+  (x) => `CREATE INDEX "i" ON "public"."sample" USING "btree" ("amount") WHERE ${x};\n`,
+  (x) => `CREATE POLICY "p" ON "public"."sample" USING (${x});\n`,
+  (x) => `ALTER TABLE ONLY "public"."sample" ALTER COLUMN "ok" SET DEFAULT ${x};\n`,
+  (x) => `CREATE TABLE "public"."g" (\n    "ok" boolean GENERATED ALWAYS AS (${x}) STORED\n);\n`,
+];
+test('every non-CHECK line is compared after the fold, also a line whose bytes matched', () => {
+  const pairs = [regrouped, regrouped.map(overCase)].flatMap((pair) => [
+    pair,
+    pair.map(connectivesSwapped),
+  ]);
+  let refused = 0;
+  for (const stored of storedExpressions) {
+    for (const pair of pairs) {
+      const [source, reference] = pair.map((x) => checkBody + stored(x));
+      // The shape itself, so this test cannot pass on a pair that never reached the gap: every
+      // line whose bytes differ is equal after the fold, and a line whose bytes match is not.
+      const [raw, folded] = [(x) => x, foldLeadingBooleanLists].map((f) =>
+        [source, reference].map((x) => f(x).split('\n')),
+      );
+      const lines = raw[0].map((line, i) => ({
+        bytes: line === raw[1][i],
+        folded: folded[0][i] === folded[1][i],
+      }));
+      assert.equal(raw[0].length, raw[1].length);
+      assert.ok(lines.some((line) => !line.bytes));
+      assert.ok(lines.every((line) => line.bytes || line.folded));
+      assert.ok(lines.some((line) => line.bytes && !line.folded));
+      for (const [from, to] of [
+        [source, reference],
+        [reference, source],
+      ]) {
+        assert.throws(
+          () => checkSourceReference(evidence(from), evidence(to), 'rasta_test'),
+          /^Error: SOURCE\/REF non-CHECK difference$/,
+          from,
+        );
+        refused++;
+      }
+    }
+    // The fold alone still passes across lines, in either direction.
+    const [nestedLines, flatLines] = ['(((a)\nAND (b))\nAND (c))', '((a)\nAND (b)\nAND (c))'].map(
+      (x) => evidence(checkBody + stored(x)),
+    );
+    for (const [from, to] of [
+      [nestedLines, flatLines],
+      [flatLines, nestedLines],
+    ])
+      assert.deepEqual(checkSourceReference(from, to, 'rasta_test').foldedBooleanLists, [
+        'database schema',
+      ]);
+  }
+  assert.equal(refused, 72);
+});
+
 test('missing REF, fixed point or allowance and unstable REF cannot pass operator acceptance', () => {
   const source = snapshot();
   const ref = source.schemaDump;
