@@ -15,6 +15,7 @@ import {
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
 import { Prisma, PrismaClient } from '../generated/prisma';
+import { withCommitReporting } from './commit-reporting';
 import { walletBelowZeroRefusal } from '../wallet/balances';
 
 /**
@@ -111,7 +112,7 @@ export class PrismaService implements OnModuleInit {
   }
 
   private buildClient() {
-    return this.base.$extends(
+    const client = this.base.$extends(
       createTenantGuardExtension({
         scalarFkFamily: 'economic',
         scopedModels: TENANT_SCOPED_MODELS,
@@ -123,6 +124,7 @@ export class PrismaService implements OnModuleInit {
         },
       }),
     );
+    return withCommitReporting(client);
   }
 
   async onModuleInit(): Promise<void> {

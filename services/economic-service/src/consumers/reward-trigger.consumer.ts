@@ -1,6 +1,11 @@
 import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
+  WorkerBoundary,
+  WorkerAbandonedError,
+  assertWorkerActive,
+  workerOperation,
+  WorkerDrain,
   createSystemContext,
   invalidPayloadError,
   runWithContext,
@@ -151,6 +156,15 @@ import type { SourceFacts } from '../provenance/source-facts.client';
 export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(RewardTriggerConsumer.name);
   private readonly consumer: EventConsumer;
+  private readonly worker = new WorkerBoundary(() =>
+    this.logger.warn('Reward worker ABANDONED; submitted write outcome UNCONFIRMED'),
+  );
+  private stopped = false;
+  private readonly drain = new WorkerDrain(
+    this.worker,
+    { stop: (options) => this.consumer.stop(options) },
+    () => this.logger.warn('Reward worker ABANDONED; submitted write outcome UNCONFIRMED'),
+  );
 
   static readonly CONSUMER_NAME = 'economic-service.reward-trigger';
 
@@ -167,18 +181,10 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     await this.consumer.start();
   }
 
-  /**
-   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
-   * relay, the purge and the payment sweep, by the shutdown's one deadline; a
-   * fact still in flight (the owner's answer, or a grant) is abandoned
-   * uncommitted and delivered again, and resumes its evaluation claim as any
-   * redelivery does. Before, this class's own `onApplicationShutdown` stopped it
-   * with no bound, after the relay had drained, so the waits added up past
-   * SHUTDOWN_TIMEOUT_MS (Codex r1 on #277). One stop per process; a later call
-   * joins it.
-   */
-  stop(options?: OutboxStopOptions): Promise<void> {
-    return this.consumer.stop(options);
+  /** Drains broker and direct deliveries under the coordinator's one deadline. */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopped = true;
+    return this.drain.stop(options);
   }
 
   /** Joins the stop `OutboxShutdown` began; returns at once. */
@@ -186,7 +192,15 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     return this.stop();
   }
 
-  async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
+  handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
+    return this.worker.run(() => {
+      this.worker.assertActive();
+      if (this.stopped) throw new WorkerAbandonedError();
+      return workerOperation(() => this.process(envelope));
+    });
+  }
+
+  private async process(envelope: EventEnvelope): Promise<HandlerOutcome> {
     const claim = this.extract(envelope);
     if (!claim) return 'SKIPPED';
 
@@ -266,6 +280,7 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         onlyRuleIds: evaluation.ruleIds,
       });
 
+      assertWorkerActive();
       const granted = outcomes.filter((outcome) => outcome.kind === 'GRANTED').length;
       if (granted > 0) {
         this.logger.log(
@@ -290,8 +305,12 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     input: Parameters<RewardService['grantFor']>[0],
   ): Promise<GrantOutcome[]> {
     try {
-      return await runWithContext(context, () => this.rewards.grantFor(input));
+      return await workerOperation(() =>
+        runWithContext(context, () => this.rewards.grantFor(input)),
+      );
     } catch (error) {
+      assertWorkerActive();
+      if (error instanceof WorkerAbandonedError) throw error;
       const permanent =
         error instanceof RewardGrantError ? error.permanent : isPermanentGrantFailure(error);
       rewardGrantFailuresTotal.inc({
@@ -322,7 +341,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
    */
   private async confirmedFact(eventName: string, claim: Claim): Promise<ConfirmedFact> {
     if (eventName === CONSUMED_EVENTS.USAGE_RECORDED) {
-      const fact = await this.sources.usageRecord(claim.organizationId, claim.sourceReference);
+      const fact = await workerOperation(() =>
+        this.sources.usageRecord(claim.organizationId, claim.sourceReference),
+      );
       const record = this.judge(eventName, claim, fact, confirmUsage(claim, fact));
       return {
         organizationId: record.organizationId,
@@ -347,7 +368,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
       };
     }
 
-    const fact = await this.sources.maintenanceRequest(claim.organizationId, claim.sourceReference);
+    const fact = await workerOperation(() =>
+      this.sources.maintenanceRequest(claim.organizationId, claim.sourceReference),
+    );
     const request = this.judge(eventName, claim, fact, confirmCompletion(claim, fact));
     return {
       organizationId: request.organizationId,
