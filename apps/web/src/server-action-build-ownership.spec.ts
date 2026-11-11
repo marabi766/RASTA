@@ -33,6 +33,7 @@ import {
   url,
   waitGone,
   waitForPidFile,
+  waitHeld,
   type Plan,
 } from './test/build-scripts';
 
@@ -441,6 +442,18 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     return dir;
   };
   const record = (dir: string) => waitForPidFile(join(dir, 'child.json'), true, 0);
+  /**
+   * For the cases whose writer must outlive the wrapper's return: its reports come this long
+   * after `ran-<pid>`, so a case acting on anything earlier than the announced hold loses its
+   * writer every time (its natural end is asserted), not only on a loaded runner (FU-328).
+   */
+  const SLOW_REPORTS_MS = 250;
+  /** The output of the fake `next` that got to its own end in `dir`; none if something ended it. */
+  const finished = (dir: string): string | undefined =>
+    existsSync(join(dir, '.next/BUILD_ID'))
+      ? readFileSync(join(dir, '.next/BUILD_ID'), 'utf8')
+      : undefined;
+  /** Who got past the handshake: an observation, never readiness (that is `waitHeld`, FU-328). */
   const ran = (dir: string): number[] =>
     readdirSync(dir)
       .filter((f) => f.startsWith('ran-'))
@@ -521,7 +534,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       nextFrom,
       recordChild: join(dir, 'child.json'),
     });
-    await waitFor(() => ran(dir).length === 1);
+    await waitHeld(dir);
     driver.expireWatchdog();
     await expect(driver.done).rejects.toThrow('fixture watchdog expired');
     await cleanupFixtures();
@@ -560,7 +573,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     // A root held until released (FU-199: not on a timer) holds the wrapper's inherited
     // stdout/stderr pipes after its supervisor dies, so the wrapper's 'close' cannot arrive
     // until it exits.
-    const dir = app({ holdUntilRelease: true });
+    const dir = app({ holdUntilRelease: true, slowReportsMs: SLOW_REPORTS_MS });
     const driver = startDriver(dir, {
       nextFrom,
       inherit: true,
@@ -568,8 +581,11 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       stopGraceMs: 100,
       stopWaitMs: 500,
     });
-    await waitFor(() => ran(dir).length === 1);
-    const { group } = await record(dir);
+    // Held, not merely started (FU-328): the wrapper is about to return under a writer that must
+    // live on, and a report still to come would end it and close the pipes this case holds open.
+    const held = await waitHeld(dir);
+    const { pid, group } = await record(dir);
+    expect(held).toBe(pid);
     expect(driver.killSupervisor()).toBe(true);
     expect(await driver.ended).toBe('LOST'); // Unexpected loss is not a completed fixture.
     const started = performance.now();
@@ -588,6 +604,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     // natural exit.
     await releaseHold(dir);
     await waitFor(() => !alive({ group }));
+    expect(finished(dir)).toBe(`fake-${pid}`); // no signal ended it
     await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
   });
 
@@ -906,7 +923,7 @@ setInterval(() => {}, 1000);`,
     async (signal, status) => {
       const dir = app({ holdMs: 60_000, linger: { ms: 60_000 } });
       const driver = startDriver(dir, { nextFrom, recordChild: join(dir, 'child.json') });
-      await waitFor(() => ran(dir).length === 1);
+      await waitHeld(dir);
       const writer = await waitForPidFile(join(dir, 'linger.pid'));
       const { pid } = await record(dir);
       driver.signal(signal);
@@ -1054,7 +1071,7 @@ setInterval(() => {}, 1000);`,
   it('R4-2: unexpected supervisor death retires signalling and keeps the lock while writers live', async () => {
     // Held until released below, never on a timer (FU-199): `driver.done` can take longer than any
     // fixed hold on a loaded runner, and the writer must still be alive when it is checked.
-    const dir = app({ holdUntilRelease: true });
+    const dir = app({ holdUntilRelease: true, slowReportsMs: SLOW_REPORTS_MS });
     const driver = startDriver(dir, {
       nextFrom,
       recordChild: join(dir, 'child.json'),
@@ -1062,8 +1079,13 @@ setInterval(() => {}, 1000);`,
       stopGraceMs: 100,
       stopWaitMs: 1_000,
     });
-    await waitFor(() => ran(dir).length === 1);
+    // Readiness is the writer's own announcement that it is HELD (FU-328), not `ran-<pid>`: that
+    // one precedes the configuration loads, and the wrapper below returns and removes its capture
+    // directory. A load reported after that ends the writer's group (capture-next-config.cjs,
+    // point 3), which is how a loaded runner found this writer dead at the `alive(pid)` below.
+    const held = await waitHeld(dir);
     const { pid, group } = await record(dir);
+    expect(held).toBe(pid);
     expect(driver.killSupervisor()).toBe(true);
     expect(await driver.done).toMatchObject({
       status: 1,
@@ -1080,6 +1102,34 @@ setInterval(() => {}, 1000);`,
     // and observe its natural exit instead of using its saved PID.
     await releaseHold(dir);
     await waitFor(() => !alive({ group }));
+    // Natural means it got to its own end: its output is there, so nothing killed it on the way.
+    expect(finished(dir)).toBe(`fake-${pid}`);
+    expect(inProgress(dir)).toBe(false);
+    await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
+  });
+
+  it('FU-328: a writer that reports after the wrapper returned without it ends itself and its group; the kept lock is then free', async () => {
+    // What the case above must not race: the same build, but its writer loads the configuration
+    // once more AFTER its hold, when the refusing wrapper has removed the capture directory.
+    const dir = app({ holdUntilRelease: true, loadsAfterHold: 1 });
+    const driver = startDriver(dir, {
+      nextFrom,
+      recordChild: join(dir, 'child.json'),
+      stopGraceMs: 100,
+      stopWaitMs: 1_000,
+    });
+    const held = await waitHeld(dir);
+    const { pid, group, capturePath } = await record(dir);
+    expect(held).toBe(pid);
+    expect(driver.killSupervisor()).toBe(true);
+    expect((await driver.done).status).toBe(1);
+    expect(existsSync(capturePath)).toBe(false);
+    expect(alive(pid)).toBe(true); // held: it has nothing to report yet
+    expect(inProgress(dir)).toBe(true);
+    await releaseHold(dir);
+    await waitFor(() => !alive({ group }));
+    // The report could not be written: it never reached its output (fatal, not a natural end).
+    expect(finished(dir)).toBeUndefined();
     expect(inProgress(dir)).toBe(false);
     await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
   });
@@ -1251,7 +1301,7 @@ setInterval(() => {}, 1000);`,
   it('(C) the wrapper killed with SIGKILL after publication: the lock stays held while the build lives, and recovery waits for it (fail closed)', async () => {
     const dir = app({ holdMs: 60_000 });
     const driver = startDriver(dir, { nextFrom, recordChild: join(dir, 'child.json') });
-    await waitFor(() => ran(dir).length === 1);
+    await waitHeld(dir);
     driver.signal('SIGKILL');
     await driver.done;
     const { pid, group } = await record(dir);
