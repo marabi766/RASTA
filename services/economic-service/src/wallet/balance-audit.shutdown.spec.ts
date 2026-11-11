@@ -98,3 +98,51 @@ describe('LedgerBalanceAudit shutdown (Codex on #277, finding 3)', () => {
     expect(wallets.pageForAudit).not.toHaveBeenCalled();
   });
 });
+
+describe('audit abandonment boundary (FU-323 C)', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it.each(['final page', 'full page', 'rejection'])(
+    'drops a late %s after a repeated stop tightens the deadline',
+    async (outcome) => {
+      jest.useFakeTimers();
+      const { walletsOpenTotal, walletLedgerDeviationsTotal } =
+        await import('../observability/metrics');
+      const gauges = [
+        jest.spyOn(walletsOpenTotal, 'set'),
+        jest.spyOn(walletLedgerDeviationsTotal, 'set'),
+      ];
+      let resolve!: (rows: unknown[]) => void;
+      let reject!: (error: Error) => void;
+      const { audit, wallets } = setup([
+        new Promise<unknown[]>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        }),
+      ]);
+      const errors = jest.spyOn(audit['logger'], 'error');
+      const running = audit.run();
+      await jest.advanceTimersByTimeAsync(0);
+      let stopped = false;
+      const first = audit.stop();
+      void first.then(() => {
+        stopped = true;
+      });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(false);
+      expect(audit.stop({ deadlineAt: Date.now() - 1 })).toBe(first);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(true);
+      if (outcome === 'rejection') reject(new Error('late private database detail'));
+      else resolve(outcome === 'full page' ? [wallet('a'), wallet('b')] : [wallet('a')]);
+      await running;
+      expect(gauges.every((gauge) => gauge.mock.calls.length === 0)).toBe(true);
+      expect(errors).not.toHaveBeenCalled();
+      expect(wallets.findEscrowAccount).not.toHaveBeenCalled();
+      expect(wallets.pageForAudit).toHaveBeenCalledTimes(1);
+    },
+  );
+});
