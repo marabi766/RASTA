@@ -15,6 +15,7 @@
       "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
     },
     "env": {
+      "PRISMA_SKIP_POSTINSTALL_GENERATE": "true",
       "NODE_VERSION": "22",
       "PNPM_VERSION": "11.22.0",
       "MINIO_IMAGE": "cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1",
@@ -167,6 +168,7 @@
         "test:outbox-test-clock": "sha256:1841703eacda52a18274d4574f23eebf6c8c4873f44fdd3d0fc77226e665f590",
         "test:prepush-parity": "sha256:4ae65e0037857949d8fdf6a9129d310b4ff80b9357647adcc9fb6ffc67448a31",
         "test:prepush-scope": "sha256:0874e3d0563b011131c58b94e28ab68b7bb62f1ef1af9bd6bbadacafce384f69",
+        "test:prisma-generate": "sha256:878b38b6ec460b1cff6b9563d095f0be9cf65cd9c918f06478a01fd8032f0b05",
         "test:progress": "sha256:e960de6cf6086175c29ace0e6232e5dfe6fc70740e1fa580c4c76bb4837f415d",
         "test:replay-dlq-broker": "sha256:dd31ec07ab9c17a860a06b66a44f9ba27da556647342f8701afeba9fb023f613",
         "test:replay-dlq-lib": "sha256:f020df17259e58b684d9a9655e20d250b243beef7edb01bb50d27425d397ec20",
@@ -238,6 +240,14 @@
         "run": "pnpm run db:generate"
       },
       "reason": "Slice C: generate Prisma clients before package checks; B executes no package tasks."
+    },
+    {
+      "job": "quality-guards",
+      "ci": {
+        "name": "Prisma generation retries only transient network errors",
+        "run": "pnpm run test:prisma-generate"
+      },
+      "reason": "Slice C: deterministic generator retry and wiring regression; B executes only selection and parity suites."
     },
     {
       "job": "quality-guards",

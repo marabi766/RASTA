@@ -316,7 +316,13 @@ describe(`${MIGRATION} after a cross-tenant settlement`, () => {
       expect(deployed).toContain('No pending migrations to apply.');
 
       // Its client, which has never heard of the column.
-      mustRun(['generate', '--schema', previous.schema], { url });
+      const generated = spawnSync(
+        process.execPath,
+        [join(SERVICE_DIR, '../../scripts/prisma-generate.mjs'), '--schema', previous.schema],
+        { cwd: SERVICE_DIR, env: { ...process.env, DATABASE_URL: url }, encoding: 'utf8' },
+      );
+      if (generated.status !== 0)
+        throw new Error(`generation failed: ${generated.stderr.slice(0, 1200)}`);
       // Node's own require: the generated client is loaded as the release
       // loads it, not through jest's transform.
       const { PrismaClient: PreviousClient } = createRequire(__filename)(
