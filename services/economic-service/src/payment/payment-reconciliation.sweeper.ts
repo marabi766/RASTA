@@ -70,7 +70,6 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
   );
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
-  private readonly sweeps = new Set<Promise<SweepOutcome>>();
   private readonly drain = new WorkerDrain(
     this.worker,
     { stop: () => this.inFlight ?? Promise.resolve() },
@@ -79,7 +78,6 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
         'Payment reconciliation sweep ABANDONED; submitted write outcome UNCONFIRMED. ' +
           'A later instance must reconcile durable state before acting',
       ),
-    () => [...this.sweeps],
   );
   private stopped = false;
   /** Where the next heal windows start: bounded work per sweep (Codex on #164). */
@@ -150,14 +148,11 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
   runOnce(): Promise<SweepOutcome> {
-    const running = this.worker.run(async () => {
+    return this.worker.run(async () => {
       this.worker.assertActive();
       if (this.stopped) throw new WorkerAbandonedError();
       return this.sweep();
     });
-    this.sweeps.add(running);
-    void running.finally(() => this.sweeps.delete(running)).catch(() => undefined);
-    return running;
   }
 
   private async sweep(): Promise<SweepOutcome> {

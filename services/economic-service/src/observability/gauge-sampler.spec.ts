@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { OutboxShutdown } from '@rasta/nest-common';
+import { OutboxShutdown, WorkerAbandonedError } from '@rasta/nest-common';
 import { outboxPendingTotal } from '@rasta/observability';
 import { AppModule } from '../app.module';
 import { ENV } from '../tokens';
@@ -33,6 +33,78 @@ describe('economic gauge sampler shutdown (FU-323 C)', () => {
   afterEach(() => {
     jest.useRealTimers();
     jest.restoreAllMocks();
+  });
+
+  it.each(['lone rejection', 'sibling success', 'sibling abandonment'] as const)(
+    'wallet sampling retains direct failure through %s before database close',
+    async (mode) => {
+      const { repository, wallets } = setup();
+      let reject!: (error: Error) => void;
+      let release!: (count: number) => void;
+      repository.countActiveHolds.mockImplementationOnce(
+        () =>
+          new Promise<number>((_yes, no) => {
+            reject = no;
+          }),
+      );
+      repository.countActiveHolds.mockImplementationOnce(
+        () =>
+          new Promise<number>((yes) => {
+            release = yes;
+          }),
+      );
+      const failure = new Error('direct wallet sample failed');
+      const work = wallets.sampleGauges().catch((error: unknown) => error);
+      const other =
+        mode === 'lone rejection'
+          ? undefined
+          : wallets.sampleGauges().catch((error: unknown) => error);
+      const first = wallets.stopSampling({ deadlineAt: Date.now() + 100 });
+      const outcome = first.catch((error: unknown) => error);
+      const database = jest.fn(async () => undefined);
+      const shutdown = new OutboxShutdown({
+        relay: { stop: async () => undefined },
+        workers: [{ stop: (options) => wallets.stopSampling(options) }],
+        databases: [{ stop: database }],
+        budgetMs: 100,
+        logger: { error: jest.fn() },
+      });
+      const closed = shutdown.stop().catch((error: unknown) => error);
+      reject(failure);
+      expect(await work).toBe(failure);
+      if (other) {
+        await jest.advanceTimersByTimeAsync(0);
+        expect(database).not.toHaveBeenCalled();
+        if (mode === 'sibling success') release(9);
+        else await jest.advanceTimersByTimeAsync(100);
+      }
+      expect(await outcome).toBe(failure);
+      expect(await closed).toBe(failure);
+      expect(database).toHaveBeenCalledTimes(1);
+      if (other) {
+        release(9);
+        if (mode === 'sibling success') await expect(other).resolves.toBeUndefined();
+        else expect(await other).toBeInstanceOf(WorkerAbandonedError);
+      }
+    },
+  );
+
+  it('keeps sampler-owned errors caught when they reject during stop', async () => {
+    const { sampler, store, transactions, idempotency } = setup();
+    let reject!: (error: Error) => void;
+    store.pendingCount.mockImplementationOnce(
+      () =>
+        new Promise<number>((_yes, no) => {
+          reject = no;
+        }),
+    );
+    const running = sampler.sample();
+    const stopped = sampler.stop();
+    reject(new Error('sampling failed'));
+    await expect(running).resolves.toBeUndefined();
+    await expect(stopped).resolves.toBeUndefined();
+    expect(transactions.countByStatus).not.toHaveBeenCalled();
+    expect(idempotency.purgeExpired).not.toHaveBeenCalled();
   });
 
   it('preserves scheduled and direct sampling and upkeep; stop prevents timer restart', async () => {

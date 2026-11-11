@@ -20,9 +20,6 @@ export class WorkerDrain {
     private readonly worker: WorkerBoundary,
     private readonly broker: OutboxStoppable,
     private readonly warn: () => void,
-    // WorkerBoundary.current joins with allSettled. Callers can also expose raw
-    // direct outcomes so their failures are retained even if a sibling is abandoned.
-    private readonly directWork: () => readonly Promise<unknown>[] = () => [],
   ) {}
 
   stop(options: OutboxStopOptions = {}): Promise<void> {
@@ -43,9 +40,8 @@ export class WorkerDrain {
     const tighter = deadline < this.deadline;
     if (tighter) this.deadline = deadline;
     if (first) {
-      const current = this.worker.current;
-      if (current) this.observe(current);
-      for (const work of this.directWork()) this.observe(work);
+      // Observe each outcome by default: a failure must survive sibling abandonment.
+      for (const work of this.worker.pendingOutcomes) this.observe(work);
     }
     if (first || tighter) {
       // Call synchronously so tightening reaches EventConsumer immediately; catch sync throws too.

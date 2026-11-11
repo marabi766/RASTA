@@ -12,10 +12,12 @@ import { SettlementAuthorityConsumer } from './settlement-authority.consumer';
 
 const deferred = () => {
   let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 };
 const flush = async () => {
   for (let i = 0; i < 30; i++) await Promise.resolve();
@@ -81,8 +83,58 @@ describe.each([StatementSettlementConsumer, SettlementAuthorityConsumer, RewardT
           ...(reward ? { usageRecordId: 'USG-A', assetId: 'AST-A', hours: '8' } : {}),
         },
       } as EventEnvelope;
-      return { consumer, event, entered, held };
+      return { consumer, event, entered, held, findUnique };
     }
+
+    it.each(['lone rejection', 'sibling success', 'sibling abandonment'] as const)(
+      'retains direct failure through %s before database close',
+      async (mode) => {
+        const { consumer, event, held, findUnique: read } = setup(async () => undefined);
+        const sibling = deferred();
+        read.mockImplementationOnce(async () => {
+          await held.promise;
+          return {};
+        });
+        read.mockImplementationOnce(async () => {
+          await sibling.promise;
+          return {};
+        });
+        const failure = new Error('direct work failed');
+        const work = consumer.handle(event).catch((error: unknown) => error);
+        // The first read is entered synchronously, before stop snapshots pending work.
+        const other =
+          mode === 'lone rejection'
+            ? undefined
+            : consumer.handle(event).catch((error: unknown) => error);
+        const first = consumer.stop({ deadlineAt: Date.now() + 100 });
+        const outcome = first.catch((error: unknown) => error);
+        const database = jest.fn(async () => undefined);
+        const shutdown = new OutboxShutdown({
+          relay: { stop: async () => undefined },
+          workers: [consumer],
+          databases: [{ stop: database }],
+          budgetMs: 100,
+          logger: { error: jest.fn() },
+        });
+        const closed = shutdown.stop().catch((error: unknown) => error);
+        held.reject(failure);
+        expect(await work).toBe(failure);
+        if (other) {
+          await flush();
+          expect(database).not.toHaveBeenCalled();
+          if (mode === 'sibling success') sibling.resolve();
+          else await jest.advanceTimersByTimeAsync(100);
+        }
+        expect(await outcome).toBe(failure);
+        expect(await closed).toBe(failure);
+        expect(database).toHaveBeenCalledTimes(1);
+        if (other) {
+          sibling.resolve();
+          if (mode === 'sibling success') expect(await other).toBe('SKIPPED');
+          else expect(await other).toBeInstanceOf(WorkerAbandonedError);
+        }
+      },
+    );
 
     it.each(['complete', 'abandon', 'sync throw'] as const)(
       'broker failure waits for direct work to %s before database close',
