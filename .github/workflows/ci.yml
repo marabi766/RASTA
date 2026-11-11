@@ -43,6 +43,13 @@ env:
   TRIVY_VERSION: 'v0.70.0'
 
 jobs:
+  # No test/build dependencies: the ~10 minute drill starts beside the other jobs.
+  backup-drill:
+    name: Full backup restore drill
+    permissions:
+      contents: read
+    uses: ./.github/workflows/backup-drill-monthly.yml
+
   # ---------------------------------------------------------------------------
   # Fast feedback. Everything here runs without Docker, so it fails in ~2
   # minutes rather than after a container pull.

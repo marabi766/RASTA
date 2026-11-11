@@ -292,6 +292,11 @@ export const CLI_CONTRACT = Object.freeze({
     positionals: [],
     accepts: { '--report': 'path', '--exit-code': 'integer', '--progress': 'path' },
   },
+  'scripts/backup-restore-drill-scope.mjs': {
+    positionals: [],
+    accepts: { '--gate': 'switch' },
+    other: ['--name-only', '--no-renames', '-z'],
+  },
   'scripts/backup-restore-drill-main.mjs': {
     positionals: [],
     accepts: { '--report': 'path', '--cleanup-from': 'path' },

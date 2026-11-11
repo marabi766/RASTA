@@ -387,22 +387,47 @@ backup، انتقال و نگهداری خارج از میزبان، Kafka و of
 سرویس‌های در حال نوشتن و بازیابی سامانه کامل در دامنه این تمرین نیستند. منبع هیچ
 نویسنده فعال ندارد؛ dumpهای جدا تضمین snapshot توزیع‌شده production نیستند.
 
-خودکارسازی ماهانه: approved 2026-10-24 (owner), scheduled monthly by
-`backup-drill-monthly.yml` (بخش «Monthly scheduled drill» پایین). تست‌های مقایسه و SQL
-منفی در CI اجرا می‌شوند؛ job مستقل `integration-backup-drill` با سقف ۱۰ دقیقه عضو گیت
-`Integration and security tests` است و فقط این تست‌ها را اجرا می‌کند، نه فرمان کامل
-۱۶ پایگاه. سقف گام آزمون PostgreSQL پنج دقیقه است و افزایش نیافته؛ زمان این job در CI و
-زمان کامل فرمان ۱۶ پایگاه باید جدا گزارش شوند. جمع `before.schemaDump.milliseconds` و
-`after.schemaDump.milliseconds` هزینه جمع‌آوری schema را نشان می‌دهد.
+## CI and scheduled full drill
 
-## Monthly scheduled drill
+**When.** `ci.yml` calls `.github/workflows/backup-drill-monthly.yml` as part of the
+same CI run the PM merge train judges. The full 16-database drill starts beside
+the existing jobs, with only its own path selector as a prerequisite. It runs on
+**every `mq/train-*` pull request**, regardless of changed paths, and every push
+to `main`. A missing or unclassifiable branch, failed diff, or missing selection
+runs it too. The always-running verdict rejects a skipped, cancelled or failed
+drill on a train; a successful separate workflow cannot satisfy this CI gate.
 
-**When.** `.github/workflows/backup-drill-monthly.yml` runs at 03:17 UTC on the 1st of every
-month (`17 3 1 * *`), on demand (Actions → "Backup restore drill (monthly)" → Run workflow,
-or `gh workflow run backup-drill-monthly.yml`), and on a pull request that changes that file
-or `scripts/backup-restore-drill*` (so the change itself proves the job still runs).
-Runs of one ref do not overlap and a running drill is never cancelled (GitHub keeps one pending
-run per group, so a newer pending run replaces an older pending one).
+Ordinary PRs run it when paths match `DRILL_PATHS` or install inputs derived from
+workspace globs and configured patch references in
+`scripts/backup-restore-drill-scope.mjs`: any Prisma schema or migration, service
+Prisma directories (including seeds), Compose YAML and PostgreSQL bootstrap,
+the drill scripts/workflows, Prisma wrappers, published env and database-URL
+wiring, service package/TypeScript configuration, workspace/package-manager/build
+inputs, shared seed dependencies, and the organization/economic code the seeds
+import. Only classified documentation paths outside those inputs may skip it;
+unclassified paths or unsupported install configuration run it. The guard independently
+computes install coverage using the workspace configuration and tracked package-manager files;
+renames are treated as a deletion plus addition and the complete Git diff has no
+GitHub paths-filter/API truncation limit.
+
+The same workflow runs nightly on `main` at **03:17 UTC** (`17 3 * * *`), including
+the original monthly date (the 1st), to catch drift outside that list within a day.
+Dispatch remains available through Actions → "Backup restore drill" → Run workflow,
+or `gh workflow run backup-drill-monthly.yml`. There is one drill step list for
+all entry points. Each invocation is isolated. Superseded PR runs retain CI
+cancellation. The `always()` recovery step attempts teardown after cancellation;
+the hosted runner VM is discarded even if cancellation interrupts recovery.
+The full job has a 30-minute timeout: checkout, pnpm setup and Node setup get
+one minute each, install three, drill twenty, summary one and recovery two.
+The combined 29-minute budget reserves one minute for runner overhead.
+
+The library and negative PostgreSQL comparison tests still run separately in
+`integration-backup-drill` (10-minute job / 5-minute test step); these are not the
+full drill. Report their wall time separately from the full command.
+`before.schemaDump.milliseconds` and `after.schemaDump.milliseconds` measure schema
+collection cost only. Synthetic data, pinned PostgreSQL, no secrets, read-only
+repository permission, private output, allowlisted summary and mandatory recovery
+cleanup apply to all full-drill entry points.
 
 **Directories must be private (the trust boundary).** Everything the drill writes next to the
 report (the report, its journal, lock claims and atomic siblings) lives in the report's directory,

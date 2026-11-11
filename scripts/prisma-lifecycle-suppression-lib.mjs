@@ -15,7 +15,8 @@ import { executionChain, parseCommands } from './ci-shell-text-lib.mjs';
  *    (or started FROM such a stage). Outside one, a RUN may hold only commands that start no
  *    other program (`INERT_RUN`), and no other instruction may name a package manager.
  *  - workflow: every step of every job runs under the variable from its workflow, job or step
- *    `env`. A job that calls another workflow is refused: `env` does not reach it.
+ *    `env`. Local called workflows are read separately: the caller's `env` does not reach them.
+ *    Missing, remote, mixed runner/call and cyclic workflow calls are refused.
  *  - composite action: its steps inherit the calling step's environment (which the workflow rule
  *    covers), so it may not name the variable at all.
  *
@@ -271,6 +272,7 @@ function readYaml(name, text) {
 }
 
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const CALL_KEYS = new Set('name uses permissions needs if strategy with concurrency'.split(' '));
 
 /** `env` is a mapping written in the file, or it can hold anything (`env: ${{ fromJSON(…) }}`). */
 const readsEnv = (where, owner, errors) =>
@@ -299,9 +301,12 @@ function stepProblems(where, step, errors, commands) {
 /**
  * @param {string} name
  * @param {string} text
+ * @param {Record<string, string>} workflows Independently inventoried repository workflow texts.
+ * @param {string[]} ancestors Calls already being checked; no environment is inherited.
  * @returns {{ errors: string[], commands: string[] }}
  */
-export function workflowLifecycle(name, text) {
+export function workflowLifecycle(name, text, workflows = {}, ancestors = []) {
+  if (ancestors.includes(name)) return { errors: [`${name}: cyclic workflow call`], commands: [] };
   const read = readYaml(name, text);
   if (read.problem) return { errors: [read.problem], commands: [] };
   const errors = [];
@@ -325,6 +330,30 @@ export function workflowLifecycle(name, text) {
     errors.push(`${name}: shell ${clip(String(shell))} is not one this check reads`);
   for (const [id, job] of Object.entries(workflow.jobs)) {
     const where = `${name}: job ${id}`;
+    if (record(job) && Object.hasOwn(job, 'uses')) {
+      const target =
+        typeof job.uses === 'string' && /^\.\/\.github\/workflows\/[\w-]+\.ya?ml$/.test(job.uses)
+          ? job.uses.slice(2)
+          : null;
+      if (
+        !target ||
+        !Object.keys(job).every((key) => CALL_KEYS.has(key)) ||
+        !Object.hasOwn(workflows, target) ||
+        typeof workflows[target] !== 'string'
+      )
+        errors.push(
+          `${where}: called workflow is unreadable or not a local call without runner settings`,
+        );
+      else {
+        const called = workflowLifecycle(target, workflows[target], workflows, [
+          ...ancestors,
+          name,
+        ]);
+        errors.push(...called.errors);
+        commands.push(...called.commands);
+      }
+      continue;
+    }
     if (!record(job) || !Array.isArray(job.steps)) {
       errors.push(`${where} has no steps this check reads (a called workflow gets no env)`);
       continue;
