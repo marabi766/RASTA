@@ -268,6 +268,28 @@ describe('the window sweeper', () => {
   });
 
   describe('safe under concurrency', () => {
+    it('bounds concurrent claims over many due windows without duplicate leases', async () => {
+      const { harness, clock } = await api({ min: 0 });
+      const other = (await api()).harness;
+      for (let i = 0; i < 20; i++) await dueWindow(harness, clock, [1]);
+      const batches = await Promise.all(
+        [harness, other].map((h) =>
+          h.app.get(WindowSweepRepository).claimDue(1, 600, `limit-${h === harness}`),
+        ),
+      );
+      for (const batch of batches) expect(batch).toHaveLength(1);
+      expect(new Set(batches.flat().map((row) => row.id)).size).toBe(2);
+      for (const row of batches.flat()) {
+        await harness.app
+          .get(WindowSweepService)
+          .step(
+            { organizationId: row.organizationId, aggregationId: row.id, fence: row.fence },
+            60,
+          );
+      }
+      await sweepAll(harness.sweeper({ batchSize: 3 }));
+    });
+
     it('two sweepers at once end every window exactly once', async () => {
       const { harness, clock } = await api({ min: 0 });
       const windows = [];

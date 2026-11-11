@@ -556,14 +556,15 @@ export class FleetRepository {
   async purgeExpiredReleases(): Promise<number> {
     return this.transaction(
       (tx) => tx.$executeRaw`
-        DELETE FROM asset_transfer_release
-        WHERE (asset_id, fence_id) IN (
+        WITH picked AS MATERIALIZED (
           SELECT asset_id, fence_id FROM asset_transfer_release
           WHERE expires_at < now()
           ORDER BY expires_at
           LIMIT ${RELEASE_PURGE_BATCH}
           FOR UPDATE SKIP LOCKED
-        )`,
+        )
+        DELETE FROM asset_transfer_release AS t USING picked
+        WHERE t.asset_id = picked.asset_id AND t.fence_id = picked.fence_id`,
     );
   }
 
