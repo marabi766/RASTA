@@ -301,7 +301,7 @@ export function schemaDiffSummary(source, restored) {
   return { identity, firstDifferentByte: offset, sourceBytes: a.length, restoredBytes: b.length };
 }
 
-// The one expression rule between SOURCE and REF, for every object alike (FU-327). PostgreSQL's
+// The expression rule between SOURCE and REF for every object alike (FU-327). PostgreSQL's
 // grammar folds a leading parenthesised AND (OR) list into the AND (OR) that follows it (gram.y
 // makeAndExpr/makeOrExpr). A tree that analysis nested (BETWEEN, a row comparison) is therefore
 // printed from SOURCE as `((a) AND (b)) AND (c)` and from REF as `(a) AND (b) AND (c)`: the same
@@ -342,6 +342,33 @@ export function foldLeadingBooleanLists(text) {
     from = at + 1;
   }
   return folded + text.slice(from);
+}
+
+// FU-331: the exact cast-placement round trip in the six real CHECK lines from the
+// FU-327 sweep (identity 2, audit 3, analytics 1). Only an ANY argument containing a
+// nonempty ARRAY of ordinary string literals cast to character varying qualifies:
+// ANY ((ARRAY['x'::character varying, ...])::"text"[]) becomes
+// ANY (ARRAY[('x'::character varying)::"text", ...]). Keep both casts and every
+// literal byte; do not generalize to expressions, other types or other operands.
+// The scanner keeps strings, identifiers, dollar bodies and comments indivisible.
+function normalizeCheckArrayCasts(text) {
+  const literal = "'(?:[^'\\r\\n]|'')*'::character varying";
+  const array = new RegExp(
+    `^ANY \\(\\(ARRAY\\[(${literal}(?:, ${literal})*)\\]\\)::"text"\\[\\]\\)`,
+  );
+  let normalized = '',
+    from = 0;
+  for (const token of scanSql(text)) {
+    if (token.kind !== 'word' || token.value !== 'ANY') continue;
+    const match = text.slice(token.start).match(array);
+    if (!match) continue;
+    const elements = [...match[1].matchAll(new RegExp(literal, 'g'))].map(
+      ([element]) => `(${element})::"text"`,
+    );
+    normalized += text.slice(from, token.start) + `ANY (ARRAY[${elements.join(', ')}])`;
+    from = token.start + match[0].length;
+  }
+  return normalized + text.slice(from);
 }
 
 function checkLines(evidence, database) {
@@ -447,8 +474,8 @@ export function checkSourceReference(source, reference, database) {
   const reported = new Set();
   // Objects (dump identities, no SQL) with a line that differs by the fold alone.
   const foldedBooleanLists = [];
-  // Both COMPLETE dumps are folded, and EVERY line outside a CHECK constraint must be equal after
-  // it — also a line whose original bytes already matched. A fold takes two parentheses, often
+  // Both COMPLETE dumps are folded, and EVERY line must be equal after its permitted
+  // rules — also a line whose original bytes already matched. A fold takes two parentheses, often
   // on two lines: where SOURCE and REF group a multi-line expression differently, one side can
   // lose a parenthesis on a line that was byte-equal while the lines that differed come out
   // equal, and that is a different boolean (#1078 r1 F1). The fold drops parentheses, never a
@@ -456,14 +483,22 @@ export function checkSourceReference(source, reference, database) {
   const folded = [a, b].map(({ text }) => foldLeadingBooleanLists(text).split('\n'));
   if (folded.some((lines) => lines.length !== a.lines.length))
     throw new Error('SOURCE/REF non-CHECK difference');
+  const checkNormalized = folded.map((lines) =>
+    normalizeCheckArrayCasts(lines.join('\n')).split('\n'),
+  );
   let identityAt;
   for (let i = 0; i < a.lines.length; i++) {
-    if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i)) {
+    if (a.checks.get(i) !== b.checks.get(i)) throw new Error('SOURCE/REF CHECK span differs');
+    if (!a.checks.has(i)) {
       if (folded[0][i] !== folded[1][i]) throw new Error('SOURCE/REF non-CHECK difference');
       if (a.lines[i] === b.lines[i]) continue;
       const identity = (identityAt ??= dumpIdentities(a.text))(a.starts[i]);
       if (!foldedBooleanLists.includes(identity)) foldedBooleanLists.push(identity);
       continue;
+    }
+    if (checkNormalized[0][i] !== checkNormalized[1][i]) {
+      const identity = (identityAt ??= dumpIdentities(a.text))(a.starts[i]);
+      throw new Error(`SOURCE/REF CHECK difference: ${identity}`);
     }
     if (a.lines[i] === b.lines[i]) continue;
     checkLinesDifferent++;
@@ -473,7 +508,7 @@ export function checkSourceReference(source, reference, database) {
     const [, schema, table, name] = JSON.parse(a.checks.get(i));
     checkConstraints.push({ schema, table, name });
   }
-  // This structural allowance trusts PostgreSQL; it does NOT prove CHECK semantics.
+  // Only the two specified deparse rules can differ; REF/fixed point remain byte-exact.
   const proof = { database, checkLinesDifferent, checkConstraints, foldedBooleanLists };
   allowances.set(proof, { source, reference });
   return proof;
