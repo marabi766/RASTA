@@ -19,6 +19,8 @@ const nameOf = (n) => ts.isIdentifier(n) ? n.text :
   ts.isPropertyAccessExpression(n) ? n.name.text :
     ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression)
       ? n.argumentExpression.text : null;
+// FU-325: SQL text a reader does not have (an operand that is not a constant), unlike a bound value.
+export const UNKNOWN_SQL = PLACEHOLDER('text');
 
 export function sqlSinkTexts(repository, files = productionFiles(repository)) {
   const authored = authoredFiles(repository);

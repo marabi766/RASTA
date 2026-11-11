@@ -71,10 +71,10 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
-import { productionFiles, readSchemas, sqlLiterals, sqlOf, SOURCE, SPEC } from './eligibility-clock-derive.mjs';
-import { sqlSinkTexts } from './utc-clock-sinks.mjs';
+import { productionFiles, readSchemas, sqlLiterals, SOURCE, SPEC } from './eligibility-clock-derive.mjs';
+import { sqlSinkTexts, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
-import { lex as lexSql, stripComments } from './eligibility-clock-sql.mjs';
+import { lex as lexSql, PLACEHOLDER, stripComments } from './eligibility-clock-sql.mjs';
 
 const CALLS = new Set(['now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp']);
 const KEYWORD_CLOCK = 'current_timestamp';
@@ -1885,48 +1885,79 @@ export function schemaDisagreements(repository, perService) {
 }
 
 // One claim policy, independent of clocks, replay lifetime and reviewed exemptions.
-export function claimSubqueryProblems(sql, seen = new Set()) {
-  if (seen.has(sql)) return [];
-  seen.add(sql);
+const unknownAt = (t) => t?.type === 'placeholder' && t.value === 'text';
+// FU-325: the tokens every locking picker needs. No list of statement heads: a text is read as
+// SQL because of what it holds, wherever and however it is quoted.
+const mayLock = (text) => {
+  if (!/\b(?:select|table)\b/i.test(text) || !/\bfor\b/i.test(text)) return false;
+  const tokens = lex(text);
+  // A fragment that starts or ends inside a quote hides its tokens from the lexer: read as text.
+  return tokens.some((t, i) => isWord(t, 'for') && isWord(tokens[i + 1], 'update', 'no', 'share', 'key')) ||
+    (tokens.some((t) => t.unterminated) && /\bfor(?:\s|--[^\n\r]*|\/\*[^]*?\*\/)+(?:update|share|no|key)\b/i.test(text));
+};
+
+/**
+ * `strict`: the text is executed, or may hold a picker. Otherwise it is data, read only for the
+ * strings inside it (an escape may spell the words one quoting level further down).
+ */
+export function claimSubqueryProblems(sql, seen = new Set(), strict = true) {
+  if (seen.has(strict + sql)) return [];
+  seen.add(strict + sql);
   const tokens = lex(sql);
-  // Read concatenated SQL as one text, rather than checking unbalanced pieces.
+  const valuesAt = (i) => tokens[i].values ?? stringValues(tokens, i);
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].type !== 'string' || !isOp(tokens[i + 1], '||') || !stringValues(tokens, i)?.some(isClaimSql)) continue;
-    let end = i, values = stringValues(tokens, i);
-    while (isOp(tokens[end + 1], '||') && tokens[end + 2]) {
-      const next = tokens[end + 2].type === 'string' ? stringValues(tokens, end + 2) : ['\uE0000\uE001'];
-      values = values && next ? [...new Set(values.flatMap((a) => next.map((b) => a + b)))] : null;
-      end += 2;
+    if (tokens[i].type !== 'string') continue;
+    // FU-325: compose BEFORE classifying: `'a' || 'b'`, adjacent constants, and an operand that
+    // is not a constant as unknown text. A split keyword is one keyword again.
+    let end = i, values = valuesAt(i);
+    for (;;) {
+      let at = isOp(tokens[end + 1], '||') && tokens[end + 2] ? end + 2 : end + 1;
+      const constant = tokens[at]?.type === 'string';
+      if (!constant && at === end + 1) break;
+      // quote_ident(x) is one identifier and quote_literal(x) one constant: a value, as a bound one.
+      const quotes = isWord(tokens[at], 'quote_ident', 'quote_literal', 'quote_nullable') && isOp(tokens[at + 1], '(');
+      while (!constant && (isOp(tokens[at + 1], '(') || isOp(tokens[at + 1], '::') || isOp(tokens[at + 1], '.')))
+        at = isOp(tokens[at + 1], '(') ? closing(tokens, at + 1) : at + 2;
+      const next = constant ? valuesAt(at) : [quotes && isOp(tokens[at + 1], '||') ? PLACEHOLDER(0) : UNKNOWN_SQL];
+      values = values && next && values.length * next.length <= 64
+        ? [...new Set(values.flatMap((a) => next.map((b) => a + b)))] : null;
+      end = at;
     }
-    if (values) tokens.splice(i, end - i + 1, ...values.map((v) => ({ type: 'string', value: '$claim$' + v + '$claim$' })));
+    if (end > i) tokens.splice(i, end - i + 1, { type: 'string', value: '', values, unterminated: tokens[end].unterminated });
   }
   const refuse = [
     'FU-324: locking subquery or unreadable SQL; use WITH picked AS MATERIALIZED (...) UPDATE ... FROM picked (DELETE ... USING picked)',
   ];
-  if (tokens.some((t) => t.unterminated || t.unreadable)) return refuse;
-  let depth = 0;
-  for (const t of tokens) {
-    if (isOp(t, '(')) depth++;
-    if (isOp(t, ')') && --depth < 0) return refuse;
+  if (strict) {
+    if (tokens.some((t) => t.unterminated || t.unreadable)) return refuse;
+    let depth = 0;
+    for (const t of tokens) {
+      if (isOp(t, '(')) depth++;
+      if (isOp(t, ')') && --depth < 0) return refuse;
+    }
+    if (depth !== 0) return refuse;
   }
-  if (depth !== 0) return refuse;
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].type === 'string') {
-      const values = stringValues(tokens, i);
-      if (!values) return refuse;
-      for (const value of values) {
-        // Includes SQL/PLpgSQL bodies, DO and quoted dynamic SQL, even if later dropped.
-        if ((/^\$\w*\$/.test(tokens[i].value) || isClaimSql(value)) && claimSubqueryProblems(value, seen).length) return refuse;
-      }
+      // Every string, in every quoting: a routine body, DO, dynamic SQL, data. One that cannot be
+      // decoded (UESCAPE, too many readings) is refused in data too: it may spell anything.
+      const values = valuesAt(i);
+      if (!values && !tokens[i].unterminated) return refuse;
+      for (const value of values ?? [])
+        if (claimSubqueryProblems(value, seen, mayLock(value)).length) return refuse;
     }
-    if (!isOp(tokens[i], '(')) continue;
+    // Unknown text is judged where it stands, also in a text that is otherwise data.
+    if (!(strict || sql.includes(UNKNOWN_SQL)) || !isOp(tokens[i], '(')) continue;
     const end = closing(tokens, i);
     const body = tokens.slice(i + 1, end);
     const selects = body.some((t) => isWord(t, 'select', 'table'));
     const locks = body.some(
-      (t, j) => isWord(t, 'for') && isWord(body[j + 1], 'update', 'no', 'share', 'key'),
+      (t, j) => unknownAt(t) || (isWord(t, 'for') && isWord(body[j + 1], 'update', 'no', 'share', 'key')),
     );
-    if (!selects || !locks) continue;
+    // Unknown text may be the lock clause, or (where a set or a table is read) the whole picker.
+    const whole = unknownAt(body.find((t) => !isOp(t, '('))) &&
+      isWord(tokens[i - 1], 'in', 'any', 'all', 'some', 'exists', 'array', 'from', 'using', 'join', 'lateral');
+    if (!(selects && locks) && !whole) continue;
     // CTEs containing row locks cannot be inlined by PostgreSQL. A derived
     // FROM/USING/JOIN or membership picker has no such evaluation boundary.
     const as = isWord(tokens[i - 1], 'materialized') ? i - 2 : i - 1;
@@ -1938,11 +1969,6 @@ export function claimSubqueryProblems(sql, seen = new Set()) {
   }
   return [];
 }
-
-const isClaimSql = (text) =>
-  /^(?:select|update|delete|insert|merge|create|alter|drop|do|begin|declare)\b|^values\s*\(|^with\s+(?:recursive\s+)?(?:[\w$]+|"[^"]+")\s+as\b/i.test(
-    stripComments(text).trim(),
-  );
 
 function claimFileProblems(repository) {
   const problems = [];
@@ -1960,16 +1986,24 @@ function claimFileProblems(repository) {
     if (/\.[cm]?[jt]sx?$/.test(local)) {
       const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
       if (ast.parseDiagnostics.length) { problems.push(`${local}: FU-324: unreadable source`); continue; }
+      // FU-325: literal parts are composed first (`'a' + 'b'`, `${'a'}b`); any other part is a
+      // bound value here: the sink rule of utc-clock-sinks.mjs is what proves a complete text.
       const concat = (n) => ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken;
-      const textOf = (n) => concat(n) ? textOf(n.left) + textOf(n.right) : sqlOf(n)?.text ?? '\uE0000\uE001';
+      const textOf = (n) =>
+        ts.isParenthesizedExpression(n) ? textOf(n.expression)
+          : concat(n) ? textOf(n.left) + textOf(n.right)
+            : ts.isTemplateExpression(n)
+              ? n.head.text + n.templateSpans.map((s) => textOf(s.expression) + s.literal.text).join('')
+              : ts.isStringLiteralLike(n) ? n.text : PLACEHOLDER(0);
       for (const { node } of sqlLiterals(ast)) {
         let top = node;
-        while (concat(top.parent)) top = top.parent;
+        while (concat(top.parent) || ts.isParenthesizedExpression(top.parent) || ts.isTemplateSpan(top.parent))
+          top = ts.isTemplateSpan(top.parent) ? top.parent.parent : top.parent;
         composed.set(top, { node: top, text: textOf(top) });
       }
     }
     const texts = /\.[cm]?[jt]sx?$/.test(local)
-      ? [...composed.values()].filter(({ text }) => isClaimSql(text))
+      ? [...composed.values()].filter(({ text }) => mayLock(text))
       : /\.sql$/.test(local)
         ? [{ text: source }]
         : [...source.matchAll(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$/gm)]
@@ -1977,7 +2011,7 @@ function claimFileProblems(repository) {
             .concat(
               parseCommands(source).commands.flatMap(({ words }) => words)
                 .map(({ value }) => ({ text: value.replace(/^[A-Za-z_]\w*=/, '') }))
-                .filter(({ text }) => isClaimSql(text)),
+                .filter(({ text }) => mayLock(text)),
             );
     for (const { text, node } of texts) {
       const line = node

@@ -2121,7 +2121,8 @@ test('FU-324 refuses locking membership subqueries, including tuple DELETE and A
   const cte = `WITH picked AS MATERIALIZED (SELECT id FROM t LIMIT 1 FOR UPDATE SKIP LOCKED)
     UPDATE t SET lease = 1 FROM picked WHERE t.id = picked.id`;
   assert.deepEqual(claimSubqueryProblems(cte), []);
-  assert.deepEqual(claimSubqueryProblems(`SELECT 'IN (SELECT id FOR UPDATE)'`), []);
+  // FU-325: a string that holds a picker is refused wherever it stands; nothing proves it is not executed.
+  assert.match(claimSubqueryProblems(`SELECT 'IN (SELECT id FOR UPDATE)'`).join(), /FU-324/);
 });
 
 test('FU-324 PostgreSQL comment boundaries cannot hide a locking picker', () => {
@@ -2197,13 +2198,75 @@ for (const [name, path, wrap] of [
     assert.match(found.filter((p) => p.includes(path)).join(), /FU-324/);
   });
 
+// FU-325 (PR #1070 r2 F1): the escapes the review executed. No statement head is needed to be read.
+const PICKED = '(SELECT id FROM task LIMIT 1 FOR UPDATE SKIP LOCKED)';
+const CLAIM = `WITH args(n) AS (SELECT 1) DELETE FROM task WHERE id IN ${PICKED}`;
+const quoted = (text) => `'${text.replaceAll("'", "''")}'`;
+
+for (const [name, path, wrap] of [
+  ['source literal', 'services/x-service/src/claim.ts', (s) => `const sql = ${JSON.stringify(s)};`],
+  ['source literal parts', 'services/x-service/src/claim.ts', (s) =>
+    `const sql = \`${s.replace('FOR UPDATE', "FOR ${('UP')}${'DA' + 'TE'}")}\`;`],
+  ['migration DML', 'services/x-service/prisma/migrations/2_claim/migration.sql', (s) => s],
+  ['SQL routine', 'services/x-service/prisma/migrations/2_claim/migration.sql', (s) =>
+    `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS ${quoted(s)}; DROP FUNCTION f();`],
+  ['PLpgSQL routine', 'services/x-service/prisma/migrations/2_claim/migration.sql', (s) =>
+    `CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $f$BEGIN EXECUTE ${quoted(`; EXPLAIN ANALYZE ${s}`)}; END$f$;`],
+  ['down migration', 'services/x-service/prisma/migrations/1_init/down.sql', (s) => s],
+  ['operational SQL', 'scripts/claim.sql', (s) => `SELECT ${quoted(s)};`],
+  ['operational JS', 'scripts/claim.mjs', (s) => `db.query('WI' + ${JSON.stringify(s.slice(2))});`],
+  ['JS psql argument', 'scripts/claim.mjs', (s) => `spawnSync('psql', ['-X', '-c', ${JSON.stringify(s)}]);`],
+  ['shell attached -c', 'scripts/claim.sh', (s) => `psql -c${JSON.stringify(s)}`],
+  ['shell here-document', 'scripts/claim.sh', (s) => `psql <<'SQL'\n${s};\nSQL`],
+])
+  test(`FU-325 reads ${name} with no statement head it knows`, () => {
+    const found = scanOf('x-service', 'CREATE TABLE task (id text);', '', { [path]: wrap(CLAIM) });
+    assert.match(found.filter((p) => p.includes(path)).join(), /FU-324/);
+  });
+
+test('FU-325 SQL is composed and decoded before it is classified, in every quoting', () => {
+  for (const sql of [
+    `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $body$${CLAIM}$body$`,
+    `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS E'${CLAIM.replace('FOR', '\\x46OR')}'`,
+    `DO $$BEGIN EXECUTE E'${CLAIM.replace('FOR', '\\106OR')}'; END$$`,
+    `DO $a$BEGIN EXECUTE $b$<<l>> ${CLAIM}$b$; END$a$`,
+    `DO $$BEGIN EXECUTE 'DEL' || 'ETE FROM task WHERE id IN (SELECT id FROM task FOR UP' || 'DATE)'; END$$`,
+    `SELECT 'DELETE FROM task WHERE id IN (SELECT id FROM task FOR UP'\n  'DATE)'`,
+    // An operand that is not a constant is unknown text: it may be the lock clause, or the picker.
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id IN (SELECT id FROM task LIMIT 1 ' || lock_clause || ')'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id IN (SELECT id FROM task FOR ' || upper(mode)::text || ')'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id IN (' || picker || ')'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id = ANY ((' || picker || '))'; END$$`,
+    `DO $$BEGIN EXECUTE U&'DELETE FROM task WHERE id IN (SELECT id FROM task !0046OR UPDATE)' UESCAPE '!'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id IN (SELECT id FROM ' || quote_ident(t)::text || ' FOR UPDATE)'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task USING (' || picker || ') due WHERE task.id = due.id'; END$$`,
+    `DO $$BEGIN EXECUTE q || ''' AND id IN (SELECT id FROM task FOR /* c */ UPDATE)'; END$$`,
+  ])
+    assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+  for (const sql of [
+    `DO $$BEGIN RAISE EXCEPTION 'List them with: SELECT id FROM task t WHERE NOT EXISTS (SELECT 1 FROM p) for a person''s update'; END$$`,
+    `DO $$BEGIN EXECUTE 'SELECT count(*) FROM ' || quote_ident(t) || ' WHERE a = ''x'''; EXECUTE 'CREATE INDEX i ON t (' || col || ')'; END$$`,
+    `SELECT string_agg(n || ' (' || s || ')', ', ') FROM task WHERE id = 'it''s' || $1 || ' (' || pct || '%)'`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM t WHERE EXISTS (SELECT 1 FROM ' || quote_ident(t) || ' x WHERE x.id = ' || quote_literal(v) || ')'; END$$`,
+    `DO $$BEGIN EXECUTE 'WITH picked AS MATERIALIZED (SELECT id FROM ' || quote_ident(t) || ' LIMIT 1 FOR UPDATE) DELETE FROM task USING picked'; END$$`,
+    `WITH picked AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id`,
+  ])
+    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+});
+
 test('FU-324 cannot be waived by a matching reviewed DO block', () => {
-  const body = 'BEGIN DELETE FROM task WHERE id IN (SELECT id FROM task FOR UPDATE); END';
-  const entry = { service: 'x-service', migration: '1_init', sha256: contentHash(body) };
-  REVIEWED_DO_BLOCKS.push(entry);
-  try {
-    assert.match(scanOf('x-service', `DO $$${body}$$;`).join(), /FU-324/);
-  } finally { REVIEWED_DO_BLOCKS.pop(); }
+  // PR #1070 r2: the entry hashes the whole string token, as the replay does, so it really matches.
+  for (const [body, claim] of [
+    [`$$BEGIN EXECUTE 'DROP TABLE task'; END$$`, false],
+    [`$$BEGIN EXECUTE 'DEL' || 'ETE FROM task WHERE id IN (SELECT id FROM task FOR UP' || 'DATE)'; END$$`, true],
+  ]) {
+    REVIEWED_DO_BLOCKS.push({ service: 'x-service', migration: '1_init', sha256: contentHash(body) });
+    try {
+      const found = scanOf('x-service', `CREATE TABLE task (id text); DO ${body};`).join();
+      assert.doesNotMatch(found, /DDL or SQL in a DO block/);
+      assert.equal(/FU-324/.test(found), claim, body);
+    } finally { REVIEWED_DO_BLOCKS.pop(); }
+  }
 });
 
 
