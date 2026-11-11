@@ -8,7 +8,7 @@ import {
 import {
   createSystemContext,
   runWithContext,
-  withinDeadline,
+  WorkerDrain,
   WorkerBoundary,
   WorkerAbandonedError,
   workerOperation,
@@ -70,7 +70,15 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
   );
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
-  private stopping?: Promise<void>;
+  private readonly drain = new WorkerDrain(
+    this.worker,
+    { stop: () => this.inFlight ?? Promise.resolve() },
+    () =>
+      this.logger.warn(
+        'Payment reconciliation sweep ABANDONED; submitted write outcome UNCONFIRMED. ' +
+          'A later instance must reconcile durable state before acting',
+      ),
+  );
   private stopped = false;
   /** Where the next heal windows start: bounded work per sweep (Codex on #164). */
   private healCursor: HealCursor = { missing: null, stale: null };
@@ -82,6 +90,7 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
   ) {}
 
   onModuleInit(): void {
+    if (this.stopped) return;
     if (!this.env.ECONOMIC_PAYMENT_RECONCILER_ENABLED) {
       this.logger.warn('The payment reconciler is disabled by configuration');
       return;
@@ -122,33 +131,14 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
    * Past the deadline the sweep is abandoned with a warning: the reconciler
    * settles a task with its event in one transaction. A submitted write's outcome
    * is UNCONFIRMED; the next instance must reconcile the durable state under its
-   * lease before acting. Without a deadline it waits. One stop per
-   * process.
+   * lease before acting. Without a deadline it waits. Repeated stops join one
+   * drain and can only tighten its monotonic deadline.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
-    this.worker.stopAt(options.deadlineAt);
-    this.stopping ??= this.halt(options.deadlineAt);
-    return this.stopping;
-  }
-
-  private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-
-    const current = this.worker.current ?? this.inFlight;
-    if (!current) return;
-    if (deadlineAt === undefined) {
-      await current;
-      return;
-    }
-    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
-      this.worker.abandon();
-      this.logger.warn(
-        'Payment reconciliation sweep ABANDONED; submitted write outcome UNCONFIRMED. ' +
-          'A later instance must reconcile durable state before acting',
-      );
-    }
+    return this.drain.stop(options);
   }
 
   /** The `onApplicationShutdown` of a module that runs without `OutboxShutdown`: joins the stop. */

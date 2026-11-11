@@ -956,18 +956,20 @@ differ in exactly two ways, and anything else refuses:
 
 1. It is a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE SQL
    context, owned by the same constraint on both sides. A CHECK-looking line in a
-   function body, comment or COMMENT string never qualifies.
+   function body, comment or COMMENT string never qualifies. Every line in the CHECK
+   span must be equal after the D-171 fold below and the exact cast-placement rule
+   below, applied to both complete dumps; whole-line differences are not allowed.
 2. It is any other line (a SQL-standard routine body, view, trigger condition, index
    predicate, policy, default, generated column) and it is equal after the one fold
    defined below. This fold is the only exception to byte equality outside CHECK
-   lines. Both complete dumps are folded and every line outside a CHECK constraint
-   is compared after the fold, including a line whose original bytes matched: a fold
+   lines. Both complete dumps are folded and every line
+   is compared after its permitted rules, including a line whose original bytes matched: a fold
    removes two parentheses, often on two lines, so two different groupings of a
    multi-line expression can come out equal on every line whose bytes differed and
    unequal only on a line whose bytes matched.
 
-A line outside a CHECK constraint that is not equal after the fold, a dropped/extra
-object or a renamed constraint refuses. Report
+Any line not equal after its permitted rules, a CHECK span mismatch, a dropped/extra
+object or a renamed constraint refuses. Refusals identify only the dump object, never SQL. Report
 only the observed number of differing CHECK lines per database; do not hard-code
 exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
 ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
@@ -988,11 +990,23 @@ that is equal after the fold are listed (dump identity, no SQL) in
 `before.reference.foldedBooleanLists`.
 RESTORED against REF and REF against its fixed point stay raw byte equality.
 
-PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
-`= ANY ((ARRAY['USER'::character varying, ...])::"text"[])` can return as
-`= ANY (ARRAY[('USER'::character varying)::"text", ...])`.
+The CHECK-only cast-placement rule (FU-331), derived from the six differing CHECK
+lines in the pinned-image FU-327 SOURCE/REF dumps, rewrites exactly
+`ANY ((ARRAY['x'::character varying, ...])::"text"[])` to
+`ANY (ARRAY[('x'::character varying)::"text", ...])`. The array must be nonempty;
+every element must be an ordinary single-quoted string literal cast to
+`character varying`, with exactly the dump's spelling and separators. Only the
+outer `"text"[]` cast becomes the same `"text"` cast on each element. Both dumps
+receive this rule, so either direction compares equally. Literal bytes, element
+order/count, both cast types, the comparison operator and every other operand
+stay intact. No other cast or expression is normalized; strings, quoted
+identifiers, dollar bodies and comments are opaque. A different bound, column,
+operator, element, cast type or operand refuses, including within a CASE span.
 
-REF equality proves the backup under test restores to exactly what PostgreSQL itself produces from the source schema. The SOURCE-vs-REF allowance TRUSTS PostgreSQL's own schema dump/restore for CHECK text: it does not prove semantic equivalence of those lines (a same-name CHECK with a different bound would also pass that structural guard — e.g. economic init migration :648-649). The fixed point proves stability for one more round trip only.
+REF equality proves the backup under test restores to exactly what PostgreSQL itself
+produces from the source schema. SOURCE/REF additionally proves equality under only
+the two specified deparse rules; it does not establish general SQL equivalence.
+The fixed point proves stability for one more round trip only.
 
 Restore REF into a second fresh scratch database and dump it: these bytes must
 also equal REF. Missing REF, missing fixed-point evidence, a skipped allowance

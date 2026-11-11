@@ -416,7 +416,7 @@ async function referenceCliFixture(directory, mode) {
   }
   writeFileSync(target, implementation);
   const dump =
-    '--\n-- PostgreSQL database dump\n--\n\n-- Dumped from database version 16.4\n-- Dumped by pg_dump version 16.4\n\nSET statement_timeout = 0;\nCREATE TABLE "public"."fixture" (\n    "id" integer,\n    CONSTRAINT "ck" CHECK ((id >= 0))\n);\n--\n-- PostgreSQL database dump complete\n--\n\n';
+    '--\n-- PostgreSQL database dump\n--\n\n-- Dumped from database version 16.4\n-- Dumped by pg_dump version 16.4\n\nSET statement_timeout = 0;\nCREATE TABLE "public"."fixture" (\n    "id" integer,\n    CONSTRAINT "ck" CHECK (((id >= 0) AND (id <= 10)) AND (id <> 5))\n);\n--\n-- PostgreSQL database dump complete\n--\n\n';
   writeFileSync(join(directory, 'schema.sql'), dump);
   writeFileSync(
     join(directory, 'pnpm'),
@@ -449,7 +449,7 @@ case "$*" in
       *'drill_ref_'*) ${mode === 'failed-ref-dump' ? 'echo PRIVATE_REF_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
       *'drill_fixed_'*) ${mode === 'failed-fixed-dump' ? 'echo PRIVATE_FIXED_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
     esac
-    ${['check-drift', 'ignore-input'].includes(mode) ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0))/(id >= 0)/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
+    ${['check-drift', 'ignore-input'].includes(mode) ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0) AND (id <= 10)) AND/(id >= 0) AND (id <= 10) AND/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
   *'pg_restore '*) ${mode === 'failed-archive' ? 'echo PRIVATE_ARCHIVE_SQL; echo PRIVATE_ARCHIVE_SQL >&2; exit 42' : ':'} ;;
   *'psql '*)
     body=$(cat)
@@ -612,11 +612,11 @@ for (const mode of [
         // from SOURCE's separate dump, and the fixed point from REF (never SOURCE again).
         const ref = readFileSync(join(directory, 'ref-input'), 'utf8');
         const fixed = readFileSync(join(directory, 'fixed-input'), 'utf8');
-        assert.match(ref, /CHECK \(\(id >= 0\)\)/);
+        assert.match(ref, /CHECK \(\(\(id >= 0\) AND \(id <= 10\)\) AND/);
         if (mode === 'check-drift') {
-          assert.match(fixed, /CHECK \(id >= 0\)/);
-          assert.doesNotMatch(fixed, /CHECK \(\(id >= 0\)\)/);
-        } else assert.match(fixed, /CHECK \(\(id >= 0\)\)/);
+          assert.match(fixed, /CHECK \(\(id >= 0\) AND \(id <= 10\) AND/);
+          assert.doesNotMatch(fixed, /CHECK \(\(\(id >= 0\) AND \(id <= 10\)\) AND/);
+        } else assert.match(fixed, /CHECK \(\(\(id >= 0\) AND \(id <= 10\)\) AND/);
       }
       if (mode === 'baseline') {
         assert.equal(report.databases.length, 16);

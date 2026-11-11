@@ -40,8 +40,8 @@ export class WorkerDrain {
     const tighter = deadline < this.deadline;
     if (tighter) this.deadline = deadline;
     if (first) {
-      const current = this.worker.current;
-      if (current) this.observe(current);
+      // Observe each outcome by default: a failure must survive sibling abandonment.
+      for (const work of this.worker.pendingOutcomes) this.observe(work);
     }
     if (first || tighter) {
       // Call synchronously so tightening reaches EventConsumer immediately; catch sync throws too.

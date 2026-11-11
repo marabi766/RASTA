@@ -469,8 +469,17 @@ CREATE TABLE "audit"."sample" (
 const evidence = (body) => schemaDumpEvidence(dumpFixture(body), referenceVersion);
 
 test('SOURCE/REF allowance scopes identities by database/schema/table/name and preserves multiplicity', () => {
-  const source = evidence(checkBody);
-  const ref = evidence(checkBody.replaceAll('((amount >= 0))', '(amount >= 0)'));
+  const nested = checkBody.replaceAll(
+    '((amount >= 0))',
+    '(((amount >= 0) AND (amount <= 10)) AND (amount <> 5))',
+  );
+  const source = evidence(nested);
+  const ref = evidence(
+    nested.replaceAll(
+      '((amount >= 0) AND (amount <= 10)) AND',
+      '(amount >= 0) AND (amount <= 10) AND',
+    ),
+  );
   assert.deepEqual(checkSourceReference(source, ref, 'rasta_test'), {
     database: 'rasta_test',
     checkLinesDifferent: 2,
@@ -480,11 +489,9 @@ test('SOURCE/REF allowance scopes identities by database/schema/table/name and p
     ],
     foldedBooleanLists: [],
   });
-  // Honest trust boundary: even a different bound passes this structural guard.
-  assert.equal(
-    checkSourceReference(source, evidence(checkBody.replaceAll('>= 0', '>= 1')), 'rasta_test')
-      .checkLinesDifferent,
-    2,
+  assert.throws(
+    () => checkSourceReference(source, evidence(nested.replaceAll('>= 0', '>= 1')), 'rasta_test'),
+    /CHECK difference/,
   );
   for (const body of [
     checkBody.replace('DEFAULT 0', 'DEFAULT 1'),
@@ -529,56 +536,17 @@ test('a multi-line CHECK may differ on its own lines only, once per constraint',
     checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
     foldedBooleanLists: [],
   });
-  // Two of its lines differ: still one constraint.
-  const two = evidence(
-    caseBody.replace('THEN true', 'THEN (true)').replace(`'B'::character varying, 'C'`, `'B', 'C'`),
-  );
-  assert.deepEqual(checkSourceReference(source, two, 'rasta_test'), {
-    database: 'rasta_test',
-    checkLinesDifferent: 2,
-    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
-    foldedBooleanLists: [],
-  });
-  // Separated differences (the first WHEN and the ELSE, the line between them unchanged): still
-  // one entry, as adjacent ones are.
-  const separated = evidence(
-    caseBody.replace('THEN true', 'THEN (true)').replace('ELSE false', 'ELSE (false)'),
-  );
-  assert.deepEqual(checkSourceReference(source, separated, 'rasta_test'), {
-    database: 'rasta_test',
-    checkLinesDifferent: 2,
-    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
-    foldedBooleanLists: [],
-  });
-  // Every line of the span, with and without gaps: one entry.
-  const everyOther = evidence(
-    caseBody
-      .replace('THEN true', 'THEN (true)')
-      .replace(`'B'::character varying, 'C'`, `'B', 'C'`)
-      .replace('ELSE false', 'ELSE (false)'),
-  );
-  assert.deepEqual(checkSourceReference(source, everyOther, 'rasta_test'), {
-    database: 'rasta_test',
-    checkLinesDifferent: 3,
-    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
-    foldedBooleanLists: [],
-  });
-  // Two ADJACENT constraints that both changed (the last line of one, the line of the next):
-  // two entries, one per constraint.
-  const neighbours = evidence(
-    caseBody
-      .replace('END),\n', 'END ),\n')
-      .replace(`CHECK (("kind" <> ''::"text"))`, `CHECK ("kind" <> ''::"text")`),
-  );
-  assert.deepEqual(checkSourceReference(source, neighbours, 'rasta_test'), {
-    database: 'rasta_test',
-    checkLinesDifferent: 2,
-    checkConstraints: [
-      { schema: 'public', table: 'intake', name: 'ck_actor' },
-      { schema: 'public', table: 'intake', name: 'ck_other' },
-    ],
-    foldedBooleanLists: [],
-  });
+  // Arbitrary changes on adjacent or separated lines in the same span now refuse.
+  for (const body of [
+    caseBody.replace('THEN true', 'THEN (true)'),
+    caseBody.replace('THEN true', 'THEN false').replace('ELSE false', 'ELSE true'),
+    caseBody.replace(`'B'::character varying, 'C'`, `'B', 'C'`),
+    caseBody.replace('END),\n', 'END ),\n'),
+  ])
+    assert.throws(
+      () => checkSourceReference(source, evidence(body), 'rasta_test'),
+      /CHECK difference/,
+    );
   for (const body of [
     // outside the constraint: the column, the closing line
     caseBody.replace('character varying(16)', 'character varying(17)'),
@@ -589,6 +557,77 @@ test('a multi-line CHECK may differ on its own lines only, once per constraint',
     caseBody.replace('"ck_actor"', '"ck_renamed"'),
   ])
     assert.throws(() => checkSourceReference(source, evidence(body), 'rasta_test'));
+});
+
+// Verbatim CHECK spans from W#1's FU-327 pinned-image dumps (task 212, drill3-dumps).
+// Seventeen differing physical lines: eleven fold-only and six cast-placement lines,
+// including identity's CASE continuation and audit's five arrays on one line.
+const realCheckRoundtrips = JSON.parse(
+  readFileSync(new URL('./fixtures/backup-drill-check-roundtrip.json', import.meta.url), 'utf8'),
+);
+assert.equal(realCheckRoundtrips.length, 17);
+for (const { database, schema, table, source, reference } of realCheckRoundtrips) {
+  test(`real CHECK round trip in both directions: ${database}.${table}.${source.match(/CONSTRAINT "([^"\n]+)"/)[1]}`, () => {
+    const wrap = (body) => evidence(`CREATE TABLE "${schema}"."${table}" (\n${body}\n);\n`);
+    for (const [from, to] of [
+      [source, reference],
+      [reference, source],
+    ]) {
+      const proof = checkSourceReference(wrap(from), wrap(to), database);
+      assert.equal(proof.checkLinesDifferent, 1);
+      assert.equal(proof.checkConstraints.length, 1);
+    }
+  });
+}
+
+test('CHECK comparison refuses changed semantics, cast types and operands without SQL disclosure', () => {
+  const sourceArray = `ANY ((ARRAY['A'::character varying, 'B'::character varying])::"text"[])`;
+  const refArray = `ANY (ARRAY[('A'::character varying)::"text", ('B'::character varying)::"text"])`;
+  const source = `-- Name: sample; Type: TABLE; Schema: public; Owner: owner
+CREATE TABLE "public"."sample" (
+    CONSTRAINT "same_name" CHECK ((("kind")::"text" = ${sourceArray}) AND (amount >= 0))
+);
+`;
+  const ref = source.replace(sourceArray, refArray);
+  for (const changed of [
+    ref.replace('amount >= 0', 'amount >= 1'),
+    ref.replace('"kind"', '"other_column"'),
+    ref.replace(' = ANY', ' <> ANY'),
+    ref.replace(
+      `'B'::character varying`,
+      `'B'::character varying)::"text", ('C'::character varying`,
+    ),
+    ref.replaceAll('::"text"', '::"varchar"'),
+    ref.replaceAll('::character varying', '::text'),
+    ref.replace(`('B'::character varying)::"text"`, `'B'::character varying`),
+    ref.replace(`("kind")::"text"`, `("kind")`).replace('amount >= 0', 'amount::"text" >= 0'),
+    source.replace(sourceArray, `ANY (ARRAY['A'::character varying, 'B'::character varying])`),
+    source.replace('amount >= 0', 'amount::"text" >= 0'),
+  ]) {
+    for (const [from, to] of [
+      [source, changed],
+      [changed, source],
+    ])
+      assert.throws(() => checkSourceReference(evidence(from), evidence(to), 'rasta_test'), {
+        message: 'SOURCE/REF CHECK difference: public.sample (TABLE)',
+      });
+  }
+  // Ordinary quoted strings may contain escaped quotes, commas and SQL-looking bytes.
+  const quoted = (body) => body.replaceAll("'A'", "'A'', ANY (ARRAY[secret])'");
+  checkSourceReference(evidence(quoted(source)), evidence(quoted(ref)), 'rasta_test');
+  // The same syntactic round trip outside CHECK, or inside stored text, is not allowed.
+  for (const body of [
+    `CREATE VIEW "public"."v" AS SELECT ${sourceArray};`,
+    source.replace(sourceArray, `'${sourceArray.replaceAll("'", "''")}'`),
+    source.replace(sourceArray, `$body$${sourceArray}$body$`),
+    source.replace(sourceArray, `true /* ${sourceArray} */`),
+  ]) {
+    const changed = body.includes(sourceArray)
+      ? body.replaceAll(sourceArray, refArray)
+      : body.replaceAll(sourceArray.replaceAll("'", "''"), refArray.replaceAll("'", "''"));
+    assert.notEqual(changed, body);
+    assert.throws(() => checkSourceReference(evidence(body), evidence(changed), 'rasta_test'));
+  }
 });
 
 test('CHECK-looking lines in functions, comments, COMMENT strings and nested SQL never qualify', () => {
@@ -802,6 +841,27 @@ test('every non-CHECK line is compared after the fold, also a line whose bytes m
       ]);
   }
   assert.equal(refused, 72);
+});
+
+test('every CHECK span line is compared after the fold, including originally equal lines', () => {
+  const wrap = (body) =>
+    evidence(`CREATE TABLE "public"."sample" (
+    CONSTRAINT "same_name" CHECK (${body})
+);
+`);
+  // Differing lines fold equal, but the equal middle line folds differently.
+  const from = '(((a)\nAND (b))\nAND (c))';
+  for (const [a, b] of [regrouped, [...regrouped].reverse()])
+    assert.throws(() => checkSourceReference(wrap(a), wrap(b), 'rasta_test'), /CHECK difference/);
+  const flat = '((a)\nAND (b)\nAND (c))';
+  for (const [a, b] of [
+    [from, flat],
+    [flat, from],
+  ]) {
+    const proof = checkSourceReference(wrap(a), wrap(b), 'rasta_test');
+    assert.equal(proof.checkLinesDifferent, 2);
+    assert.equal(proof.checkConstraints.length, 1);
+  }
 });
 
 test('missing REF, fixed point or allowance and unstable REF cannot pass operator acceptance', () => {

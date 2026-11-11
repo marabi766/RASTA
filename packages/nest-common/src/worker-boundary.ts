@@ -41,6 +41,11 @@ export class WorkerBoundary {
     throw new WorkerAbandonedError();
   }
 
+  /** Snapshot the individual outcomes before joining; allSettled hides rejections. */
+  get pendingOutcomes(): readonly Promise<unknown>[] {
+    return [...this.pending];
+  }
+
   get current(): Promise<unknown> | undefined {
     return this.pending.size ? Promise.allSettled([...this.pending]) : undefined;
   }
