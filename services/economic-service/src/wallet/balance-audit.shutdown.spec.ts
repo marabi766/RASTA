@@ -40,6 +40,26 @@ const wallet = (id: string) => ({
 });
 
 describe('LedgerBalanceAudit shutdown (Codex on #277, finding 3)', () => {
+  it('keeps audit-owned errors caught and logged when they reject during stop', async () => {
+    let reject!: (error: Error) => void;
+    const { audit, wallets } = setup([
+      new Promise<unknown[]>((_yes, no) => {
+        reject = no;
+      }),
+    ]);
+    const errors = jest.spyOn(audit['logger'], 'error').mockImplementation();
+    const running = audit.run();
+    await new Promise((resolve) => setImmediate(resolve));
+    const stopped = audit.stop();
+    reject(new Error('audit read failed'));
+    await expect(running).resolves.toEqual([]);
+    await expect(stopped).resolves.toBeUndefined();
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors.mock.calls[0][0]).toBe('Wallet/ledger reconciliation pass failed');
+    expect(wallets.pageForAudit).toHaveBeenCalledTimes(1);
+    errors.mockRestore();
+  });
+
   it('starts no further page once stopped', async () => {
     let releaseFirst!: (rows: unknown[]) => void;
     const first = new Promise<unknown[]>((resolve) => (releaseFirst = resolve));
