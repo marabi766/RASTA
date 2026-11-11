@@ -232,12 +232,24 @@ const refused = (check, name, text, pattern) => {
 test('every Dockerfile stage, workflow step and action runs lifecycle hooks suppressed', () => {
   const root = fileURLToPath(new URL('../', import.meta.url));
   const seen = { dockerfile: [], workflow: [], action: [] };
-  for (const file of authoredFiles(root)) {
+  const files = [...authoredFiles(root)];
+  const workflows = Object.fromEntries(
+    files
+      .filter(
+        (file) => lifecycleFileKind(relative(root, file).replaceAll('\\', '/')) === 'workflow',
+      )
+      .map((file) => [relative(root, file).replaceAll('\\', '/'), readFileSync(file, 'utf8')]),
+  );
+  for (const file of files) {
     const path = relative(root, file).replaceAll('\\', '/');
     const kind = lifecycleFileKind(path);
     if (!kind) continue;
     seen[kind].push(path);
-    const { errors, commands } = LIFECYCLE_CHECKS[kind](path, readFileSync(file, 'utf8'));
+    const { errors, commands } = LIFECYCLE_CHECKS[kind](
+      path,
+      readFileSync(file, 'utf8'),
+      workflows,
+    );
     assert.deepEqual(errors, [], path);
     // Not vacuous: the commands the finding was about are read, inside a suppressed stage or step.
     if (/^services\/[^/]+\/Dockerfile$/.test(path))
@@ -252,6 +264,43 @@ test('every Dockerfile stage, workflow step and action runs lifecycle hooks supp
     assert.equal(lifecycleFileKind(path), 'dockerfile', path);
   assert.equal(lifecycleFileKind('.github/workflows/new.yaml'), 'workflow');
   assert.equal(lifecycleFileKind('.github/actions/new/action.yaml'), 'action');
+});
+
+test('local workflow calls prove their own suppression; missing, mixed, remote and cyclic calls refuse', () => {
+  const caller = '.github/workflows/caller.yml';
+  const target = '.github/workflows/child.yaml';
+  const call = (uses) =>
+    `env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  call:\n    uses: ${uses}\n`;
+  const child =
+    "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  run:\n    steps:\n      - run: pnpm install\n";
+  const source = call(`./${target}`);
+  const check = (text = source, workflows = { [target]: child }) =>
+    workflowLifecycle(caller, text, workflows);
+  assert.deepEqual(check(), { errors: [], commands: ['pnpm install'] });
+  assert.match(
+    check(source, {
+      [target]: child.replace("  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'", ''),
+    }).errors.join('\n'),
+    /runs without PRISMA_SKIP_POSTINSTALL_GENERATE/,
+  );
+  for (const text of [
+    call('owner/repo/.github/workflows/child.yaml@main'),
+    call('./.github/workflows/../child.yaml'),
+    call('[./.github/workflows/child.yaml]'),
+    call('${{ inputs.workflow }}'),
+    `${source}    steps: []\n`,
+    `${source}    env: {}\n`,
+  ])
+    assert.match(check(text).errors.join('\n'), /not a local call without runner settings/);
+  assert.match(check(source, {}).errors.join('\n'), /unreadable/);
+  assert.match(check(source, { [target]: '' }).errors.join('\n'), /no jobs were read/);
+  assert.match(check(source, { [target]: 'jobs: [' }).errors.join('\n'), /cannot be read/);
+  assert.match(
+    check(source, { [target]: call(`./${caller}`), [caller]: source }).errors.join('\n'),
+    /cyclic workflow call/,
+  );
+  const nested = '.github/workflows/nested.yml';
+  assert.deepEqual(check(source, { [target]: call(`./${nested}`), [nested]: child }).errors, []);
 });
 
 test('a Dockerfile lifecycle command outside a suppressed stage is refused', () => {
@@ -335,7 +384,7 @@ test('a workflow step or an action outside the suppression is refused', () => {
     [first(`${install}        shell: env -i bash {0}\n`), /shell .* is not one this check reads/],
     [
       `${real}  called:\n    uses: ./.github/workflows/other.yml\n`,
-      /a called workflow gets no env/,
+      /called workflow is unreadable/,
     ],
   ])
     refused(workflowLifecycle, name, mutant, pattern);
