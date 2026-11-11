@@ -388,7 +388,7 @@ async function referenceCliFixture(directory, mode) {
   const replacements = {
     'bypass-ref': [
       'before.reference = await collectReference(source, `rasta_${service}`, before.schemaDump);',
-      'before.reference = { checkLinesDifferent: 0, milliseconds: 0 };',
+      'before.reference = { checkLinesDifferent: 0, foldedBooleanLists: [], milliseconds: 0 };',
     ],
     'bypass-fixed': [
       "const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point', {",

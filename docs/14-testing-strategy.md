@@ -948,16 +948,45 @@ SOURCE dump with the same pinned `pg_dump` and flags. Restore it into a fresh
 scratch database, then dump that database to obtain REF. Do not modify SOURCE.
 Compare the real archive's restored schema with REF using strict byte equality;
 strip only the two generated version header lines at their exact header position.
-No SQL, whitespace or expression normalization is allowed.
+No SQL, whitespace or expression normalization is allowed in that comparison.
 
 Between SOURCE and REF only, equal line counts and an identical multiset of CHECK
-identities (database, schema, table, constraint name) are required. Every differing
-line must be a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE
-SQL context. Function bodies, comments and COMMENT strings never qualify. A
-non-CHECK difference, dropped/extra object or renamed constraint refuses. Report
+identities (database, schema, table, constraint name) are required. A line may then
+differ in exactly two ways, and anything else refuses:
+
+1. It is a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE SQL
+   context, owned by the same constraint on both sides. A CHECK-looking line in a
+   function body, comment or COMMENT string never qualifies.
+2. It is any other line (a SQL-standard routine body, view, trigger condition, index
+   predicate, policy, default, generated column) and it is equal after the one fold
+   defined below. This fold is the only exception to byte equality outside CHECK
+   lines. Both complete dumps are folded and every line outside a CHECK constraint
+   is compared after the fold, including a line whose original bytes matched: a fold
+   removes two parentheses, often on two lines, so two different groupings of a
+   multi-line expression can come out equal on every line whose bytes differed and
+   unequal only on a line whose bytes matched.
+
+A line outside a CHECK constraint that is not equal after the fold, a dropped/extra
+object or a renamed constraint refuses. Report
 only the observed number of differing CHECK lines per database; do not hard-code
 exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
 ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
+
+The fold, one rule for every object alike (FU-327), applied to both dumps before
+SOURCE and REF are compared: a parenthesised list of parenthesised
+operands joined by one connective (`AND` or `OR`) loses its own parentheses when it
+is the first operand of the group around it and that same connective follows it.
+This is what PostgreSQL's grammar does on reading SQL (gram.y `makeAndExpr` /
+`makeOrExpr`): a tree that analysis nested (`BETWEEN`, a row comparison) is printed
+from SOURCE as `((a) AND (b)) AND (c)` and read back into REF as the single list
+`(a) AND (b) AND (c)`, the same boolean by associativity. It covers every stored
+expression tree (SQL-standard routine bodies, views, trigger conditions, index
+predicates, policies, defaults) with no object list. Nothing else is folded: another connective
+(`((a) OR (b)) AND (c)`), a trailing list, bare operands, a subquery, strings, `$$`
+bodies and comments keep their bytes. Objects with a line whose bytes differed and
+that is equal after the fold are listed (dump identity, no SQL) in
+`before.reference.foldedBooleanLists`.
+RESTORED against REF and REF against its fixed point stay raw byte equality.
 
 PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
 `= ANY ((ARRAY['USER'::character varying, ...])::"text"[])` can return as

@@ -263,35 +263,85 @@ function atomicDepthAfter(token, next, depth) {
 }
 
 // Only generated object identities, never differing SQL or function bodies, enter diagnostics.
+// Returns a lookup: the dump object that owns the text position `limit`.
+function dumpIdentities(text) {
+  const tokens = [...scanSql(text)].filter((t) => t.kind !== 'comment' || t.value.startsWith('--'));
+  return (limit) => {
+    let identity = 'database schema',
+      atomicDepth = 0;
+    for (const [index, token] of tokens.entries()) {
+      if (token.start > limit) break;
+      atomicDepth = atomicDepthAfter(
+        token,
+        token.kind === 'word' && token.value.toUpperCase() === 'BEGIN'
+          ? tokens.slice(index + 1).find((t) => t.kind !== 'comment')
+          : undefined,
+        atomicDepth,
+      );
+      const match =
+        !atomicDepth &&
+        token.kind === 'comment' &&
+        (token.start === 0 || text[token.start - 1] === '\n') &&
+        token.value.match(
+          /^-- Name: ([a-zA-Z0-9_ .(),"-]+); Type: ([A-Z ]+); Schema: ([a-zA-Z0-9_"-]+); Owner: [^\n]*$/,
+        );
+      if (match) identity = `${match[3]}.${match[1]} (${match[2]})`.slice(0, 180);
+    }
+    return identity;
+  };
+}
 export function schemaDiffSummary(source, restored) {
   const a = source.content,
     b = restored.content;
   let offset = 0;
   while (offset < Math.min(a.length, b.length) && a[offset] === b[offset]) offset++;
-  const text = a.toString('utf8');
-  const limit = a.subarray(0, offset).toString('utf8').length;
-  let identity = 'database schema',
-    atomicDepth = 0;
-  const tokens = [...scanSql(text)].filter((t) => t.kind !== 'comment' || t.value.startsWith('--'));
-  for (const [index, token] of tokens.entries()) {
-    if (token.start > limit) break;
-    atomicDepth = atomicDepthAfter(
-      token,
-      token.kind === 'word' && token.value.toUpperCase() === 'BEGIN'
-        ? tokens.slice(index + 1).find((t) => t.kind !== 'comment')
-        : undefined,
-      atomicDepth,
-    );
-    const match =
-      !atomicDepth &&
-      token.kind === 'comment' &&
-      (token.start === 0 || text[token.start - 1] === '\n') &&
-      token.value.match(
-        /^-- Name: ([a-zA-Z0-9_ .(),"-]+); Type: ([A-Z ]+); Schema: ([a-zA-Z0-9_"-]+); Owner: [^\n]*$/,
-      );
-    if (match) identity = `${match[3]}.${match[1]} (${match[2]})`.slice(0, 180);
-  }
+  const identity = dumpIdentities(a.toString('utf8'))(
+    a.subarray(0, offset).toString('utf8').length,
+  );
   return { identity, firstDifferentByte: offset, sourceBytes: a.length, restoredBytes: b.length };
+}
+
+// The one expression rule between SOURCE and REF, for every object alike (FU-327). PostgreSQL's
+// grammar folds a leading parenthesised AND (OR) list into the AND (OR) that follows it (gram.y
+// makeAndExpr/makeOrExpr). A tree that analysis nested (BETWEEN, a row comparison) is therefore
+// printed from SOURCE as `((a) AND (b)) AND (c)` and from REF as `(a) AND (b) AND (c)`: the same
+// boolean, by associativity. A group loses its parentheses only when it holds nothing but
+// parenthesised operands joined by one connective, opens the group around it, and is followed by
+// that same connective. Every other regrouping keeps its bytes: `((a) OR (b)) AND (c)`, a
+// trailing list, a bare operand, a subquery, stored text ($$ bodies, strings) and comments.
+export function foldLeadingBooleanLists(text) {
+  const tokens = [...scanSql(text)];
+  const word = (part) => (part?.kind === 'word' ? part.value.toUpperCase() : undefined);
+  const stack = [],
+    drop = [];
+  for (const [index, token] of tokens.entries()) {
+    if (token.kind === 'symbol' && token.value === '(') {
+      stack.push({ start: token.start, leads: stack.at(-1)?.parts.length === 0, parts: [] });
+    } else if (token.kind === 'symbol' && token.value === ')') {
+      const group = stack.pop();
+      if (!group) return text; // unbalanced: not SQL PostgreSQL restored, nothing is folded
+      const { parts } = group;
+      const connective = word(parts[1]);
+      group.list =
+        parts.length >= 3 &&
+        parts.length % 2 === 1 &&
+        (connective === 'AND' || connective === 'OR') &&
+        parts.every((part, at) => (at % 2 ? word(part) === connective : 'list' in part))
+          ? connective
+          : null;
+      if (group.list && group.leads && word(tokens[index + 1]) === group.list)
+        drop.push(group.start, token.start);
+      stack.at(-1)?.parts.push(group);
+    } else stack.at(-1)?.parts.push(token);
+  }
+  if (stack.length) return text;
+  let folded = '',
+    from = 0;
+  for (const at of drop.sort((x, y) => x - y)) {
+    folded += text.slice(from, at);
+    from = at + 1;
+  }
+  return folded + text.slice(from);
 }
 
 function checkLines(evidence, database) {
@@ -375,7 +425,7 @@ function checkLines(evidence, database) {
       statement = [];
     } else statement.push(token);
   }
-  return { lines, checks, identities: identities.sort() };
+  return { text, starts, lines, checks, identities: identities.sort() };
 }
 
 const allowances = new WeakMap();
@@ -395,10 +445,27 @@ export function checkSourceReference(source, reference, database) {
   let checkLinesDifferent = 0;
   const checkConstraints = [];
   const reported = new Set();
+  // Objects (dump identities, no SQL) with a line that differs by the fold alone.
+  const foldedBooleanLists = [];
+  // Both COMPLETE dumps are folded, and EVERY line outside a CHECK constraint must be equal after
+  // it — also a line whose original bytes already matched. A fold takes two parentheses, often
+  // on two lines: where SOURCE and REF group a multi-line expression differently, one side can
+  // lose a parenthesis on a line that was byte-equal while the lines that differed come out
+  // equal, and that is a different boolean (#1078 r1 F1). The fold drops parentheses, never a
+  // newline, so line i of a folded dump is line i of the dump.
+  const folded = [a, b].map(({ text }) => foldLeadingBooleanLists(text).split('\n'));
+  if (folded.some((lines) => lines.length !== a.lines.length))
+    throw new Error('SOURCE/REF non-CHECK difference');
+  let identityAt;
   for (let i = 0; i < a.lines.length; i++) {
+    if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i)) {
+      if (folded[0][i] !== folded[1][i]) throw new Error('SOURCE/REF non-CHECK difference');
+      if (a.lines[i] === b.lines[i]) continue;
+      const identity = (identityAt ??= dumpIdentities(a.text))(a.starts[i]);
+      if (!foldedBooleanLists.includes(identity)) foldedBooleanLists.push(identity);
+      continue;
+    }
     if (a.lines[i] === b.lines[i]) continue;
-    if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i))
-      throw new Error('SOURCE/REF non-CHECK difference');
     checkLinesDifferent++;
     // Once per constraint, however many of its lines differ and wherever they sit in its span.
     if (reported.has(a.checks.get(i))) continue;
@@ -407,7 +474,7 @@ export function checkSourceReference(source, reference, database) {
     checkConstraints.push({ schema, table, name });
   }
   // This structural allowance trusts PostgreSQL; it does NOT prove CHECK semantics.
-  const proof = { database, checkLinesDifferent, checkConstraints };
+  const proof = { database, checkLinesDifferent, checkConstraints, foldedBooleanLists };
   allowances.set(proof, { source, reference });
   return proof;
 }
@@ -809,10 +876,14 @@ INSERT INTO public.ledger_account
  (id, organization_id, account_type, account_code, purpose, currency, created_by)
 VALUES ('ACC_DRILL_WALLET', 'ORG-RESTORE-DRILL', 'LIABILITY', 'DRILL-WALLET', 'WALLET', 'IRR', 'restore-drill'),
  ('ACC_DRILL_ESCROW', 'ORG-RESTORE-DRILL', 'LIABILITY', 'DRILL-ESCROW', 'ESCROW', 'IRR', 'restore-drill');
+-- Current hold-funding constraints require a real transaction reference and matching journal.
+INSERT INTO public.transaction
+ (id, organization_id, transaction_type, status, gross_amount_minor, occurred_at, correlation_id, updated_at, created_by)
+VALUES ('TXN_DRILL', 'ORG-RESTORE-DRILL', 'MARKETPLACE_ORDER', 'HELD', 2500, now(), 'restore-drill', now(), 'restore-drill');
 INSERT INTO public.journal
- (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id)
-VALUES ('JRN_DRILL_TOPUP', 'ORG-RESTORE-DRILL', 'WALLET_TOP_UP', 'Synthetic restore fixture', now(), 'restore-drill', 'restore-drill'),
- ('JRN_DRILL_HOLD', 'ORG-RESTORE-DRILL', 'FUNDS_HELD', 'Synthetic restore hold', now(), 'restore-drill', 'restore-drill');
+ (id, organization_id, transaction_id, journal_type, description, posted_at, posted_by, correlation_id)
+VALUES ('JRN_DRILL_TOPUP', 'ORG-RESTORE-DRILL', NULL, 'WALLET_TOP_UP', 'Synthetic restore fixture', now(), 'restore-drill', 'restore-drill'),
+ ('JRN_DRILL_HOLD', 'ORG-RESTORE-DRILL', 'TXN_DRILL', 'FUNDS_HELD', 'Synthetic restore hold', now(), 'restore-drill', 'restore-drill');
 INSERT INTO public.ledger_entry
  (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
 VALUES
@@ -825,7 +896,7 @@ INSERT INTO public.wallet
 VALUES ('WLT_DRILL', 'ORG-RESTORE-DRILL', 'IRR', 'ACC_DRILL_WALLET', 9007199254740993, 9007199254738493, 2500, now());
 INSERT INTO public.wallet_hold
  (id, organization_id, wallet_id, amount_minor, currency, reference, reference_type, placed_journal_id, placed_at, placed_by)
-VALUES ('HLD_DRILL', 'ORG-RESTORE-DRILL', 'WLT_DRILL', 2500, 'IRR', 'DRILL', 'RESTORE_TEST', 'JRN_DRILL_HOLD', now(), 'restore-drill');
+VALUES ('HLD_DRILL', 'ORG-RESTORE-DRILL', 'WLT_DRILL', 2500, 'IRR', 'TXN_DRILL', 'TRANSACTION', 'JRN_DRILL_HOLD', now(), 'restore-drill');
 COMMIT;
 `;
 
