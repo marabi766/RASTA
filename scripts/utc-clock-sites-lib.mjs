@@ -1885,79 +1885,156 @@ export function schemaDisagreements(repository, perService) {
 }
 
 // One claim policy, independent of clocks, replay lifetime and reviewed exemptions.
-const unknownAt = (t) => t?.type === 'placeholder' && t.value === 'text';
-// FU-325: the tokens every locking picker needs. No list of statement heads: a text is read as
-// SQL because of what it holds, wherever and however it is quoted.
-const mayLock = (text) => {
+const unknownAt = (t) => (t?.type === 'placeholder' && t.value === 'text') || t?.unterminated === true;
+const lockAt = (tokens, i) => isWord(tokens[i], 'for') && isWord(tokens[i + 1], 'update', 'no', 'share', 'key');
+const STATEMENT =
+  /^(?:select|update|delete|insert|merge|create|alter|drop|do|begin|declare)\b|^values\s*\(|^with\s+(?:recursive\s+)?(?:[\w$]+|"[^"]+")\s+as\b/i;
+/**
+ * A text read as executed: for what it holds (FU-325: the tokens every locking picker needs) or,
+ * as origin/main did, for its statement head. Either only adds texts: none is left unread (r1 F1).
+ */
+const executed = (text) => {
+  if (STATEMENT.test(stripComments(text).trim())) return true;
   if (!/\b(?:select|table)\b/i.test(text) || !/\bfor\b/i.test(text)) return false;
   const tokens = lex(text);
   // A fragment that starts or ends inside a quote hides its tokens from the lexer: read as text.
-  return tokens.some((t, i) => isWord(t, 'for') && isWord(tokens[i + 1], 'update', 'no', 'share', 'key')) ||
+  return tokens.some((_, i) => lockAt(tokens, i)) ||
     (tokens.some((t) => t.unterminated) && /\bfor(?:\s|--[^\n\r]*|\/\*[^]*?\*\/)+(?:update|share|no|key)\b/i.test(text));
 };
 
+/** The last token of a type that keeps a text what it is (no length, no array), or -1. */
+function textType(tokens, p) {
+  const at = nameOf(tokens[p]) === 'pg_catalog' && isOp(tokens[p + 1], '.') ? p + 2 : p;
+  return isWord(tokens[at], 'text', 'varchar') && !['(', '[', '.'].some((op) => isOp(tokens[at + 1], op)) ? at : -1;
+}
+
 /**
- * `strict`: the text is executed, or may hold a picker. Otherwise it is data, read only for the
- * strings inside it (an escape may spell the words one quoting level further down).
+ * PR #1082 r1 F2: the text operand at tokens[p], through the syntax that leaves a text as it is
+ * (a grouping, CAST(… AS text), ::text, COLLATE), or null. `values` null: it cannot be decoded.
+ */
+function textOperand(tokens, p, constants) {
+  const t = tokens[p];
+  const cast = isWord(t, 'cast') && isOp(tokens[p + 1], '(');
+  // U&'…' is three tokens to the lexer and one constant to PostgreSQL.
+  const at = isWord(t, 'u') && isOp(tokens[p + 1], '&') && tokens[p + 2]?.type === 'string' ? p + 2 : p;
+  // A name that is qualified or called is not the constant of that name.
+  const known = ['.', '('].some((op) => isOp(tokens[p + 1], op)) || isOp(tokens[p - 1], '.') ? undefined : constants.get(nameOf(t));
+  let found = null;
+  if (tokens[at]?.type === 'string' && !tokens[at].unterminated)
+    found = { end: at, values: stringValues(tokens, at), kept: [] };
+  else if (known !== undefined) found = { end: p, values: known, kept: [] };
+  else if (cast || (isOp(t, '(') && isGrouping(tokens[p - 1]))) {
+    const inner = textExpression(tokens, p + (cast ? 2 : 1), constants);
+    const typed = cast && inner && isWord(tokens[inner.end + 1], 'as') ? textType(tokens, inner.end + 2) : -1;
+    const last = cast ? typed : (inner?.end ?? -1);
+    if (last >= 0 && isOp(tokens[last + 1], ')')) found = { ...inner, end: last + 1 };
+  }
+  for (; found;) {
+    const type = isOp(tokens[found.end + 1], '::') ? textType(tokens, found.end + 2) : -1;
+    if (type >= 0) found.end = type;
+    else if (isWord(tokens[found.end + 1], 'collate') && nameOf(tokens[found.end + 2]) !== null) {
+      found.end += 2;
+      while (isOp(tokens[found.end + 1], '.') && nameOf(tokens[found.end + 2]) !== null) found.end += 2;
+    } else break;
+  }
+  return found;
+}
+
+/**
+ * The complete text expression at tokens[p]: operands joined by `||` (or adjacent constants). An
+ * operand that is not a text constant is UNKNOWN_SQL, and its tokens are `kept` to be read too.
+ * PR #1082 r1 F3: more readings than the budget is `values` null, as undecodable: never empty text.
+ */
+function textExpression(tokens, p, constants) {
+  let found = textOperand(tokens, p, constants);
+  while (found) {
+    const joined = isOp(tokens[found.end + 1], '||');
+    const at = found.end + (joined ? 2 : 1);
+    let next = joined || tokens[at]?.type === 'string' ? textOperand(tokens, at, constants) : null;
+    if (!next && !(joined && tokens[at])) break;
+    if (!next) {
+      let end = isOp(tokens[at], '(') ? closing(tokens, at) : at;
+      while (isOp(tokens[end + 1], '(') || isOp(tokens[end + 1], '::') || isOp(tokens[end + 1], '.'))
+        end = isOp(tokens[end + 1], '(') ? closing(tokens, end + 1) : end + 2;
+      // quote_ident(x) is one identifier and quote_literal(x) one constant: a value, as a bound one.
+      const quotes = isWord(tokens[at], 'quote_ident', 'quote_literal', 'quote_nullable') &&
+        isOp(tokens[at + 1], '(') && isOp(tokens[end + 1], '||');
+      next = { end, values: [quotes ? PLACEHOLDER(0) : UNKNOWN_SQL], kept: tokens.slice(at, end + 1) };
+    }
+    const [a, b] = [found.values, next.values];
+    const values = a && b && a.length * b.length <= 64 ? [...new Set(a.flatMap((x) => b.map((y) => x + y)))] : null;
+    found = { end: next.end, values, kept: [...found.kept, ...next.kept] };
+  }
+  return found;
+}
+
+/** PL/pgSQL `name CONSTANT type := text;`: what the name spells, when nothing else may set it. */
+function textConstants(tokens) {
+  const constants = new Map();
+  tokens.forEach((t, k) => {
+    const name = isWord(t, 'constant') ? nameOf(tokens[k - 1]) : null;
+    if (name === null) return;
+    let at = k + 1;
+    while (tokens[at] && !isOp(tokens[at], ';') && !(isOp(tokens[at], ':') && isOp(tokens[at + 1], '='))) at += 1;
+    const found = isOp(tokens[at], ':') ? textExpression(tokens, at + 2, constants) : null;
+    const onlyRead = tokens.every((u, j) => nameOf(u) !== name || j === k - 1 ||
+      (nameOf(tokens[j + 1]) === null && !isOp(tokens[j + 1], ':')));
+    if (found && isOp(tokens[found.end + 1], ';') && onlyRead) constants.set(name, found.values);
+  });
+  return constants;
+}
+
+/**
+ * `strict`: the text is executed. Otherwise nothing proves what it is: it is read for the
+ * strings inside it (an escape may spell the words one quoting level further down) and as a
+ * piece of a text composed where this reader does not follow (a call, a variable, another
+ * file): what its parentheses leave open is unknown text, judged where it stands (r1 F1, F2).
  */
 export function claimSubqueryProblems(sql, seen = new Set(), strict = true) {
   if (seen.has(strict + sql)) return [];
   seen.add(strict + sql);
   const tokens = lex(sql);
-  const valuesAt = (i) => tokens[i].values ?? stringValues(tokens, i);
+  // FU-325: compose BEFORE classifying. A split keyword is one keyword again.
+  const constants = textConstants(tokens);
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].type !== 'string') continue;
-    // FU-325: compose BEFORE classifying: `'a' || 'b'`, adjacent constants, and an operand that
-    // is not a constant as unknown text. A split keyword is one keyword again.
-    let end = i, values = valuesAt(i);
-    for (;;) {
-      let at = isOp(tokens[end + 1], '||') && tokens[end + 2] ? end + 2 : end + 1;
-      const constant = tokens[at]?.type === 'string';
-      if (!constant && at === end + 1) break;
-      // quote_ident(x) is one identifier and quote_literal(x) one constant: a value, as a bound one.
-      const quotes = isWord(tokens[at], 'quote_ident', 'quote_literal', 'quote_nullable') && isOp(tokens[at + 1], '(');
-      while (!constant && (isOp(tokens[at + 1], '(') || isOp(tokens[at + 1], '::') || isOp(tokens[at + 1], '.')))
-        at = isOp(tokens[at + 1], '(') ? closing(tokens, at + 1) : at + 2;
-      const next = constant ? valuesAt(at) : [quotes && isOp(tokens[at + 1], '||') ? PLACEHOLDER(0) : UNKNOWN_SQL];
-      values = values && next && values.length * next.length <= 64
-        ? [...new Set(values.flatMap((a) => next.map((b) => a + b)))] : null;
-      end = at;
-    }
-    if (end > i) tokens.splice(i, end - i + 1, { type: 'string', value: '', values, unterminated: tokens[end].unterminated });
+    const found = textExpression(tokens, i, constants);
+    if (found && found.end > i)
+      tokens.splice(i, found.end - i + 1, { type: 'string', value: '', composed: found.values }, ...found.kept);
   }
+  const valuesAt = (i) => ('composed' in tokens[i] ? tokens[i].composed : stringValues(tokens, i));
   const refuse = [
     'FU-324: locking subquery or unreadable SQL; use WITH picked AS MATERIALIZED (...) UPDATE ... FROM picked (DELETE ... USING picked)',
   ];
-  if (strict) {
-    if (tokens.some((t) => t.unterminated || t.unreadable)) return refuse;
-    let depth = 0;
-    for (const t of tokens) {
-      if (isOp(t, '(')) depth++;
-      if (isOp(t, ')') && --depth < 0) return refuse;
-    }
-    if (depth !== 0) return refuse;
+  let depth = 0;
+  for (const [i, t] of tokens.entries()) {
+    if (isOp(t, '(')) depth += 1;
+    if (!isOp(t, ')') || (depth -= 1) >= 0) continue;
+    // A `)` whose `(` is not here closes a group begun in unknown text: the lock clause of a picker?
+    if (strict || tokens.slice(0, i).some((_, k) => lockAt(tokens, k))) return refuse;
+    depth = 0;
   }
+  if (strict && (depth !== 0 || tokens.some((t) => t.unterminated || t.unreadable))) return refuse;
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].type === 'string') {
       // Every string, in every quoting: a routine body, DO, dynamic SQL, data. One that cannot be
       // decoded (UESCAPE, too many readings) is refused in data too: it may spell anything.
       const values = valuesAt(i);
       if (!values && !tokens[i].unterminated) return refuse;
+      const body = /^\$/.test(tokens[i].value) || (values ?? []).some(executed);
       for (const value of values ?? [])
-        if (claimSubqueryProblems(value, seen, mayLock(value)).length) return refuse;
+        if (claimSubqueryProblems(value, seen, body).length) return refuse;
     }
-    // Unknown text is judged where it stands, also in a text that is otherwise data.
-    if (!(strict || sql.includes(UNKNOWN_SQL)) || !isOp(tokens[i], '(')) continue;
+    if (!isOp(tokens[i], '(')) continue;
     const end = closing(tokens, i);
     const body = tokens.slice(i + 1, end);
+    // Unknown text is judged where it stands: an operand, or what follows an unclosed group.
+    const unknown = end === tokens.length || body.some(unknownAt);
     const selects = body.some((t) => isWord(t, 'select', 'table'));
-    const locks = body.some(
-      (t, j) => unknownAt(t) || (isWord(t, 'for') && isWord(body[j + 1], 'update', 'no', 'share', 'key')),
-    );
-    // Unknown text may be the lock clause, or (where a set or a table is read) the whole picker.
-    const whole = unknownAt(body.find((t) => !isOp(t, '('))) &&
+    const locks = body.some((_, j) => lockAt(body, j));
+    // It may be the lock clause, the SELECT, or (where a set or a table is read) the whole picker.
+    const whole = (end === tokens.length || unknownAt(body.find((t) => !isOp(t, '(')))) &&
       isWord(tokens[i - 1], 'in', 'any', 'all', 'some', 'exists', 'array', 'from', 'using', 'join', 'lateral');
-    if (!(selects && locks) && !whole) continue;
+    if (!(selects && (locks || unknown)) && !(locks && unknown) && !whole) continue;
     // CTEs containing row locks cannot be inlined by PostgreSQL. A derived
     // FROM/USING/JOIN or membership picker has no such evaluation boundary.
     const as = isWord(tokens[i - 1], 'materialized') ? i - 2 : i - 1;
@@ -1989,35 +2066,39 @@ function claimFileProblems(repository) {
       // FU-325: literal parts are composed first (`'a' + 'b'`, `${'a'}b`); any other part is a
       // bound value here: the sink rule of utc-clock-sinks.mjs is what proves a complete text.
       const concat = (n) => ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken;
+      // PR #1082 r1 F2: syntax that leaves its operand the text it is.
+      const transparent = (n) => ts.isParenthesizedExpression(n) || ts.isAsExpression(n) ||
+        ts.isSatisfiesExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
       const textOf = (n) =>
-        ts.isParenthesizedExpression(n) ? textOf(n.expression)
+        transparent(n) ? textOf(n.expression)
           : concat(n) ? textOf(n.left) + textOf(n.right)
             : ts.isTemplateExpression(n)
               ? n.head.text + n.templateSpans.map((s) => textOf(s.expression) + s.literal.text).join('')
               : ts.isStringLiteralLike(n) ? n.text : PLACEHOLDER(0);
       for (const { node } of sqlLiterals(ast)) {
         let top = node;
-        while (concat(top.parent) || ts.isParenthesizedExpression(top.parent) || ts.isTemplateSpan(top.parent))
+        while (concat(top.parent) || transparent(top.parent) || ts.isTemplateSpan(top.parent))
           top = ts.isTemplateSpan(top.parent) ? top.parent.parent : top.parent;
         composed.set(top, { node: top, text: textOf(top) });
       }
     }
+    // PR #1082 r1 F1: no text is dropped for what it seems to hold. A literal or a word that is
+    // not read as executed is still opened, string by string, and judged as a piece of a text.
     const texts = /\.[cm]?[jt]sx?$/.test(local)
-      ? [...composed.values()].filter(({ text }) => mayLock(text))
+      ? [...composed.values()]
       : /\.sql$/.test(local)
-        ? [{ text: source }]
+        ? [{ text: source, strict: true }]
         : [...source.matchAll(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$/gm)]
-            .map((m) => ({ text: m[3] }))
+            .map((m) => ({ text: m[3], strict: true }))
             .concat(
               parseCommands(source).commands.flatMap(({ words }) => words)
-                .map(({ value }) => ({ text: value.replace(/^[A-Za-z_]\w*=/, '') }))
-                .filter(({ text }) => mayLock(text)),
+                .map(({ value }) => ({ text: value.replace(/^[A-Za-z_]\w*=/, '') })),
             );
-    for (const { text, node } of texts) {
+    for (const { text, node, strict } of texts) {
       const line = node
         ? node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1
         : 1;
-      for (const problem of claimSubqueryProblems(text))
+      for (const problem of claimSubqueryProblems(text, new Set(), strict || executed(text)))
         problems.push(`${local}:${line}: ${problem}`);
     }
   }

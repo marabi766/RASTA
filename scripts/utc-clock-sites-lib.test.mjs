@@ -2269,6 +2269,120 @@ test('FU-324 cannot be waived by a matching reviewed DO block', () => {
   }
 });
 
+// PR #1082 r1 (F1–F3): the review's probes and their cross-product, quoting × wrapper × entry
+// point. Split 1 is the review's: its first piece alone is an unbalanced statement, which
+// origin/main refused. The pieces of split 2 say nothing alone: only composing them finds it.
+const SPLITS = [
+  ['DELETE FROM task WHERE id IN (SELECT id FROM task LIMIT 1 FOR UP', '', 'DATE SKIP LOCKED)'],
+  ['EXPLAIN DELETE FROM task WHERE id = (SE', 'LECT id FROM task LIMIT 1 FOR UP', 'DATE SKIP LOCKED)'],
+];
+const QUOTINGS = [quoted, (s) => `E${quoted(s).replace('FOR', '\\x46OR')}`,
+  (s) => `U&${quoted(s).replace('FOR', '\\0046OR')}`, (s) => `$q$${s}$q$`];
+const WRAPPERS = [
+  (a, b, c) => `${a}::text || ${b}::pg_catalog.varchar || ${c}`,
+  (a, b, c) => `(${a}) || ((${b}) || ${c})`,
+  (a, b, c) => `CAST(${a} AS text) || CAST(${b} AS pg_catalog.text) || CAST(${c} AS varchar)`,
+  (a, b, c) => `${a} COLLATE "C" || ${b} COLLATE pg_catalog."C" || ${c}`,
+  (a, b, c) => `CAST((${a})::text || ${b} AS varchar) COLLATE "C" || (${c})`,
+];
+const TS_WRAPPERS = [
+  (a, b, c) => `(${a} as string) + (${b} as string) + (${c} as const)`,
+  (a, b, c) => `(${a} satisfies string) + (${b} satisfies string) + ${c}`,
+  (a, b, c) => `${a}! + ${b}! + ${c}`,
+  (a, b, c) => `<string>${a} + <string>${b} + ${c}`,
+  (a, b, c) => `\`\${${a} as string}\${(${b})!}\${<string>${c}}\``,
+];
+const doBody = (expression) => `$do$BEGIN EXECUTE ${expression}; END;$do$`;
+const WRAPPED = SPLITS.flatMap((split) =>
+  QUOTINGS.flatMap((quote) => WRAPPERS.map((wrap) => doBody(wrap(...split.map(quote))))));
+const PROBE = SPLITS[0].join('');
+const QUOTED = [quoted(PROBE), QUOTINGS[1](PROBE), QUOTINGS[2](PROBE), `${quoted(SPLITS[0][0])} || ${quoted(SPLITS[0][2])}`,
+  quoted(PROBE.replace('FOR UP', 'FOR /* c */ UP'))].map(doBody);
+const chain = (n) => Array(n).fill(String.raw`'/* \n */ '`).join(' || ');
+const js = (text) => `spawnSync('psql', ['-X', '-c', ${JSON.stringify(text)}]);`;
+const sh = (text) => `psql -X -c '${text.replaceAll("'", `'\\''`)}'\n`;
+const ENTRY_POINTS = {
+  'scripts/r1/N.sql': (text) => text,
+  'services/x-service/prisma/migrations/2_r1_N/migration.sql': (text) => text,
+  'scripts/r1/N.mjs': js,
+  'services/x-service/src/r1/N.ts': (text) => `export const sql = ${JSON.stringify(text)};`,
+  'scripts/r1/N.sh': sh,
+};
+let r1;
+/** One scan of every entry point (a scan takes seconds): the `path:line`s it must refuse, and those it did. */
+function r1Scan() {
+  if (r1) return r1;
+  const files = {}, expected = { F1: [], F2: [], F3: [] }, reviewed = [];
+  const add = (finding, path, text) => { files[path] = text; expected[finding].push(`${path}:1`); };
+  const everywhere = (finding, name, body) => {
+    for (const [path, wrap] of Object.entries(ENTRY_POINTS)) add(finding, path.replace('N', name), wrap(`DO ${body};`));
+    reviewed.push({ service: 'x-service', migration: `2_r1_${name}`, sha256: contentHash(body) });
+  };
+  WRAPPED.forEach((body, n) => everywhere('F2', `w${n}`, body));
+  everywhere('F3', 'budget', doBody(`${chain(6)} || ${quoted(PROBE)}`));
+  // The review's text, and one with no statement head: only opening its string finds the SQL.
+  for (const [n, body] of QUOTED.entries()) for (const [name, text] of [['do', `DO ${body};`], ['call', `CALL run(${body});`]]) {
+    for (const ext of ['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts']) add('F1', `scripts/r1/${name}${n}.${ext}`, js(text));
+    for (const ext of ['sh', 'bash']) add('F1', `scripts/r1/${name}${n}.${ext}`, sh(text));
+  }
+  const parts = SPLITS.flatMap((split) => TS_WRAPPERS.map((wrap) => wrap(...split.map((s) => JSON.stringify(s)))));
+  files['scripts/r1/wrappers.ts'] = parts.map((part) => `run(${part});\n`).join('');
+  expected.F2.push(...parts.map((_, n) => `scripts/r1/wrappers.ts:${n + 1}`));
+  // Ordinary data and accepted SQL in the same places: read, and not refused.
+  files['scripts/r1/fine.ts'] = `run(('EXPLAIN SELECT (' as string) + n + ')', 'see (the list' as string, <string>'(for update)');\n`;
+  files['scripts/r1/fine.sh'] = `echo 'waiting for update (1 of 2)' "$(date)"\n${sh(`DO ${doBody(`'CREATE INDEX i ON t (' || col || ')'`)};`)}`;
+  files['scripts/r1/fine.sql'] = `SELECT CAST('a' AS text) || ('b')::text COLLATE "C" || U&'d\\0061ta' || x, ${chain(5)};`;
+  REVIEWED_DO_BLOCKS.push(...reviewed);
+  try {
+    const found = scanOf('x-service', 'CREATE TABLE task (id text);', '', files);
+    assert.doesNotMatch(found.join(), /DDL or SQL in a DO block/);
+    const refused = found.filter((p) => /locking subquery/.test(p)).map((p) => p.split(': ')[0]);
+    r1 = { missed: (finding) => expected[finding].filter((p) => !refused.includes(p)),
+      unexpected: refused.filter((p) => !Object.values(expected).flat().includes(p)) };
+  } finally { REVIEWED_DO_BLOCKS.splice(-reviewed.length); }
+  return r1;
+}
+
+test('PR #1082 r1 F1: a text is opened before it is judged, never dropped for what it seems to hold', () => {
+  assert.deepEqual(r1Scan().missed('F1'), []);
+  assert.deepEqual(r1Scan().unexpected, []);
+});
+
+test('PR #1082 r1 F2: a text is composed through the syntax that leaves it the text it is', () => {
+  for (const body of WRAPPED) assert.match(claimSubqueryProblems(`DO ${body};`).join(), /FU-324/, body);
+  assert.deepEqual(r1Scan().missed('F2'), []);
+  // Composed where this reader does not follow: a piece is judged with unknown text where it ends,
+  // and a piece origin/main read for its statement head is still read so.
+  for (const sql of [
+    `SELECT concat('EXPLAIN DELETE FROM task WHERE id = (SE', 'LECT id FROM task FOR UPDATE)')`,
+    `SELECT format('%s%s', 'EXPLAIN DELETE FROM task WHERE id IN (', picker)`,
+    `SELECT concat('EXPLAIN DELETE FROM task WHERE id = (SELECT id FROM task ', lock_clause, ')')`,
+    `SELECT upper('EXPLAIN DELETE FROM task WHERE id = (SELECT id FROM task FOR UP')::bpchar || 'DATE)'`,
+    `SELECT concat('DELETE FROM task WHERE id = (SE', rest)`,
+    // An operand that is not a constant is read too; a name is a constant only where nothing else may set it.
+    `DO ${doBody(`'x' || lower(${quoted(`EXPLAIN ${PROBE}`)})`)}`,
+    `DO $$DECLARE a CONSTANT text := ${quoted(SPLITS[1][0])}; b CONSTANT text := ${quoted(SPLITS[1][1])}; BEGIN EXECUTE a || b || 'DATE)'; END$$`,
+    `DO $$DECLARE p CONSTANT text := 'SELECT 1'; BEGIN DECLARE p text := picker; BEGIN EXECUTE 'EXPLAIN DELETE FROM task WHERE id IN (' || p || ')'; END; END$$`,
+    `DO $$DECLARE p CONSTANT text := '(x'; BEGIN EXECUTE r.p || ' FOR UPDATE)'; END$$`,
+  ])
+    assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+  for (const sql of [
+    `DO $$DECLARE p CONSTANT text := 'SELECT id FROM task'; BEGIN EXECUTE 'SELECT count(*) FROM (' || p || ') s'; EXECUTE p || ' LIMIT 1'; END$$`,
+    `SELECT concat('see (the list', x), '(for update)', upper('a (b')::bpchar || 'c)', u & 'x' FROM t WHERE id IN ('a') AND b = ANY (('{a}')::text[])`,
+    `DO ${doBody(`'WITH picked AS MATERIALIZED (SELECT id FROM ' || quote_ident(t) || (' LIMIT 1 FOR UPDATE)')::text || ' DELETE FROM task USING picked'`)}`,
+  ])
+    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+});
+
+test('PR #1082 r1 F3: a text with more readings than the budget is refused, never read as empty', () => {
+  for (const n of [5, 6, 7, 8, 12])
+    assert.match(claimSubqueryProblems(`DO ${doBody(`${chain(n)} || ${quoted(PROBE)}`)};`).join(), /FU-324/, String(n));
+  assert.deepEqual(r1Scan().missed('F3'), []);
+  // Whatever it holds, and through every composition: nothing proves what was not read.
+  for (const sql of [`SELECT ${chain(8)}`, `SELECT ${quoted(`a note: ${chain(8)}`)}`, `SELECT CAST((${chain(8)})::text AS text) COLLATE "C" || 'x'`, `DO ${doBody(`a || (${chain(8)})`)}`])
+    assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+  assert.deepEqual(claimSubqueryProblems(`DO ${doBody(`${chain(5)} || x`)}`), []);
+});
 
 test('FU-324 opaque inventory is exact, reasoned, and cannot waive readable SQL', () => {
   const path = 'scripts/claim.mjs', source = 'db.$queryRawUnsafe(runtime);';
