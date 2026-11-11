@@ -5,7 +5,7 @@
   "description": "Source of truth for who you are and what role you hold in which organization.",
   "main": "dist/main.js",
   "scripts": {
-    "build": "prisma generate && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",
+    "build": "node ../../scripts/prisma-generate.mjs && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",
     "clean": "rimraf dist .turbo",
     "dev": "prisma generate && node -r @swc-node/register -r ./dev/telemetry.ts --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
@@ -16,7 +16,7 @@
     "test:integration": "jest --selectProjects integration --runInBand",
     "test:aggregation-stress": "jest --selectProjects aggregation-stress --runInBand",
     "test:keycloak-live": "jest --selectProjects keycloak-live --runInBand",
-    "db:generate": "prisma generate",
+    "db:generate": "node ../../scripts/prisma-generate.mjs",
     "db:migrate": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate deploy",
     "db:migrate:dev": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate dev",
     "db:seed": "node --import @swc-node/register/esm-register --env-file-if-exists=../../.env prisma/seed.ts",

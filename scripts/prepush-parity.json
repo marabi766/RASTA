@@ -242,6 +242,14 @@
     {
       "job": "quality-guards",
       "ci": {
+        "name": "Prisma generation retries only transient network errors",
+        "run": "node --test scripts/prisma-generate.test.mjs"
+      },
+      "reason": "Slice C: deterministic generator retry and wiring regression; B executes only selection and parity suites."
+    },
+    {
+      "job": "quality-guards",
+      "ci": {
         "name": "Prepush affected-package selection",
         "run": "pnpm run test:prepush-scope"
       },

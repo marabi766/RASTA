@@ -75,6 +75,9 @@ jobs:
       # Prisma clients are generated artefacts that typecheck depends on.
       - run: pnpm run db:generate
 
+      - name: Prisma generation retries only transient network errors
+        run: node --test scripts/prisma-generate.test.mjs
+
       - name: Prepush affected-package selection
         run: pnpm run test:prepush-scope
 
