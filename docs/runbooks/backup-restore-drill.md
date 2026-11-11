@@ -397,13 +397,16 @@ to `main`. A missing or unclassifiable branch, failed diff, or missing selection
 runs it too. The always-running verdict rejects a skipped, cancelled or failed
 drill on a train; a successful separate workflow cannot satisfy this CI gate.
 
-Ordinary PRs run it when paths match `DRILL_PATHS` in
+Ordinary PRs run it when paths match `DRILL_PATHS` or install inputs derived from
+workspace globs and configured patch references in
 `scripts/backup-restore-drill-scope.mjs`: any Prisma schema or migration, service
 Prisma directories (including seeds), Compose YAML and PostgreSQL bootstrap,
 the drill scripts/workflows, Prisma wrappers, published env and database-URL
 wiring, service package/TypeScript configuration, workspace/package-manager/build
 inputs, shared seed dependencies, and the organization/economic code the seeds
-import. Other proven ordinary PRs skip it. The guard test pins the exact list;
+import. Only classified documentation paths outside those inputs may skip it;
+unclassified paths or unsupported install configuration run it. The guard independently
+computes install coverage using the workspace configuration and tracked package-manager files;
 renames are treated as a deletion plus addition and the complete Git diff has no
 GitHub paths-filter/API truncation limit.
 
@@ -411,9 +414,12 @@ The same workflow runs nightly on `main` at **03:17 UTC** (`17 3 * * *`), includ
 the original monthly date (the 1st), to catch drift outside that list within a day.
 Dispatch remains available through Actions → "Backup restore drill" → Run workflow,
 or `gh workflow run backup-drill-monthly.yml`. There is one drill step list for
-all entry points. Each invocation is isolated; a running CI/drill is never
-automatically cancelled, so teardown finishes. New PR runs may replace pending
-CI runs. The full job has a 30-minute timeout and the command a 20-minute timeout.
+all entry points. Each invocation is isolated. Superseded PR runs retain CI
+cancellation. The `always()` recovery step attempts teardown after cancellation;
+the hosted runner VM is discarded even if cancellation interrupts recovery.
+The full job has a 30-minute timeout: checkout, pnpm setup and Node setup get
+one minute each, install three, drill twenty, summary one and recovery two.
+The combined 29-minute budget reserves one minute for runner overhead.
 
 The library and negative PostgreSQL comparison tests still run separately in
 `integration-backup-drill` (10-minute job / 5-minute test step); these are not the

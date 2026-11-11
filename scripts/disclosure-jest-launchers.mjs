@@ -21,7 +21,7 @@ export const JEST_LAUNCHERS = {
       'Node tests spawn curl/Git and the pinned Gitleaks binary, plus the exact pinned Secret scan shell in isolated Git fixtures; downloads are mocked except a loopback curl probe. No Jest, pnpm or Turbo child.',
     sha256: {
       'scripts/ci-tool-download.test.mjs':
-        '19debe7017536f7e351684025317428786e98473526e8e64a198e1c496b44ad5',
+        'c479a8bfc05a0ddcb4d374be959032b286b26bdd38d44f843a57215feee2f32e',
       'scripts/ci-tool-download.mjs':
         '0e9a7d8bcbf35ae61d822c0e4af8f4d8d94960195131145e540190ed4e23607b',
       'scripts/fixture-git-env.mjs':

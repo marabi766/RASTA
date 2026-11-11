@@ -1027,15 +1027,19 @@ fixed-point time). The PG suite prints that extra time separately in local and C
 logs. The comparison-suite budgets remain **10 minutes per job / 5 minutes for
 its PG test step**; main integration job/step budgets are unchanged. The separate
 full 16-database drill is part of the **same `ci.yml` run**: every `mq/train-*` PR
-unconditionally, every push to `main`, and ordinary PRs matching the exact
-`DRILL_PATHS` list in `scripts/backup-restore-drill-scope.mjs` (schemas/migrations,
+unconditionally, every push to `main`, and ordinary PRs matching
+`DRILL_PATHS` or configuration-derived install inputs in
+`scripts/backup-restore-drill-scope.mjs` (schemas/migrations,
 seeds, Compose/PostgreSQL bootstrap and pins, drill workflows/scripts, Prisma
 wrappers, env/database-URL wiring and seed/build dependencies). Only proven
-ordinary PRs outside that list skip it; unknown metadata or unreadable paths run
-it. An always-running verdict makes skip-on-train red. It starts beside existing
+ordinary documentation PRs outside those inputs skip it; unclassified paths,
+unsupported install configuration or unknown metadata run it. An always-running
+verdict makes skip-on-train red. It starts beside existing
 jobs, never after the test/build gates, with a 30-minute job / 20-minute command
-limit. Running CI/drill invocations are not automatically cancelled; pending PR
-runs may be superseded so teardown can finish. The shared workflow also runs
+limit. Setup, drill, summary and recovery step budgets total 29 minutes, reserving
+one minute for runner overhead. Superseded PR runs retain CI cancellation; recovery
+is attempted with `always()`, and hosted runner VMs are discarded after
+cancellation. The shared workflow also runs
 nightly on `main` at 03:17 UTC (including the monthly 1st) and on dispatch, using
 one step list. See [the runbook](runbooks/backup-restore-drill.md#ci-and-scheduled-full-drill)
 for inputs, synthetic-data boundaries, cleanup and separate wall-time reporting. Runtime tenant isolation is not

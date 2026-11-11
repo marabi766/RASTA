@@ -2,7 +2,7 @@
 // migration and seed), prisma.mjs and the seeds' repository imports. Deliberately
 // cover whole input families, including future services and bootstrap scripts.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,20 +22,74 @@ export const DRILL_PATHS = [
   'scripts/database-services.mjs',
   '.env*',
   'services/*/.env*',
-  'services/*/package.json',
   'services/*/tsconfig*.json',
   // Seeds import config/nest-common; the build includes their workspace dependencies.
   'packages/**',
   // The organization seed uses its repository/service; economic seeds the cutover.
   'services/organization-service/src/**',
   'services/economic-service/src/reward/evaluation-cutover.ts',
-  'package.json',
-  'pnpm-lock.yaml',
-  'pnpm-workspace.yaml',
-  '.npmrc',
   'turbo.json',
   'tsconfig*.json',
 ];
+
+// Scope runs before install. Read only the supported block forms; any new YAML
+// representation refuses narrowing. Tests independently use the full YAML reader.
+export function installPaths(source = readFileSync('pnpm-workspace.yaml', 'utf8')) {
+  if (/\b(?:file|link):/.test(source)) throw Error('Unclassified local install input');
+  const blocks = new Map();
+  const knownKeys = new Set([
+    'packages',
+    'patchedDependencies',
+    'catalog',
+    'allowBuilds',
+    'overrides',
+    'blockExoticSubdeps',
+    'minimumReleaseAge',
+    'minimumReleaseAgeStrict',
+    'minimumReleaseAgeExclude',
+    'trustPolicy',
+    'trustPolicyExclude',
+  ]);
+  let key;
+  for (const line of source.split(/\r?\n/)) {
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    if (line.includes('\t')) throw Error('Unsupported workspace indentation');
+    if (!line.startsWith(' ')) {
+      if (!knownKeys.has(/^([A-Za-z][A-Za-z0-9]*):/.exec(line)?.[1]))
+        throw Error('Unclassified workspace setting');
+      const header = /^([A-Za-z][A-Za-z0-9]*):(?:\s+#.*)?$/.exec(line);
+      key = header?.[1];
+      if (/^['"]?(packages|patchedDependencies)['"]?:/.test(line) && !key)
+        throw Error('Unsupported install input configuration');
+      if (key) {
+        if (blocks.has(key)) throw Error('Duplicate workspace key');
+        blocks.set(key, []);
+      }
+    } else if (key) blocks.get(key).push(line);
+  }
+  const packages = blocks.get('packages');
+  if (!packages?.length) throw Error('Missing workspace globs');
+  const scalar = (value) => {
+    const plain = value.replace(/^(['"])(.*)\1$/, '$2');
+    if (
+      !/^[A-Za-z0-9_@./*+-]+$/.test(plain) ||
+      plain.split('/').some((part) => ['', '.', '..'].includes(part))
+    )
+      throw Error('Unsupported install path');
+    return plain;
+  };
+  const paths = packages.map((line) => {
+    const item = /^ {2}- (.+?)(?:\s+#.*)?$/.exec(line);
+    if (!item) throw Error('Unsupported workspace glob');
+    return `${scalar(item[1])}/package.*`;
+  });
+  for (const line of blocks.get('patchedDependencies') ?? []) {
+    const entry = /^ {2}[^:]+: (.+?)(?:\s+#.*)?$/.exec(line);
+    if (!entry) throw Error('Unsupported patch reference');
+    paths.push(scalar(entry[1]));
+  }
+  return [...paths, '**/package.*', '**/.npmrc', '**/*pnpm*', '**/.yarnrc*'];
+}
 
 const match = (path, pattern) => {
   const expression = pattern
@@ -70,9 +124,17 @@ export function ordinaryPr(eventName, event, repository) {
   );
 }
 
-export function shouldRun(eventName, event, repository, diff) {
+export function shouldRun(eventName, event, repository, diff, inputs = installPaths) {
   if (!ordinaryPr(eventName, event, repository)) return true;
   try {
+    // Hooks and legacy root pnpm settings can read arbitrary repository files.
+    if (
+      ['.pnpmfile.cjs', '.pnpmfile.mjs'].some((path) => existsSync(path)) ||
+      /pnpmfile/.test(readFileSync('.npmrc', 'utf8')) ||
+      JSON.parse(readFileSync('package.json', 'utf8')).pnpm
+    )
+      return true;
+    const patterns = [...DRILL_PATHS, ...inputs()];
     const paths = diff(event.pull_request.base.sha, event.pull_request.head.sha);
     if (!Array.isArray(paths) || !paths.length) return true;
     return paths.some(
@@ -81,7 +143,10 @@ export function shouldRun(eventName, event, repository, diff) {
         !path ||
         path.startsWith('/') ||
         path.split('/').includes('..') ||
-        DRILL_PATHS.some((pattern) => match(path, pattern)),
+        patterns.some((pattern) => match(path, pattern)) ||
+        // Only ordinary documentation has a known irrelevant classification.
+        // A patch may itself live under docs, so install inputs take precedence.
+        !/^docs\/[A-Za-z0-9_./-]+\.md$/.test(path),
     );
   } catch {
     return true;

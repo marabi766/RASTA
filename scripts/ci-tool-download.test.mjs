@@ -434,10 +434,10 @@ process.exit(r.status ?? 1);
     },
   );
 }
-test('push ranges stay distinct; running PR drills finish while pending PR runs may be superseded', () => {
+test('push ranges stay distinct; superseded PR runs are cancelled', () => {
   assert.deepEqual(parse(read('.github/workflows/ci.yml')).concurrency, {
     group: "ci-${{ github.event_name == 'push' && github.run_id || github.ref }}",
-    'cancel-in-progress': false,
+    'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
   });
 });
 

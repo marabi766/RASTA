@@ -19,7 +19,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import YAML from 'yaml';
-import { DRILL_PATHS, shouldRun, gatePassed } from './backup-restore-drill-scope.mjs';
+import { DRILL_PATHS, installPaths, shouldRun, gatePassed } from './backup-restore-drill-scope.mjs';
+import { workspaceManifestFiles } from './workspace-roots-lib.mjs';
 import { fixtureGitEnv } from './fixture-git-env.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
@@ -83,35 +84,7 @@ const verdict = (run, result, metadata = event(), scopeResult = 'success') =>
     drill: { result },
   });
 
-test('exact input families: dropping any path refuses the guard', () => {
-  assert.deepEqual(DRILL_PATHS, [
-    '**/*.prisma',
-    '**/migrations/**',
-    'services/*/prisma/**',
-    '**/docker-compose*.yml',
-    '**/docker-compose*.yaml',
-    'infrastructure/docker/postgres/**',
-    '.github/workflows/ci.yml',
-    '.github/workflows/backup-drill-monthly.yml',
-    'scripts/backup-restore-drill*',
-    'scripts/prisma*',
-    'scripts/infra-preflight-lib.mjs',
-    'scripts/check-kafka-credential-scope-lib.mjs',
-    'scripts/database-services.mjs',
-    '.env*',
-    'services/*/.env*',
-    'services/*/package.json',
-    'services/*/tsconfig*.json',
-    'packages/**',
-    'services/organization-service/src/**',
-    'services/economic-service/src/reward/evaluation-cutover.ts',
-    'package.json',
-    'pnpm-lock.yaml',
-    'pnpm-workspace.yaml',
-    '.npmrc',
-    'turbo.json',
-    'tsconfig*.json',
-  ]);
+test('known drill inputs run; only classified ordinary documentation may skip', () => {
   for (const glob of DRILL_PATHS) {
     const path = glob.replaceAll('**/', '').replaceAll('**', 'nested/input').replaceAll('*', 'new');
     assert.equal(select([path]), true, glob);
@@ -127,12 +100,87 @@ test('exact input families: dropping any path refuses the guard', () => {
     'scripts/prisma-generate.mjs',
   ])
     assert.equal(select([path]), true, path);
+  assert.equal(select(['docs/guide.md']), false);
+});
+
+test('install coverage comes from workspace configuration and all tracked package-manager inputs', () => {
+  const config = YAML.parse(read('pnpm-workspace.yaml'));
+  const tracked = spawnSync('git', ['ls-files', '-z'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: fixtureGitEnv(),
+  });
+  assert.equal(tracked.status, 0, tracked.stderr);
+  const expected = new Set([
+    'package.json',
+    'pnpm-workspace.yaml',
+    'pnpm-lock.yaml',
+    ...workspaceManifestFiles(root),
+    ...Object.values(config.patchedDependencies ?? {}),
+    // Also cover future members of every configured glob, not just today's files.
+    ...config.packages
+      .filter((glob) => !glob.startsWith('!'))
+      .map((glob) => `${glob.replaceAll('*', 'future')}/package.json`),
+    ...tracked.stdout
+      .split('\0')
+      .filter((path) =>
+        /(^|\/)(package\.(json|json5|yaml)|\.npmrc|.*pnpm.*|\.yarnrc.*)$/.test(path),
+      ),
+  ]);
+  for (const path of expected) assert.equal(select([path]), true, `install input: ${path}`);
+});
+
+test('new config references, unsupported config and unknown paths select the drill', () => {
+  const configured = (source) =>
+    shouldRun(
+      'pull_request',
+      event(),
+      repository,
+      () => ['docs/dependency.md'],
+      () => installPaths(source),
+    );
+  assert.equal(
+    configured("packages:\n  - 'future/*'\npatchedDependencies:\n  dep@1: docs/dependency.md\n"),
+    true,
+  );
+  for (const source of [
+    '',
+    'packages:\n  - apps/*\nfutureSetting: true',
+    'packages:\n  - apps/*\nglobalPnpmfile: docs/dependency.md',
+    'packages:\n  - apps/*\noverrides:\n  dep: file:docs/dependency.md',
+    'packages: [apps/*]',
+    'packages:\n  - "!(excluded)"',
+    'packages:\n  - apps/*\npatchedDependencies: {dep: docs/dependency.md}',
+    'packages:\n  - apps/*\npatchedDependencies:\n  dep: {path: docs/dependency.md}',
+    'packages:\n  - apps/*\npackages:\n  - tests/*',
+    'packages:\n  - apps/*\n"patchedDependencies":\n  dep: docs/dependency.md',
+    'packages:\n  - apps/*\npatchedDependencies:\n\tdep: docs/dependency.md',
+    'packages:\n  - apps/*\npatchedDependencies:\n  dep: ./docs/dependency.md',
+  ])
+    assert.equal(configured(source), true, source);
+  assert.equal(
+    shouldRun(
+      'pull_request',
+      event(),
+      repository,
+      () => ['docs/guide.md'],
+      () => {
+        throw Error('unreadable config');
+      },
+    ),
+    true,
+  );
   for (const path of [
-    'docs/guide.md',
+    'future/input',
+    'docs/config.json',
     'apps/web/src/app/page.tsx',
     'services/asset-service/src/asset.service.ts',
+    'nested/package.yaml',
+    'nested/package.json5',
+    'nested/.pnpmfile.cjs',
+    'nested/.npmrc',
   ])
-    assert.equal(select([path]), false, path);
+    assert.equal(select([path]), true, path);
 });
 
 test('every train runs even on docs-only changes; uncertainty runs without relying on a diff', () => {
@@ -195,6 +243,9 @@ test('selector CLI uses a complete NUL-separated diff, covers deleted/renamed in
   try {
     git('init', '--initial-branch=main');
     writeFileSync(join(directory, '.env.example'), 'synthetic');
+    writeFileSync(join(directory, 'pnpm-workspace.yaml'), 'packages:\n  - apps/*\n');
+    writeFileSync(join(directory, '.npmrc'), '');
+    writeFileSync(join(directory, 'package.json'), '{}');
     git('add', '.');
     git(
       '-c',
@@ -206,7 +257,8 @@ test('selector CLI uses a complete NUL-separated diff, covers deleted/renamed in
       'base',
     );
     const base = git('rev-parse', 'HEAD');
-    git('mv', '.env.example', 'guide.md');
+    mkdirSync(join(directory, 'docs'));
+    git('mv', '.env.example', 'docs/guide.md');
     git(
       '-c',
       'user.name=Drill test',
@@ -316,10 +368,19 @@ test('versions and image: Node and pnpm as in ci.yml and package.json, the compo
   assert.match(compose, /@sha256:[0-9a-f]{64}$/);
 });
 
-test('bounded and never cancelled while running: isolated calls, step limit under the job limit', () => {
+test('isolated calls preserve PR cancellation and reserve setup, summary and recovery budgets', () => {
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
   assert.match(workflow.concurrency.group, /\$\{\{ github\.run_id \}\}/);
-  assert.equal(ci.concurrency['cancel-in-progress'], false, 'caller cannot cancel teardown');
+  assert.deepEqual(ci.concurrency, {
+    group: "ci-${{ github.event_name == 'push' && github.run_id || github.ref }}",
+    'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
+  });
+  const budgets = job.steps.map((candidate) => candidate['timeout-minutes']);
+  assert.ok(budgets.every((limit) => Number.isInteger(limit) && limit > 0));
+  assert.ok(
+    budgets.reduce((sum, limit) => sum + limit, 0) < job['timeout-minutes'],
+    'all setup, drill, summary and recovery budgets fit with runner overhead',
+  );
   assert.ok(Number.isInteger(job['timeout-minutes']) && job['timeout-minutes'] <= 60);
   const drill = step(DRILL);
   // Apart from the 5-minute PostgreSQL tests of ci.yml, and inside the job's limit.

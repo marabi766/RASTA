@@ -19,9 +19,7 @@ concurrency:
   # Every push range needs its own scan, including otherwise displaced pending
   # runs. PR updates can supersede earlier runs because they scan base..head.
   group: ci-${{ github.event_name == 'push' && github.run_id || github.ref }}
-  # A running full drill owns disposable resources and must finish teardown.
-  # New PR runs may replace pending runs in this group, never a running one.
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Explicit generation must succeed through the retry wrapper.
