@@ -314,7 +314,7 @@ export const JEST_LAUNCHERS = {
       'Spawns psql, pg_dump and pg_restore through command(name, args); every caller passes one of those literals. No Jest or test-script launch.',
     sha256: {
       'scripts/backup-restore-drill.pg.test.mjs':
-        '83c8c84247384bd7f0c255a2d9e95c6bff2ff59c4095afece86490bd676b4b59',
+        '2a26f2664b2e8e08862e69c5b72426934ec7e0941934cfe1b2a391d89e77ef6a',
     },
   },
 };

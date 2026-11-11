@@ -176,6 +176,10 @@ before(async () => {
     CREATE TABLE drill_metadata.deparse_sample (a integer, b integer,
       CONSTRAINT drill_deparse_check CHECK (a BETWEEN 0 AND 10 AND b >= 0));
     CREATE TABLE drill_metadata.sample (id integer);
+    CREATE FUNCTION drill_metadata.in_range(v integer) RETURNS boolean LANGUAGE sql IMMUTABLE
+      RETURN v BETWEEN 0 AND 10 AND v <> 5;
+    CREATE VIEW drill_metadata.in_range_sample AS
+      SELECT id FROM drill_metadata.sample WHERE id BETWEEN 0 AND 10 AND id <> 5;
     CREATE TABLE drill_metadata.owned_sample (id integer);
     REVOKE ALL ON drill_metadata.owned_sample FROM PUBLIC;
     CREATE SEQUENCE drill_metadata.counter;
@@ -208,6 +212,9 @@ after(() => {
 
 test('unchanged migrated fixture passes its first restore against REF, with real CHECK deparse drift', () => {
   assert.equal(initialSnapshot.reference.checkLinesDifferent, 1);
+  // FU-327: PostgreSQL stores BETWEEN as a nested AND and reads its own dump back as one list, in
+  // a SQL-standard body and a view as in the CHECK above; that fold is the only non-CHECK change.
+  assert.deepEqual(initialSnapshot.reference.foldedBooleanLists, folded);
   assert.equal(
     initialSnapshot.schemaDump.content.equals(initialSnapshot.reference.reference.content),
     false,
@@ -514,6 +521,36 @@ for (const [category, mutation] of [
     );
   });
 }
+
+const folded = [
+  'drill_metadata.in_range(integer) (FUNCTION)',
+  'drill_metadata.in_range_sample (VIEW)',
+];
+test('a SQL-standard body whose meaning changed refuses against REF; its regrouping alone passes', async () => {
+  const ref = (await baselineSnapshot()).reference.reference;
+  const replace = (body) =>
+    sql(`CREATE OR REPLACE FUNCTION drill_metadata.in_range(v integer) RETURNS boolean
+      LANGUAGE sql IMMUTABLE RETURN ${body}`);
+  const source = () => schemaDump(database, 'source').evidence;
+  try {
+    // The restored fixture already holds the list PostgreSQL read back: nothing left to fold.
+    assert.deepEqual(checkSourceReference(source(), ref, database).foldedBooleanLists, []);
+    for (const body of [
+      '(v >= 0 OR v <= 10) AND v <> 5',
+      'v >= 0 AND (v <= 10 OR v <> 5)',
+      'v BETWEEN 0 AND 11 AND v <> 5',
+      'v <> 5 AND v BETWEEN 0 AND 10',
+    ]) {
+      replace(body);
+      assert.throws(() => checkSourceReference(source(), ref, database), /non-CHECK difference/);
+    }
+    replace('v BETWEEN 0 AND 10 AND v <> 5');
+    assert.deepEqual(checkSourceReference(source(), ref, database).foldedBooleanLists, [folded[0]]);
+  } finally {
+    replace('v >= 0 AND v <= 10 AND v <> 5');
+  }
+  assert.ok(source().content.equals(ref.content));
+});
 
 test('SOURCE default drift and unstable simulated REF refuse at their own comparison, then original reference passes', async () => {
   const source = await baselineSnapshot(),

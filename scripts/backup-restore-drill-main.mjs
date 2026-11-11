@@ -759,7 +759,7 @@ try {
     const before = await snapshot(source, service);
     before.reference = await collectReference(source, `rasta_${service}`, before.schemaDump);
     process.stderr.write(
-      `[backup-restore-drill] rasta_${service}: CHECK lines different ${before.reference.checkLinesDifferent}; reference + fixed point ${before.reference.milliseconds} ms\n`,
+      `[backup-restore-drill] rasta_${service}: CHECK lines different ${before.reference.checkLinesDifferent}; objects with a folded AND/OR list ${before.reference.foldedBooleanLists.length}; reference + fixed point ${before.reference.milliseconds} ms\n`,
     );
     const fd = openSync(join(temporary, `${service}.dump`), 'wx', 0o600);
     try {

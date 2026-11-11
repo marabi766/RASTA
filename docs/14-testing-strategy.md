@@ -959,6 +959,22 @@ only the observed number of differing CHECK lines per database; do not hard-code
 exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
 ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
 
+One expression rule, for every object alike (FU-327): before SOURCE and REF are
+compared, the same fold is applied to both. A parenthesised list of parenthesised
+operands joined by one connective (`AND` or `OR`) loses its own parentheses when it
+is the first operand of the group around it and that same connective follows it.
+This is what PostgreSQL's grammar does on reading SQL (gram.y `makeAndExpr` /
+`makeOrExpr`): a tree that analysis nested (`BETWEEN`, a row comparison) is printed
+from SOURCE as `((a) AND (b)) AND (c)` and read back into REF as the single list
+`(a) AND (b) AND (c)`, the same boolean by associativity. It covers every stored
+expression tree (SQL-standard routine bodies, views, trigger conditions, index
+predicates, policies, defaults) with no object list. Nothing else is folded: another connective
+(`((a) OR (b)) AND (c)`), a trailing list, bare operands, a subquery, strings, `$$`
+bodies and comments keep their bytes, and a line that still differs must be a CHECK
+line as above or the drill refuses. Objects with a line that differed by the fold
+alone are listed (dump identity, no SQL) in `before.reference.foldedBooleanLists`.
+RESTORED against REF and REF against its fixed point stay raw byte equality.
+
 PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
 `= ANY ((ARRAY['USER'::character varying, ...])::"text"[])` can return as
 `= ANY (ARRAY[('USER'::character varying)::"text", ...])`.
