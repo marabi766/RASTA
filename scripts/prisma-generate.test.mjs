@@ -5,6 +5,12 @@ import { relative, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { generate, schemaArgs } from './prisma-generate.mjs';
+import {
+  actionLifecycle,
+  dockerfileLifecycle,
+  lifecycleFileKind,
+  workflowLifecycle,
+} from './prisma-lifecycle-suppression-lib.mjs';
 
 async function probe(results) {
   let calls = 0;
@@ -201,13 +207,383 @@ test('authored generation callers and install hooks use the enforced boundary', 
       /\bprisma(?:[\s'",]+|[^\n]*?build\/index\.js['",\s]+)generate\b|(?:prismaCli|mustRun)\(\s*\[\s*['"]generate['"]/,
       path,
     );
-    if (path.endsWith('Dockerfile') && source.includes('pnpm install --frozen-lockfile'))
-      assert.match(
-        source,
-        /PRISMA_SKIP_POSTINSTALL_GENERATE=true pnpm install --frozen-lockfile/,
-        path,
-      );
-    if (path.startsWith('.github/workflows/') && source.includes('pnpm install --frozen-lockfile'))
-      assert.match(source, /PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'/, path);
   }
+});
+
+// FU-329: where a command runs decides, not which command it is; see the library.
+const LIFECYCLE_CHECKS = {
+  dockerfile: dockerfileLifecycle,
+  workflow: workflowLifecycle,
+  action: actionLifecycle,
+};
+const repoText = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+const swap = (text, from, to) => {
+  assert.equal(text.split(from).length, 2, `one ${from}`);
+  return text.replace(from, () => to);
+};
+const UNPROVEN = /a command this check cannot prove hands on the environment/;
+const NOT_NODE = /does not start `node` directly/;
+const refused = (check, name, text, pattern) => {
+  const { errors } = check(name, text);
+  assert.ok(errors.length > 0, `${name} was accepted`);
+  assert.match(errors.join('\n'), pattern, name);
+};
+
+test('every Dockerfile stage, workflow step and action runs lifecycle hooks suppressed', () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const seen = { dockerfile: [], workflow: [], action: [] };
+  for (const file of authoredFiles(root)) {
+    const path = relative(root, file).replaceAll('\\', '/');
+    const kind = lifecycleFileKind(path);
+    if (!kind) continue;
+    seen[kind].push(path);
+    const { errors, commands } = LIFECYCLE_CHECKS[kind](path, readFileSync(file, 'utf8'));
+    assert.deepEqual(errors, [], path);
+    // Not vacuous: the commands the finding was about are read, inside a suppressed stage or step.
+    if (/^services\/[^/]+\/Dockerfile$/.test(path))
+      assert.deepEqual(commands, ['npm install', 'pnpm install', 'pnpm deploy'], path);
+    if (kind === 'workflow') assert.ok(commands.includes('pnpm install'), path);
+  }
+  assert.ok(seen.dockerfile.length >= 17, 'every service Dockerfile is read');
+  assert.ok(seen.workflow.includes('.github/workflows/ci.yml'));
+  assert.ok(seen.workflow.includes('.github/workflows/backup-drill-monthly.yml'));
+  assert.ok(seen.action.length >= 2, 'the composite actions are read');
+  for (const path of ['Dockerfile', 'a/web.Dockerfile', 'a/Dockerfile.dev', 'a/x.dockerfile'])
+    assert.equal(lifecycleFileKind(path), 'dockerfile', path);
+  assert.equal(lifecycleFileKind('.github/workflows/new.yaml'), 'workflow');
+  assert.equal(lifecycleFileKind('.github/actions/new/action.yaml'), 'action');
+});
+
+test('a Dockerfile lifecycle command outside a suppressed stage is refused', () => {
+  const name = 'services/economic-service/Dockerfile';
+  const real = repoText(name);
+  const setting = 'ENV PRISMA_SKIP_POSTINSTALL_GENERATE=true\n';
+  const deploy = 'CI=true pnpm --filter @rasta/economic-service deploy --prod --legacy /deploy';
+  const base = real.match(/^FROM (\S+) AS deps$/m)[1];
+  const outside = /outside a stage that sets/;
+  const onlyBy = /may be set only by the instruction/;
+  for (const [mutant, pattern] of [
+    // The suppression is dropped, for the stage or for the deploy alone.
+    [swap(real, setting, ''), outside],
+    [swap(real, 'FROM deps AS build', `FROM ${base} AS build`), outside],
+    [swap(real, deploy, `PRISMA_SKIP_POSTINSTALL_GENERATE= ${deploy}`), onlyBy],
+    [swap(real, deploy, `unset PRISMA_SKIP_POSTINSTALL_GENERATE && ${deploy}`), onlyBy],
+    [swap(real, deploy, `env -i ${deploy}`), UNPROVEN],
+    [swap(real, setting, 'ENV PRISMA_SKIP_POSTINSTALL_GENERATE=\n'), onlyBy],
+    [swap(real, setting, 'ENV PRISMA_SKIP_POSTINSTALL_GENERATE=false\n'), onlyBy],
+    [swap(real, setting, 'ARG PRISMA_SKIP_POSTINSTALL_GENERATE=true\n'), onlyBy],
+    [swap(real, setting, `${setting}ENV PRISMA_SKIP_POSTINSTALL_GENERATE=\n`), onlyBy],
+    // Set too late: the commands before it ran without it.
+    [
+      swap(real, setting, '').replace('FROM deps AS build\n', `FROM deps AS build\n${setting}`),
+      outside,
+    ],
+    // A new lifecycle command where nothing is suppressed, in each shape a build can run it.
+    [
+      swap(real, 'USER rasta\n', `RUN pnpm --filter @rasta/x deploy --prod /out\nUSER rasta\n`),
+      outside,
+    ],
+    [swap(real, 'USER rasta\n', 'RUN ["pnpm", "deploy", "/out"]\nUSER rasta\n'), outside],
+    [swap(real, 'USER rasta\n', 'RUN ./scripts/install.sh\nUSER rasta\n'), outside],
+    [swap(real, 'USER rasta\n', 'RUN rm -rf /tmp/x && npm rebuild\nUSER rasta\n'), outside],
+    [`${real}FROM ${base} AS extra\nRUN pnpm deploy /out\n`, outside],
+    [swap(real, 'CMD ["node", "dist/main.js"]', 'CMD ["pnpm", "start"]'), NOT_NODE],
+    [swap(real, `FROM ${base} AS deps`, `RUN pnpm deploy /out\nFROM ${base} AS deps`), outside],
+    // Forms that are not read are refused, never read past.
+    [
+      swap(real, 'USER rasta\n', 'ONBUILD RUN pnpm install\nUSER rasta\n'),
+      /ONBUILD is not an instruction/,
+    ],
+    [swap(real, 'USER rasta\n', 'RUN <<EOF\npnpm install\nEOF\nUSER rasta\n'), /here-document/],
+    [swap(real, 'FROM deps AS build', 'FROM --platform=linux/amd64 deps AS build'), /not a form/],
+  ])
+    refused(dockerfileLifecycle, name, mutant, pattern);
+  // Controls: the same additions inside the suppressed stages are read and accepted.
+  const added = dockerfileLifecycle(
+    name,
+    swap(
+      real,
+      'FROM deps AS build\n',
+      'FROM deps AS build\nRUN pnpm --filter @rasta/x deploy /out\n',
+    ),
+  );
+  assert.deepEqual(added.errors, []);
+  assert.deepEqual(added.commands, ['npm install', 'pnpm install', 'pnpm deploy', 'pnpm deploy']);
+});
+
+test('a workflow step or an action outside the suppression is refused', () => {
+  const name = '.github/workflows/ci.yml';
+  const real = repoText(name);
+  const setting = "  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n";
+  const install = '      - run: pnpm install --frozen-lockfile\n';
+  const first = (to) => real.replace(install, () => to);
+  assert.ok(real.includes(install));
+  const without = /runs without PRISMA_SKIP_POSTINSTALL_GENERATE/;
+  const onlyAs = /may be named only as a workflow, job or step env entry/;
+  const notTrue = /must be the string 'true'/;
+  for (const [mutant, pattern] of [
+    [swap(real, setting, ''), without],
+    [swap(real, setting, "  PRISMA_SKIP_POSTINSTALL_GENERATE: ''\n"), notTrue],
+    [swap(real, setting, '  PRISMA_SKIP_POSTINSTALL_GENERATE: true\n'), notTrue],
+    [swap(real, setting, "  PRISMA_SKIP_POSTINSTALL_GENERATE: 'false'\n"), notTrue],
+    // A narrower level or the command itself takes it away again.
+    [first(`${install}        env:\n          PRISMA_SKIP_POSTINSTALL_GENERATE: ''\n`), notTrue],
+    [first('      - run: PRISMA_SKIP_POSTINSTALL_GENERATE= pnpm install\n'), onlyAs],
+    [first('      - run: unset PRISMA_SKIP_POSTINSTALL_GENERATE; pnpm deploy /out\n'), onlyAs],
+    [first('      - run: echo "PRISMA_SKIP_POSTINSTALL_GENERATE=" >> "$GITHUB_ENV"\n'), onlyAs],
+    [first('      - run: env -i pnpm deploy /out\n'), UNPROVEN],
+    [first(`${install}        shell: env -i bash {0}\n`), /shell .* is not one this check reads/],
+    [
+      `${real}  called:\n    uses: ./.github/workflows/other.yml\n`,
+      /a called workflow gets no env/,
+    ],
+  ])
+    refused(workflowLifecycle, name, mutant, pattern);
+
+  // A wrapper is refused whatever it runs: the package manager may be inside what it starts.
+  refused(workflowLifecycle, name, first('      - run: sudo apt-get install -y jq\n'), UNPROVEN);
+
+  // A new workflow: suppressed at any of the three levels, for every step, or refused.
+  const fresh = (top, job, step) =>
+    `on: push\n${top}jobs:\n  a:\n    runs-on: x\n${job}    steps:\n      - run: pnpm deploy /out\n${step}` +
+    '  b:\n    runs-on: x\n    steps:\n      - uses: actions/checkout@v4\n';
+  const at = (indent) => `${indent}env:\n${indent}  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n`;
+  assert.deepEqual(workflowLifecycle('new.yml', fresh(at(''), '', '')).errors, []);
+  refused(workflowLifecycle, 'new.yml', fresh('', '', ''), /job a step 1 runs without/);
+  // Job a is covered by its own env; job b, which only calls an action, is not.
+  for (const text of [fresh('', at('    '), ''), fresh('', '', at('        '))]) {
+    const { errors } = workflowLifecycle('new.yml', text);
+    assert.equal(errors.length, 1, errors.join('\n'));
+    assert.match(errors[0], /job b step 1 runs without/);
+  }
+  refused(workflowLifecycle, 'new.yml', 'on: push\njobs: {}\n', /no jobs were read/);
+  refused(workflowLifecycle, 'new.yml', 'on: [push\n', /cannot be read/);
+  // A step repeated through an alias is read at every place it runs.
+  const aliased = fresh('', '', '').replace(
+    '- run: pnpm deploy /out',
+    '- &s\n        run: pnpm deploy /out',
+  );
+  const twice = workflowLifecycle('new.yml', swap(aliased, '- uses: actions/checkout@v4', '- *s'));
+  assert.deepEqual(twice.commands, ['pnpm deploy', 'pnpm deploy']);
+  assert.match(twice.errors.join('\n'), /job a step 1 runs without[^]*job b step 1 runs without/);
+
+  const action = '.github/actions/install-ci-tool/action.yml';
+  const composite = repoText(action);
+  // A lifecycle command added to an action is read; it runs in its caller's environment.
+  const more = (step) => `${composite}    - shell: bash\n      run: pnpm deploy /out\n${step}`;
+  assert.deepEqual(actionLifecycle(action, more('')), { errors: [], commands: ['pnpm deploy'] });
+  for (const [mutant, pattern] of [
+    [more("      env:\n        PRISMA_SKIP_POSTINSTALL_GENERATE: ''\n"), /may not name it/],
+    [
+      more('    - shell: bash\n      run: unset PRISMA_SKIP_POSTINSTALL_GENERATE\n'),
+      /may not name it/,
+    ],
+    [
+      more('    - shell: env -i bash {0}\n      run: pnpm i\n'),
+      /shell .* is not one this check reads/,
+    ],
+    [more('    - shell: bash\n      run: sudo pnpm i\n'), UNPROVEN],
+    [swap(composite, 'using: composite', 'using: node20'), /not a composite action/],
+  ])
+    refused(actionLifecycle, action, mutant, pattern);
+});
+
+// PR #1085 r1 F1: every probe the reviewer ran, and the same gap in other spellings. Each was
+// accepted with no error at ac94f313.
+test('shell text that could drop the suppression is refused wherever it runs', () => {
+  const docker = 'services/economic-service/Dockerfile';
+  const action = '.github/actions/install-ci-tool/action.yml';
+  const [image, composite] = [repoText(docker), repoText(action)];
+  const indent = (script, by) => script.replaceAll(/^/gm, by);
+  const runs = {
+    dockerfile: (script) =>
+      dockerfileLifecycle(
+        docker,
+        swap(
+          image,
+          'FROM deps AS build\n',
+          `FROM deps AS build\nRUN ${script.replaceAll('\n', ' && ')}\n`,
+        ),
+      ),
+    workflow: (script) =>
+      workflowLifecycle(
+        'new.yml',
+        `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: |\n${indent(script, '          ')}\n`,
+      ),
+    action: (script) =>
+      actionLifecycle(
+        action,
+        `${composite}    - shell: bash\n      run: |\n${indent(script, '        ')}\n`,
+      ),
+  };
+  const everywhere = (script, pattern, accepted = false) => {
+    for (const [where, run] of Object.entries(runs)) {
+      const { errors } = run(script);
+      if (accepted) assert.deepEqual(errors, [], `${where}: ${script}`);
+      else assert.match(errors.join('\n'), pattern, `${where}: ${script}`);
+    }
+  };
+  const form = (name) => new RegExp(`is not a form of \`${name}\` this check reads`);
+  for (const [script, pattern] of [
+    // The reviewer's probes, as run.
+    [
+      'unset PRISMA_SKIP_"POSTINSTALL_GENERATE"; pnpm deploy /out',
+      /names PRISMA_SKIP_POSTINSTALL|may be set only by the instruction/,
+    ],
+    [`e'n'v -i PATH="$PATH" pnpm deploy /out`, UNPROVEN],
+    ['exec -c pnpm deploy /out', UNPROVEN],
+    ['env -i n"pm" rebuild', UNPROVEN],
+    ['env -i node scripts/deploy.mjs', UNPROVEN],
+    ['docker run --rm node:22 npm install @prisma/client', form('docker')],
+    // The same gap, other spellings: a command word that is computed, unknown or runs another.
+    ['$PM rebuild', UNPROVEN],
+    ['"$(command -v pnpm)" deploy /out', UNPROVEN],
+    ['xargs pnpm deploy /out', UNPROVEN],
+    ['command -x pnpm deploy /out', /command option -x is not one this check reads/],
+    ['printf -v "$name" ""', UNPROVEN],
+    ['. scripts/environment.sh', UNPROVEN],
+    ['scripts/../../../usr/bin/env -i pnpm install', UNPROVEN],
+    ['${{ inputs.command }} pnpm install', /an expression other than/],
+    ["echo '${{ github.event.pull_request.title }}'", /an expression other than/],
+    ['A$x=1 pnpm install', /not an assignment to a written-out name/],
+    ['export "$name"=', form('export')],
+    ['export NAME$x', form('export')],
+    ['unset "$name"', form('unset')],
+    ['bash -c "$1"', form('bash')],
+    ['curl -fsS https://example.test/install | bash', form('bash')],
+    ['pnpm exec "$tool" install', form('pnpm')],
+    ['pnpm exec sudo pnpm install', form('pnpm')],
+    ['npm exec -- pnpm install', form('npm')],
+    ['npm x -- env -i pnpm install', form('npm')],
+    ['pnpm sudo pnpm install', form('pnpm')],
+    ['pnpm -r env -i pnpm install', form('pnpm')],
+    ['docker build -f Containerfile .', form('docker')],
+    ['docker run --rm image sh /install.sh', form('docker')],
+    ['eval "$1"', /`eval` runs text other than/],
+    ['eval "${x_credentials}"', /`eval` runs text other than/],
+    [
+      'eval "${x_credentials}"\nx_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"',
+      /`eval` runs text other than/,
+    ],
+    ['echo "$a$b=" >> "$GITHUB_ENV"', /writes the environment of later steps/],
+    ['echo $(date) `pnpm root`', /a backtick command substitution is not read/],
+    ['cat <<EOF\npnpm install\nEOF', /a here-document/],
+  ])
+    everywhere(script, pattern);
+  // Controls: the forms the real workflows use are read and accepted.
+  for (const script of [
+    'export PGHOST=localhost PGPORT="$port"\nunset KAFKA_SECRETS_DIR',
+    'x_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"\neval "${x_credentials}"',
+    'echo "INTERNAL_TOKEN_SECRET=${secret}" >> "$GITHUB_ENV"',
+    'if ! command -v gitleaks >/dev/null 2>&1; then pnpm exec turbo run build | tee out.log; fi',
+    'docker run --rm --entrypoint sh image@sha256:0 -c "promtool test rules /etc/x.yml"',
+  ])
+    everywhere(script, null, true);
+});
+
+test('what an image or a step starts outside the suppression is refused', () => {
+  const name = 'services/economic-service/Dockerfile';
+  const real = repoText(name);
+  const start = 'CMD ["node", "dist/main.js"]';
+  const outside = /outside a stage that sets/;
+  const deploy = 'CI=true pnpm --filter @rasta/economic-service deploy --prod --legacy /deploy';
+  for (const [mutant, pattern] of [
+    // A shell, a script or a variable where the container starts.
+    ...['CMD', 'ENTRYPOINT', 'HEALTHCHECK CMD'].map((how) => [
+      swap(real, start, `${how} sh /install.sh\n${how === 'CMD' ? '' : start}`),
+      NOT_NODE,
+    ]),
+    [swap(real, start, 'ENV PM=npm\nCMD $PM rebuild'), NOT_NODE],
+    [swap(real, start, `CMD node -e "require('child_process').execSync('npm rebuild')"`), NOT_NODE],
+    // The six allowed names prove nothing once a file is copied in or a search path changes.
+    ...['rm', 'addgroup', 'adduser', 'mkdir', 'chown', 'chmod'].map((utility) => [
+      swap(
+        real,
+        'USER rasta\n',
+        `COPY --from=build /usr/local/bin/node /usr/local/bin/${utility}\nRUN ${utility} /usr/local/lib/node_modules/pnpm/bin/pnpm.cjs rebuild\nUSER rasta\n`,
+      ),
+      outside,
+    ]),
+    [real.replace(/^RUN addgroup/m, 'ENV PATH=/app/bin:$PATH\nRUN addgroup'), outside],
+    [real.replace(/^RUN addgroup/m, 'ARG PATH=/app/bin\nRUN addgroup'), outside],
+    // The variable under a quoted name, or set by an instruction that is not read as one pair.
+    [
+      swap(real, start, `ENV PRISMA_SKIP_"POSTINSTALL_GENERATE"=\n${start}`),
+      /may be set only by the instruction/,
+    ],
+    [
+      swap(real, 'ENV PNPM_HOME=/pnpm\n', 'ENV PNPM_HOME=/pnpm $NAME=\n'),
+      /is not a form this check reads/,
+    ],
+  ])
+    refused(dockerfileLifecycle, name, mutant, pattern);
+  // The real file with a quoted wrapper keeps its inventory, and is refused all the same.
+  const quoted = dockerfileLifecycle(name, swap(real, deploy, `e'n'v -i PATH="$PATH" ${deploy}`));
+  assert.deepEqual(quoted.commands, ['npm install', 'pnpm install', 'pnpm deploy']);
+  assert.match(quoted.errors.join('\n'), UNPROVEN);
+
+  // An `env` that is not a mapping written in the file can hold anything, at every level.
+  const action = '.github/actions/install-ci-tool/action.yml';
+  const opaque = 'env: ${{ fromJSON(inputs.environment) }}';
+  const notRead = /env is not a mapping this check reads/;
+  refused(
+    actionLifecycle,
+    action,
+    `${repoText(action)}    - shell: bash\n      ${opaque}\n      run: pnpm deploy /out\n`,
+    notRead,
+  );
+  const workflow = (top, step) =>
+    `on: push\n${top}jobs:\n  a:\n    runs-on: x\n    env:\n      PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n    steps:\n${step}`;
+  refused(
+    workflowLifecycle,
+    'new.yml',
+    workflow('', `      - run: pnpm i\n        ${opaque}\n`),
+    notRead,
+  );
+  refused(workflowLifecycle, 'new.yml', workflow(`${opaque}\n`, '      - run: pnpm i\n'), notRead);
+  // A build of a file the Dockerfile rule never reads (lifecycleFileKind('Containerfile') is null).
+  const build = (inputs) =>
+    workflow('', `      - uses: docker/build-push-action@0\n        with:${inputs}\n`);
+  const file = (path) => build(`\n          file: ${path}`);
+  assert.equal(lifecycleFileKind('Containerfile'), null);
+  for (const mutant of [file('Containerfile'), build(' ${{ fromJSON(inputs.build) }}')])
+    refused(workflowLifecycle, 'new.yml', mutant, /builds .*, a file this check does not read/);
+  assert.deepEqual(
+    workflowLifecycle('new.yml', file('services/${{ matrix.service }}/Dockerfile')).errors,
+    [],
+  );
+});
+
+// The class of F2: a script that hands PATH on by name builds a child's environment from scratch,
+// so it sets the suppression itself, or is listed with why its child reaches no package manager.
+test('every rebuilt child environment carries the suppression', () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const startsNoPackageManager = {
+    'apps/web/scripts/build-group.mjs': 'the signal sender; the build is sent the full environment',
+    'scripts/marketplace-saga-drain-check.mjs': 'psql only',
+  };
+  const rebuilt = [];
+  for (const file of authoredFiles(root)) {
+    const path = relative(root, file).replaceAll('\\', '/');
+    if (!/\.(?:[cm]?js|ts)$/.test(path) || /\.(?:test|[a-z-]*spec)\.|\/(?:test|e2e)\//.test(path))
+      continue;
+    const source = readFileSync(file, 'utf8');
+    if (!/PATH: process\.env\.PATH|\[\s*'PATH'/.test(source)) continue;
+    rebuilt.push(path);
+    assert.equal(
+      source.includes("PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'"),
+      !Object.hasOwn(startsNoPackageManager, path),
+      path,
+    );
+  }
+  assert.deepEqual(
+    rebuilt.sort(),
+    [
+      ...Object.keys(startsNoPackageManager),
+      'scripts/backup-restore-drill-main.mjs',
+      'scripts/ci-integration-split-lib.mjs',
+      'scripts/prepush-parity-lib.mjs',
+      'scripts/prepush-scope-lib.mjs',
+    ].sort(),
+  );
 });

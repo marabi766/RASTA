@@ -182,6 +182,10 @@ const env = {
   // node_modules and aborts for lack of a TTY (the GitHub runner sets it, a laptop does not).
   ...(process.env.PNPM_HOME ? { PNPM_HOME: process.env.PNPM_HOME } : {}),
   ...(recoveryId ? { [RECOVERY_ENV]: recoveryId } : {}),
+  // Set here, not inherited: `pnpm exec` and `pnpm run` reinstall stale dependencies first, and
+  // without this that reinstall generates the Prisma client from the @prisma/client hook, outside
+  // scripts/prisma-generate.mjs (FU-329). The seed's generation below is the explicit one.
+  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true',
   DOCKER_CONTEXT: 'default',
   DOCKER_HOST: 'unix:///var/run/docker.sock',
   LANG: 'C.UTF-8',

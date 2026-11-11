@@ -28,6 +28,14 @@
 # ---- deps -------------------------------------------------------------------
 FROM node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202 AS deps
 
+# Dependency lifecycle hooks never generate the Prisma client: every command of
+# this stage and of `build` (which starts FROM it) inherits this, so `pnpm
+# install`, `pnpm deploy` and a run that reinstalls are all covered (FU-329).
+# This service has no Prisma client; the stage is suppressed like every other
+# so one rule holds for all. The runtime stage starts from the base image and
+# does not inherit it.
+ENV PRISMA_SKIP_POSTINSTALL_GENERATE=true
+
 # pnpm is installed directly rather than through corepack. Corepack downloads
 # the tarball at build time and crashes intermittently doing so
 # (`AssertionError: assert(!this.paused)`), which turns an image build into a
@@ -51,7 +59,7 @@ COPY . .
 
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && \
-    PRISMA_SKIP_POSTINSTALL_GENERATE=true pnpm install --frozen-lockfile
+    pnpm install --frozen-lockfile
 
 # ---- build ------------------------------------------------------------------
 FROM deps AS build
