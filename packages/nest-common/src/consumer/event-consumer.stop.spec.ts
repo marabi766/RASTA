@@ -1,4 +1,5 @@
 import { CompressionTypes } from 'kafkajs';
+import { WorkerAbandonedError } from '../worker-boundary';
 import { DLQ_REASONS } from '@rasta/contracts';
 import { dlqMessagesTotal } from '@rasta/observability';
 import {
@@ -291,6 +292,19 @@ describe('EventConsumer.stop by a deadline (Codex on #267)', () => {
       await h.consumer.stop({ deadlineAt: Date.now() + 1000 });
     });
 
+    it('a worker abandoned independently of the broker never enters failure classification', async () => {
+      const h = await started(async () => {
+        throw new WorkerAbandonedError();
+      });
+      await h.kafka.deliver(message('62'));
+      expect(h.kafka.committed).toEqual([]);
+      expect(h.kafka.uncommitted[0]?.error).toBeInstanceOf(ConsumerStoppingError);
+      expect(h.producer.sent).toEqual([]);
+      expect(h.lines.join('\n')).not.toMatch(/Attempt .* failed|Handler failed|Handler refused/);
+      expect(h.lines.join('\n')).toMatch(/ABANDONED.*UNCONFIRMED/);
+      await h.consumer.stop();
+    });
+
     it('a failure after the deadline goes to no attempt and no dead letter', async () => {
       let fail!: (error: Error) => void;
       let calls = 0;
@@ -305,6 +319,7 @@ describe('EventConsumer.stop by a deadline (Codex on #267)', () => {
       fail(new UnprocessableEventError(DLQ_REASONS.SOURCE_UNCONFIRMED, 'amount_mismatch'));
       await delivered;
 
+      expect(h.lines.join('\n')).not.toMatch(/Attempt .* failed|Handler failed|Handler refused/);
       expect(calls).toBe(1);
       expect(h.producer.connects).toBe(0);
       expect(h.kafka.committed).toEqual([]);
