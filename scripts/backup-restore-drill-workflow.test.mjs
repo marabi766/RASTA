@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import YAML from 'yaml';
 import { DRILL_PATHS, shouldRun, gatePassed } from './backup-restore-drill-scope.mjs';
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const read = (path) => readFileSync(join(root, path), 'utf8');
@@ -117,6 +118,7 @@ test('exact input families: dropping any path refuses the guard', () => {
   }
   for (const path of [
     'services/new-service/prisma/migrations/id/down.sql',
+    'services/new-service/prisma/migrations/id\ncontinued/migration.sql',
     'services/new-service/prisma/seed.ts',
     'services/new-service/prisma/.env',
     'nested/docker-compose.override.yaml',
@@ -182,7 +184,11 @@ test('skip-on-train is red, and missing/failed selection or non-success drill ne
 test('selector CLI uses a complete NUL-separated diff, covers deleted/renamed inputs and fails closed', () => {
   const directory = mkdtempSync(join(tmpdir(), 'drill-scope-'));
   const git = (...args) => {
-    const result = spawnSync('git', args, { cwd: directory, encoding: 'utf8' });
+    const result = spawnSync('git', args, {
+      cwd: directory,
+      encoding: 'utf8',
+      env: fixtureGitEnv(),
+    });
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim();
   };

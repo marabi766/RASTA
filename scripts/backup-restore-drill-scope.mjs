@@ -37,8 +37,8 @@ export const DRILL_PATHS = [
   'tsconfig*.json',
 ];
 
-const match = (path, glob) => {
-  const expression = glob
+const match = (path, pattern) => {
+  const expression = pattern
     .split(/(\*\*\/|\*\*|\*)/)
     .map((part) =>
       part === '**/'
@@ -50,7 +50,7 @@ const match = (path, glob) => {
             : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
     )
     .join('');
-  return new RegExp(`^${expression}$`).test(path);
+  return new RegExp(`^${expression}$`, 's').test(path);
 };
 
 // Only a proven ordinary PR may skip. Missing/malformed/fork metadata runs the
@@ -81,7 +81,7 @@ export function shouldRun(eventName, event, repository, diff) {
         !path ||
         path.startsWith('/') ||
         path.split('/').includes('..') ||
-        DRILL_PATHS.some((glob) => match(path, glob)),
+        DRILL_PATHS.some((pattern) => match(path, pattern)),
     );
   } catch {
     return true;
