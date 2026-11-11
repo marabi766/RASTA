@@ -21,7 +21,7 @@ export const JEST_LAUNCHERS = {
       'Node tests spawn curl/Git and the pinned Gitleaks binary, plus the exact pinned Secret scan shell in isolated Git fixtures; downloads are mocked except a loopback curl probe. No Jest, pnpm or Turbo child.',
     sha256: {
       'scripts/ci-tool-download.test.mjs':
-        '430d053397e935ccb36d79cafd2a1d1df305cfe8fa023d1f0e163365796e9109',
+        '19debe7017536f7e351684025317428786e98473526e8e64a198e1c496b44ad5',
       'scripts/ci-tool-download.mjs':
         '0e9a7d8bcbf35ae61d822c0e4af8f4d8d94960195131145e540190ed4e23607b',
       'scripts/fixture-git-env.mjs':
@@ -225,9 +225,9 @@ export const JEST_LAUNCHERS = {
       'scripts/economic-coverage.mjs':
         '44646468bfcdfa7f7caad65cc00d2f12662a447218110b9da22beaed1b542f41',
       'scripts/ci-integration-split.test.mjs':
-        '570d992f035ae9f6e8813330dfb709902af1dd973120e2f0b851b04ce9b13e0b',
+        '891b9c9af25c5cca4c803aee20ed6c8ad134537602fec02f12e12a90f6376676',
       'scripts/ci-integration-split-lib.mjs':
-        'c0fcee9186064ba5885571134295acd019abb4a608dba1435eefeb9d07f5ddbb',
+        'f2f1666eb022314540da7ff3d8b4e356585fa8aa24c4dd660470dbdc6cafd57c',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
