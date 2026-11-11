@@ -1,6 +1,5 @@
 // Retry at the individual generator boundary, never the whole Turbo task graph.
 import { spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
@@ -11,13 +10,16 @@ const NETWORK_ERROR =
 
 export async function generate({
   run = () => {
-    const require = createRequire(resolve('package.json'));
-    return spawnSync(process.execPath, [require.resolve('prisma/build/index.js'), 'generate'], {
-      stdio: ['inherit', 'inherit', 'pipe'],
-      encoding: 'utf8',
-      timeout: 180_000,
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    return spawnSync(
+      process.execPath,
+      [resolve('node_modules/prisma/build/index.js'), 'generate'],
+      {
+        stdio: ['inherit', 'inherit', 'pipe'],
+        encoding: 'utf8',
+        timeout: 180_000,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+    );
   },
   sleep = setTimeout,
   log = (message) => process.stderr.write(message),
