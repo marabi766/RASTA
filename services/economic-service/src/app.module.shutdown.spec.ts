@@ -159,11 +159,7 @@ describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
       await consumer.stop({ deadlineAt: 1234 });
       await consumer.onApplicationShutdown();
 
-      // Obligation workers join their direct + broker drain; reward adoption is a separate slice.
-      const calls =
-        _name === 'RewardTriggerConsumer'
-          ? [[{ deadlineAt: 1234 }], [undefined]]
-          : [[{ deadlineAt: 1234 }]];
+      const calls = [[{ deadlineAt: 1234 }]];
       expect(consumerStop.mock.calls).toHaveLength(calls.length);
       expect(consumerStop.mock.calls).toEqual(calls);
     },

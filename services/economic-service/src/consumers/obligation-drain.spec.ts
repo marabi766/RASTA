@@ -6,6 +6,7 @@ import {
   type EventConsumer,
   type OutboxStopOptions,
 } from '@rasta/nest-common';
+import { RewardTriggerConsumer } from './reward-trigger.consumer';
 import { StatementSettlementConsumer } from './statement-settlement.consumer';
 import { SettlementAuthorityConsumer } from './settlement-authority.consumer';
 
@@ -20,7 +21,7 @@ const flush = async () => {
   for (let i = 0; i < 30; i++) await Promise.resolve();
 };
 
-describe.each([StatementSettlementConsumer, SettlementAuthorityConsumer])(
+describe.each([StatementSettlementConsumer, SettlementAuthorityConsumer, RewardTriggerConsumer])(
   '%s combined drain',
   (Consumer) => {
     beforeEach(() => {
@@ -49,11 +50,16 @@ describe.each([StatementSettlementConsumer, SettlementAuthorityConsumer])(
         null as never,
       );
       const statement = Consumer === StatementSettlementConsumer;
+      const reward = Consumer === RewardTriggerConsumer;
       const event = {
         eventId: 'EVT-DRAIN',
         tenantId: 'ORG-A',
         correlationId: 'COR-DRAIN',
-        eventName: statement ? 'STATEMENT_APPROVED' : 'MAINTENANCE_APPROVED',
+        eventName: statement
+          ? 'STATEMENT_APPROVED'
+          : reward
+            ? 'USAGE_RECORDED'
+            : 'MAINTENANCE_APPROVED',
         payload: {
           organizationId: 'ORG-A',
           approvedAt: '2026-11-10T00:00:00.000Z',
@@ -72,6 +78,7 @@ describe.each([StatementSettlementConsumer, SettlementAuthorityConsumer])(
                 totalCostMinor: '450000',
                 currency: 'IRR',
               }),
+          ...(reward ? { usageRecordId: 'USG-A', assetId: 'AST-A', hours: '8' } : {}),
         },
       } as EventEnvelope;
       return { consumer, event, entered, held };
