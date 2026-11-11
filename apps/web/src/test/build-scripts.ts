@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -527,7 +527,10 @@ export interface Plan {
     loadsAfterMs?: number;
     via?: 'spawnSync' | 'execFileSync' | 'execSync';
   };
-  /** Stays alive this long before it writes its output (to be signalled meanwhile). */
+  /**
+   * Stays alive this long before it writes its output (to be signalled meanwhile). A hold of
+   * either kind is announced when it begins: `waitHeld` is its readiness, never `ran-<pid>`.
+   */
   holdMs?: number;
   /**
    * Stays alive until the test calls `releaseHold(dir)` (FU-199), never on a timer: a case
@@ -537,6 +540,14 @@ export interface Plan {
    * — never a probe of the owner's pid, which a zombie or a reused pid still answers.
    */
   holdUntilRelease?: boolean;
+  /** Loads of the configuration (so: reports) made only AFTER the hold ended (default 0). */
+  loadsAfterHold?: number;
+  /**
+   * Slow reports: this long between `ran-<pid>` and the first configuration load. Never needed
+   * for a case to pass; it makes a case that acts before the hold was announced fail every time
+   * instead of once in a hundred loaded runs (FU-328).
+   */
+  slowReportsMs?: number;
   unresponsive?: 'ignore' | 'sync';
   /** Exits with this code instead of writing the output. */
   exit?: number;
@@ -545,7 +556,8 @@ export interface Plan {
 /**
  * A fake `next` under `root`: `next/dist/bin/next` writes `ran-<pid>` (it got past the
  * preload's handshake), loads the configuration through `next/dist/server/config.js` (the
- * module the preload wraps), runs its workers, then writes BUILD_ID and an empty manifest.
+ * module the preload wraps), runs its workers, announces a planned hold (`held.pid`) and
+ * holds, then writes BUILD_ID and an empty manifest.
  * `fault.cjs` is a preload a case may add to NODE_OPTIONS: it makes appends of one record
  * kind fail with an errno, in one role (root, child process, worker thread), and follows the
  * build into every child and thread the way the real preload does.
@@ -620,6 +632,7 @@ const worker = path.join(__dirname, '../build/worker.js');
     });
   }
   fs.writeFileSync(path.join(dir, 'ran-' + process.pid), '');
+  if (plan.slowReportsMs) await new Promise((r) => setTimeout(r, plan.slowReportsMs));
   for (let i = 0; i < (plan.rootLoads ?? 1); i += 1) { try { await load(); } catch {} }
   for (const via of plan.workers ?? []) {
     if (via === 'fork') await new Promise((r) => cp.fork(worker, [], { stdio: 'ignore' }).on('exit', r));
@@ -643,6 +656,15 @@ const worker = path.join(__dirname, '../build/worker.js');
   if (plan.unresponsive) process.on('SIGTERM', () => {});
   if (plan.unresponsive) fs.writeFileSync('unresponsive.ready', '');
   if (plan.unresponsive === 'sync') { for (;;) {} }
+  // The hold begins HERE and is announced (FU-328): until its timer or its release this process
+  // reports nothing more. The ran- marker above is not that: the loads and their reports follow it, and
+  // a report that cannot be written any more (the wrapper returned and removed its capture
+  // directory) ends this process and its whole group (capture-next-config.cjs, point 3).
+  // Atomic, like linger.pid. An announcement that cannot be written is not made (its waiter times
+  // out); a fixture directory that was removed meanwhile ends the hold below, with 72, as before.
+  if (plan.holdMs || plan.releaseFile) {
+    try { fs.writeFileSync(path.join(dir, 'held.pid.tmp'), String(process.pid)); fs.renameSync(path.join(dir, 'held.pid.tmp'), path.join(dir, 'held.pid')); } catch {}
+  }
   if (plan.holdMs) await new Promise((r) => setTimeout(r, plan.holdMs));
   if (plan.releaseFile) {
     // Held by the test, not by a timer; the owner connection above ends it if the owner is gone,
@@ -652,6 +674,7 @@ const worker = path.join(__dirname, '../build/worker.js');
       await new Promise((r) => setTimeout(r, 20));
     }
   }
+  for (let i = 0; i < (plan.loadsAfterHold ?? 0); i += 1) { try { await load(); } catch {} }
   if (plan.exit) process.exit(plan.exit);
   fs.mkdirSync(path.join(dir, '.next/server'), { recursive: true });
   fs.writeFileSync(path.join(dir, '.next/BUILD_ID'), 'fake-' + process.pid);
@@ -706,6 +729,8 @@ wt.Worker = class extends OriginalWorker {
 
 export const HOLD_RELEASE = 'hold-release';
 export const HOLD_SOCKET = 'hold.sock';
+/** The fake `next` writes its pid here when its hold begins (`waitHeld`). */
+export const HELD = 'held.pid';
 
 /** The owner's side of one held writer: the test process serves the socket the writer connects to. */
 interface Hold {
@@ -761,12 +786,25 @@ function openHold(dir: string): Hold {
 export function plantFakeApp(dir: string, plan: Plan, owner: 'test' | 'external' = 'test'): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'package.json'), '{"name":"fixture","version":"0.0.0"}');
+  rmSync(join(dir, HELD), { force: true }); // planted again: only the NEW plan's writer announces
   if (plan.holdUntilRelease && owner === 'test') holds.set(dir, openHold(dir));
   const hold = plan.holdUntilRelease
     ? { releaseFile: join(dir, HOLD_RELEASE), ownerSocket: join(dir, HOLD_SOCKET) }
     : {};
   writeFileSync(join(dir, 'plan.json'), JSON.stringify({ ...plan, ...hold }));
 }
+
+/**
+ * The fake `next` of `dir` is HELD: it announced (`held.pid`, written whole) that it has made
+ * every report it makes before its hold ends, and now waits for its timer or for `releaseHold`.
+ * This is the readiness of a case that acts on a held writer, above all one that makes the wrapper
+ * return while the writer lives. `ran-<pid>` is not: it is written BEFORE the configuration loads,
+ * and a load reported after the wrapper removed its capture directory kills the writer's own
+ * group, so a loaded runner found dead the writer the case had just "seen running" (FU-328).
+ * Resolves with the writer's pid; no complete announcement within `ms` throws.
+ */
+export const waitHeld = (dir: string, ms = 30_000): Promise<number> =>
+  waitForPidFile(join(dir, HELD), false, ms);
 
 /** Directories whose writer is connected and has not ended: nothing may be removed under them. */
 export function heldWriters(): string[] {
