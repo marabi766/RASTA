@@ -145,6 +145,7 @@ test('new config references, unsupported config and unknown paths select the dri
   );
   for (const source of [
     '',
+    'packages:\n  - apps/*\ncatalog:\n  dep: &patch docs/dependency.md\npatchedDependencies:\n  dep@1: *patch',
     'packages:\n  - apps/*\nfutureSetting: true',
     'packages:\n  - apps/*\nglobalPnpmfile: docs/dependency.md',
     'packages:\n  - apps/*\noverrides:\n  dep: file:docs/dependency.md',

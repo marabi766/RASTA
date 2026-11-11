@@ -70,6 +70,7 @@ export function installPaths(source = readFileSync('pnpm-workspace.yaml', 'utf8'
   const packages = blocks.get('packages');
   if (!packages?.length) throw Error('Missing workspace globs');
   const scalar = (value) => {
+    if (/^[*&!]/.test(value)) throw Error('Unsupported YAML reference');
     const plain = value.replace(/^(['"])(.*)\1$/, '$2');
     if (
       !/^[A-Za-z0-9_@./*+-]+$/.test(plain) ||
