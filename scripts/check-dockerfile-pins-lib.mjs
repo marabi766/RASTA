@@ -395,9 +395,9 @@ export const REVIEWED_PROGRAMS = new Map([
   [
     'scripts/ci-install-browser.sh',
     {
-      programs: ['pnpm'],
+      programs: ['pnpm', 'od'],
       reason:
-        'three literal `pnpm --filter @rasta/web exec playwright` lines, apps/web’s locked Playwright CLI: `install chromium`, `install-deps chromium`, and `screenshot` of an inline page into the script’s own mktemp directory; none starts a container',
+        'three literal `pnpm --filter @rasta/web exec playwright` lines, apps/web’s locked Playwright CLI: `install chromium`, `install-deps chromium`, and `screenshot` of an inline page into the script’s own mktemp directory; none starts a container. `od -An -v -tx1` prints the hex of the screenshot’s first 16 bytes from its standard input and runs nothing',
     },
   ],
   [

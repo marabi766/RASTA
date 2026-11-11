@@ -16,8 +16,9 @@
 #   2. proves it: Playwright's own `screenshot` command launches that build
 #      headless (the executable and defaults the suite's projects use) on a
 #      page given inline, and writes a PNG into a directory made for this
-#      proof. Proven means the command exited 0 AND the PNG is there; an
-#      exit 0 alone is not a proof;
+#      proof. Proven means the command exited 0 AND the file it wrote begins
+#      as a PNG does: the 8-byte signature, then the IHDR chunk header (the
+#      first 16 bytes; the image is not decoded). Exit 0 alone is not a proof;
 #   3. only if the proof fails, installs Playwright's system packages
 #      (`playwright install-deps chromium`, which is apt) and proves again.
 #
@@ -40,6 +41,9 @@ BACKOFF=(${CI_BROWSER_BACKOFF:-5 15})
 ATTEMPT_SECONDS="${CI_BROWSER_ATTEMPT_SECONDS:-120}"
 PROOF_SECONDS="${CI_BROWSER_PROOF_SECONDS:-120}"
 PROOF_PAGE='data:text/html,<title>rasta</title><p>browser launch proof</p>'
+# The first 16 bytes of every PNG, in hex: the signature (0x89 "PNG" CR LF
+# 0x1a LF), then the first chunk's length (13) and type ("IHDR").
+PNG_START=89504e470d0a1a0a0000000d49484452
 
 if [ "$#" -ne 0 ]; then
   echo "usage: ci-install-browser.sh (takes no arguments)" >&2
@@ -86,8 +90,8 @@ prove() {
   timeout --kill-after=10 "$PROOF_SECONDS" \
     pnpm --filter @rasta/web exec playwright screenshot --browser chromium "$PROOF_PAGE" "$shot"
   rc=$?
-  # The first bytes of a PNG are 0x89 "PNG".
-  if [ "$rc" -eq 0 ] && [ "$(head -c 4 "$shot" 2>/dev/null | tail -c 3)" = PNG ]; then
+  if [ "$rc" -eq 0 ] &&
+    [ "$(head -c 16 "$shot" 2>/dev/null | od -An -v -tx1 | tr -d ' \n')" = "$PNG_START" ]; then
     rm -rf "$dir"
     echo "browser-launch-proof: Chromium launched headless and rendered a page"
     return 0
