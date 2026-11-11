@@ -15,7 +15,11 @@
     "tests/e2e/src/api.ts",
     "apps/web/e2e/expect.ts"
   ],
-  "globalPassThroughEnv": ["TEMPORAL_TEST_SERVER_DIR"],
+  // PRISMA_SKIP_POSTINSTALL_GENERATE (FU-329): a task's `pnpm` reinstalls stale dependencies
+  // before it runs, and without this variable that reinstall generates the Prisma client from
+  // the @prisma/client hook, outside scripts/prisma-generate.mjs. Strict mode withheld it from
+  // every task; scripts/prisma-turbo-env.test.mjs runs turbo and reads what each task receives.
+  "globalPassThroughEnv": ["TEMPORAL_TEST_SERVER_DIR", "PRISMA_SKIP_POSTINSTALL_GENERATE"],
   "globalEnv": ["NODE_ENV", "CI"],
   "tasks": {
     "build": {

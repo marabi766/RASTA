@@ -649,6 +649,8 @@ export function controlledEnv(base) {
     CI: 'true',
     TURBO_TELEMETRY_DISABLED: '1',
     SERVICE_ENV_WITHHELD_BASE: base,
+    // As CI's workflow env: a check that starts pnpm must not generate from its hook (FU-329).
+    PRISMA_SKIP_POSTINSTALL_GENERATE: 'true',
   };
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'SystemRoot']) {
     if (process.env[key]) env[key] = process.env[key];

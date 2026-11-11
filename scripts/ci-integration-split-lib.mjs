@@ -1250,6 +1250,7 @@ function runVerdictCases(script, options, env, needsVar, needs) {
     const outcome = spawnSync('bash', [...options, script], {
       env: {
         PATH: process.env.PATH,
+        PRISMA_SKIP_POSTINSTALL_GENERATE: 'true', // FU-329: as every rebuilt child environment
         ...Object.fromEntries(Object.entries(env).map(([key, value]) => [key, textOf(value)])),
         [needsVar]: JSON.stringify(context, null, 2),
       },

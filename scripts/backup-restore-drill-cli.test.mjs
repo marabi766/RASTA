@@ -357,9 +357,12 @@ async function referenceCliFixture(directory, mode) {
   for (const entry of readdirSync(join(root, 'services'))) {
     writeFileSync(
       join(root, 'services', entry, 'package.json'),
-      JSON.stringify({ scripts: { 'db:migrate': 'true' } }),
+      JSON.stringify({ scripts: { 'db:migrate': 'true', 'db:seed': 'true' } }),
     );
   }
+  // The seed's explicit generation: a stand-in, so the seed launch after it is reached.
+  mkdirSync(join(root, 'scripts'));
+  writeFileSync(join(root, 'scripts', 'prisma-generate.mjs'), '');
   const names = readdirSync(join(root, 'services')).map(
     (name) => 'rasta_' + name.replace(/-service$/, ''),
   );
@@ -418,6 +421,7 @@ async function referenceCliFixture(directory, mode) {
   writeFileSync(
     join(directory, 'pnpm'),
     `#!/bin/sh
+printf '%s %s\\n' "\${PRISMA_SKIP_POSTINSTALL_GENERATE-unset}" "$*" >> '${directory}/pnpm-calls'
 ${mode === 'failed-migrate' ? 'case "$*" in *db:migrate*) echo PRIVATE_MIGRATION_SQL; echo PRIVATE_MIGRATION_SQL >&2; exit 43;; esac' : ':'}
 exit 0
 `,
@@ -504,7 +508,8 @@ for (const mode of [
     let child;
     try {
       const { root, path } = await referenceCliFixture(directory, mode);
-      child = start(directory, root, {}, path);
+      // FU-329: the caller does not suppress hook generation, so what pnpm receives is the drill's.
+      child = start(directory, root, { PRISMA_SKIP_POSTINSTALL_GENERATE: '' }, path);
       let stdout = '',
         stderr = '';
       child.stdout.on('data', (chunk) => {
@@ -542,6 +547,19 @@ for (const mode of [
         readdirSync(directory).some((name) => name.startsWith('rasta-restore-drill-')),
         false,
       );
+      // Every pnpm the drill starts can reinstall stale dependencies: all three launch sites
+      // (build, migrate, seed) hand it the suppression, read from pnpm's own environment.
+      const launches = readFileSync(join(directory, 'pnpm-calls'), 'utf8').trim().split('\n');
+      assert.deepEqual(
+        launches.filter((line) => !line.startsWith('true ')),
+        [],
+      );
+      if (success)
+        for (const site of ['exec turbo run build', 'run db:migrate', 'run db:seed'])
+          assert.ok(
+            launches.some((line) => line.startsWith(`true ${site}`)),
+            site,
+          );
       if (mode === 'bypass-fixed' || mode === 'wrong-input') {
         assert.equal(report.error.message, 'Invalid schema dump provenance');
         assert.doesNotMatch(report.error.message, /TypeError|undefined|properties/);
