@@ -2121,7 +2121,8 @@ test('FU-324 refuses locking membership subqueries, including tuple DELETE and A
   const cte = `WITH picked AS MATERIALIZED (SELECT id FROM t LIMIT 1 FOR UPDATE SKIP LOCKED)
     UPDATE t SET lease = 1 FROM picked WHERE t.id = picked.id`;
   assert.deepEqual(claimSubqueryProblems(cte), []);
-  assert.deepEqual(claimSubqueryProblems(`SELECT 'IN (SELECT id FOR UPDATE)'`), []);
+  // FU-325: a string that holds a picker is refused wherever it stands; nothing proves it is not executed.
+  assert.match(claimSubqueryProblems(`SELECT 'IN (SELECT id FOR UPDATE)'`).join(), /FU-324/);
 });
 
 test('FU-324 PostgreSQL comment boundaries cannot hide a locking picker', () => {
@@ -2197,15 +2198,301 @@ for (const [name, path, wrap] of [
     assert.match(found.filter((p) => p.includes(path)).join(), /FU-324/);
   });
 
-test('FU-324 cannot be waived by a matching reviewed DO block', () => {
-  const body = 'BEGIN DELETE FROM task WHERE id IN (SELECT id FROM task FOR UPDATE); END';
-  const entry = { service: 'x-service', migration: '1_init', sha256: contentHash(body) };
-  REVIEWED_DO_BLOCKS.push(entry);
-  try {
-    assert.match(scanOf('x-service', `DO $$${body}$$;`).join(), /FU-324/);
-  } finally { REVIEWED_DO_BLOCKS.pop(); }
+// FU-325 (PR #1070 r2 F1): the escapes the review executed. No statement head is needed to be read.
+const PICKED = '(SELECT id FROM task LIMIT 1 FOR UPDATE SKIP LOCKED)';
+const CLAIM = `WITH args(n) AS (SELECT 1) DELETE FROM task WHERE id IN ${PICKED}`;
+const quoted = (text) => `'${text.replaceAll("'", "''")}'`;
+
+for (const [name, path, wrap] of [
+  ['source literal', 'services/x-service/src/claim.ts', (s) => `const sql = ${JSON.stringify(s)};`],
+  ['source literal parts', 'services/x-service/src/claim.ts', (s) =>
+    `const sql = \`${s.replace('FOR UPDATE', "FOR ${('UP')}${'DA' + 'TE'}")}\`;`],
+  ['migration DML', 'services/x-service/prisma/migrations/2_claim/migration.sql', (s) => s],
+  ['SQL routine', 'services/x-service/prisma/migrations/2_claim/migration.sql', (s) =>
+    `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS ${quoted(s)}; DROP FUNCTION f();`],
+  ['PLpgSQL routine', 'services/x-service/prisma/migrations/2_claim/migration.sql', (s) =>
+    `CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $f$BEGIN EXECUTE ${quoted(`; EXPLAIN ANALYZE ${s}`)}; END$f$;`],
+  ['down migration', 'services/x-service/prisma/migrations/1_init/down.sql', (s) => s],
+  ['operational SQL', 'scripts/claim.sql', (s) => `SELECT ${quoted(s)};`],
+  ['operational JS', 'scripts/claim.mjs', (s) => `db.query('WI' + ${JSON.stringify(s.slice(2))});`],
+  ['JS psql argument', 'scripts/claim.mjs', (s) => `spawnSync('psql', ['-X', '-c', ${JSON.stringify(s)}]);`],
+  ['shell attached -c', 'scripts/claim.sh', (s) => `psql -c${JSON.stringify(s)}`],
+  ['shell here-document', 'scripts/claim.sh', (s) => `psql <<'SQL'\n${s};\nSQL`],
+])
+  test(`FU-325 reads ${name} with no statement head it knows`, () => {
+    const found = scanOf('x-service', 'CREATE TABLE task (id text);', '', { [path]: wrap(CLAIM) });
+    assert.match(found.filter((p) => p.includes(path)).join(), /FU-324/);
+  });
+
+test('FU-325 SQL is composed and decoded before it is classified, in every quoting', () => {
+  for (const sql of [
+    `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $body$${CLAIM}$body$`,
+    `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS E'${CLAIM.replace('FOR', '\\x46OR')}'`,
+    `DO $$BEGIN EXECUTE E'${CLAIM.replace('FOR', '\\106OR')}'; END$$`,
+    `DO $a$BEGIN EXECUTE $b$<<l>> ${CLAIM}$b$; END$a$`,
+    `DO $$BEGIN EXECUTE 'DEL' || 'ETE FROM task WHERE id IN (SELECT id FROM task FOR UP' || 'DATE)'; END$$`,
+    `SELECT 'DELETE FROM task WHERE id IN (SELECT id FROM task FOR UP'\n  'DATE)'`,
+    // An operand that is not a constant is unknown text: it may be the lock clause, or the picker.
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id IN (SELECT id FROM task LIMIT 1 ' || lock_clause || ')'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id IN (SELECT id FROM task FOR ' || upper(mode)::text || ')'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id IN (' || picker || ')'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id = ANY ((' || picker || '))'; END$$`,
+    `DO $$BEGIN EXECUTE U&'DELETE FROM task WHERE id IN (SELECT id FROM task !0046OR UPDATE)' UESCAPE '!'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task WHERE id IN (SELECT id FROM ' || quote_ident(t)::text || ' FOR UPDATE)'; END$$`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM task USING (' || picker || ') due WHERE task.id = due.id'; END$$`,
+    `DO $$BEGIN EXECUTE q || ''' AND id IN (SELECT id FROM task FOR /* c */ UPDATE)'; END$$`,
+  ])
+    assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+  for (const sql of [
+    `DO $$BEGIN RAISE EXCEPTION 'List them with: SELECT id FROM task t WHERE NOT EXISTS (SELECT 1 FROM p) for a person''s update'; END$$`,
+    `DO $$BEGIN EXECUTE 'SELECT count(*) FROM ' || quote_ident(t) || ' WHERE a = ''x'''; EXECUTE 'CREATE INDEX i ON t (' || col || ')'; END$$`,
+    `SELECT string_agg(n || ' (' || s || ')', ', ') FROM task WHERE id = 'it''s' || $1 || ' (' || pct || '%)'`,
+    `DO $$BEGIN EXECUTE 'DELETE FROM t WHERE EXISTS (SELECT 1 FROM ' || quote_ident(t) || ' x WHERE x.id = ' || quote_literal(v) || ')'; END$$`,
+    `DO $$BEGIN EXECUTE 'WITH picked AS MATERIALIZED (SELECT id FROM ' || quote_ident(t) || ' LIMIT 1 FOR UPDATE) DELETE FROM task USING picked'; END$$`,
+    `WITH picked AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id`,
+  ])
+    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
 });
 
+test('FU-324 cannot be waived by a matching reviewed DO block', () => {
+  // PR #1070 r2: the entry hashes the whole string token, as the replay does, so it really matches.
+  for (const [body, claim] of [
+    [`$$BEGIN EXECUTE 'DROP TABLE task'; END$$`, false],
+    [`$$BEGIN EXECUTE 'DEL' || 'ETE FROM task WHERE id IN (SELECT id FROM task FOR UP' || 'DATE)'; END$$`, true],
+  ]) {
+    REVIEWED_DO_BLOCKS.push({ service: 'x-service', migration: '1_init', sha256: contentHash(body) });
+    try {
+      const found = scanOf('x-service', `CREATE TABLE task (id text); DO ${body};`).join();
+      assert.doesNotMatch(found, /DDL or SQL in a DO block/);
+      assert.equal(/FU-324/.test(found), claim, body);
+    } finally { REVIEWED_DO_BLOCKS.pop(); }
+  }
+});
+
+// PR #1082 r1 (F1–F3): the review's probes and their cross-product, quoting × wrapper × entry
+// point. Split 1 is the review's: its first piece alone is an unbalanced statement, which
+// origin/main refused. The pieces of split 2 say nothing alone: only composing them finds it.
+const SPLITS = [
+  ['DELETE FROM task WHERE id IN (SELECT id FROM task LIMIT 1 FOR UP', '', 'DATE SKIP LOCKED)'],
+  ['EXPLAIN DELETE FROM task WHERE id = (SE', 'LECT id FROM task LIMIT 1 FOR UP', 'DATE SKIP LOCKED)'],
+];
+const QUOTINGS = [quoted, (s) => `E${quoted(s).replace('FOR', '\\x46OR')}`,
+  (s) => `U&${quoted(s).replace('FOR', '\\0046OR')}`, (s) => `$q$${s}$q$`];
+const WRAPPERS = [
+  (a, b, c) => `${a}::text || ${b}::pg_catalog.varchar || ${c}`,
+  (a, b, c) => `(${a}) || ((${b}) || ${c})`,
+  (a, b, c) => `CAST(${a} AS text) || CAST(${b} AS pg_catalog.text) || CAST(${c} AS varchar)`,
+  (a, b, c) => `${a} COLLATE "C" || ${b} COLLATE pg_catalog."C" || ${c}`,
+  (a, b, c) => `CAST((${a})::text || ${b} AS varchar) COLLATE "C" || (${c})`,
+];
+const TS_WRAPPERS = [
+  (a, b, c) => `(${a} as string) + (${b} as string) + (${c} as const)`,
+  (a, b, c) => `(${a} satisfies string) + (${b} satisfies string) + ${c}`,
+  (a, b, c) => `${a}! + ${b}! + ${c}`,
+  (a, b, c) => `<string>${a} + <string>${b} + ${c}`,
+  (a, b, c) => `\`\${${a} as string}\${(${b})!}\${<string>${c}}\``,
+];
+const doBody = (expression) => `$do$BEGIN EXECUTE ${expression}; END;$do$`;
+const WRAPPED = SPLITS.flatMap((split) =>
+  QUOTINGS.flatMap((quote) => WRAPPERS.map((wrap) => doBody(wrap(...split.map(quote))))));
+const PROBE = SPLITS[0].join('');
+const QUOTED = [quoted(PROBE), QUOTINGS[1](PROBE), QUOTINGS[2](PROBE), `${quoted(SPLITS[0][0])} || ${quoted(SPLITS[0][2])}`,
+  quoted(PROBE.replace('FOR UP', 'FOR /* c */ UP'))].map(doBody);
+const chain = (n) => Array(n).fill(String.raw`'/* \n */ '`).join(' || ');
+const js = (text) => `spawnSync('psql', ['-X', '-c', ${JSON.stringify(text)}]);`;
+const sh = (text) => `psql -X -c '${text.replaceAll("'", `'\\''`)}'\n`;
+const ENTRY_POINTS = {
+  'scripts/r1/N.sql': (text) => text,
+  'services/x-service/prisma/migrations/2_r1_N/migration.sql': (text) => text,
+  'scripts/r1/N.mjs': js,
+  'services/x-service/src/r1/N.ts': (text) => `export const sql = ${JSON.stringify(text)};`,
+  'scripts/r1/N.sh': sh,
+};
+let r1;
+/** One scan of every entry point (a scan takes seconds): the `path:line`s it must refuse, and those it did. */
+function r1Scan() {
+  if (r1) return r1;
+  const files = {}, expected = { F1: [], F2: [], F3: [] }, reviewed = [];
+  const add = (finding, path, text) => { files[path] = text; expected[finding].push(`${path}:1`); };
+  const everywhere = (finding, name, body) => {
+    for (const [path, wrap] of Object.entries(ENTRY_POINTS)) add(finding, path.replace('N', name), wrap(`DO ${body};`));
+    reviewed.push({ service: 'x-service', migration: `2_r1_${name}`, sha256: contentHash(body) });
+  };
+  WRAPPED.forEach((body, n) => everywhere('F2', `w${n}`, body));
+  everywhere('F3', 'budget', doBody(`${chain(6)} || ${quoted(PROBE)}`));
+  // The review's text, and one with no statement head: only opening its string finds the SQL.
+  for (const [n, body] of QUOTED.entries()) for (const [name, text] of [['do', `DO ${body};`], ['call', `CALL run(${body});`]]) {
+    for (const ext of ['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts']) add('F1', `scripts/r1/${name}${n}.${ext}`, js(text));
+    for (const ext of ['sh', 'bash']) add('F1', `scripts/r1/${name}${n}.${ext}`, sh(text));
+  }
+  const parts = SPLITS.flatMap((split) => TS_WRAPPERS.map((wrap) => wrap(...split.map((s) => JSON.stringify(s)))));
+  files['scripts/r1/wrappers.ts'] = parts.map((part) => `run(${part});\n`).join('');
+  expected.F2.push(...parts.map((_, n) => `scripts/r1/wrappers.ts:${n + 1}`));
+  // Ordinary data and accepted SQL in the same places: read, and not refused.
+  files['scripts/r1/fine.ts'] = `run(('EXPLAIN SELECT (' as string) + n + ')', 'see (the list' as string, <string>'(for update)');\n`;
+  files['scripts/r1/fine.sh'] = `echo 'waiting for update (1 of 2)' "$(date)"\n${sh(`DO ${doBody(`'CREATE INDEX i ON t (' || col || ')'`)};`)}`;
+  files['scripts/r1/fine.sql'] = `SELECT CAST('a' AS text) || ('b')::text COLLATE "C" || U&'d\\0061ta' || x, ${chain(5)};`;
+  REVIEWED_DO_BLOCKS.push(...reviewed);
+  try {
+    const found = scanOf('x-service', 'CREATE TABLE task (id text);', '', files);
+    assert.doesNotMatch(found.join(), /DDL or SQL in a DO block/);
+    const refused = found.filter((p) => /locking subquery/.test(p)).map((p) => p.split(': ')[0]);
+    r1 = { missed: (finding) => expected[finding].filter((p) => !refused.includes(p)),
+      unexpected: refused.filter((p) => !Object.values(expected).flat().includes(p)) };
+  } finally { REVIEWED_DO_BLOCKS.splice(-reviewed.length); }
+  return r1;
+}
+
+test('PR #1082 r1 F1: a text is opened before it is judged, never dropped for what it seems to hold', () => {
+  assert.deepEqual(r1Scan().missed('F1'), []);
+  assert.deepEqual(r1Scan().unexpected, []);
+});
+
+test('PR #1082 r1 F2: a text is composed through the syntax that leaves it the text it is', () => {
+  for (const body of WRAPPED) assert.match(claimSubqueryProblems(`DO ${body};`).join(), /FU-324/, body);
+  assert.deepEqual(r1Scan().missed('F2'), []);
+  // Composed where this reader does not follow: a piece is judged with unknown text where it ends,
+  // and a piece origin/main read for its statement head is still read so.
+  for (const sql of [
+    `SELECT concat('EXPLAIN DELETE FROM task WHERE id = (SE', 'LECT id FROM task FOR UPDATE)')`,
+    `SELECT format('%s%s', 'EXPLAIN DELETE FROM task WHERE id IN (', picker)`,
+    `SELECT concat('EXPLAIN DELETE FROM task WHERE id = (SELECT id FROM task ', lock_clause, ')')`,
+    `SELECT upper('EXPLAIN DELETE FROM task WHERE id = (SELECT id FROM task FOR UP')::bpchar || 'DATE)'`,
+    `SELECT concat('DELETE FROM task WHERE id = (SE', rest)`,
+    // An operand that is not a constant is read too; a name is a constant only where nothing else may set it.
+    `DO ${doBody(`'x' || lower(${quoted(`EXPLAIN ${PROBE}`)})`)}`,
+    `DO $$DECLARE a CONSTANT text := ${quoted(SPLITS[1][0])}; b CONSTANT text := ${quoted(SPLITS[1][1])}; BEGIN EXECUTE a || b || 'DATE)'; END$$`,
+    `DO $$DECLARE p CONSTANT text := 'SELECT 1'; BEGIN DECLARE p text := picker; BEGIN EXECUTE 'EXPLAIN DELETE FROM task WHERE id IN (' || p || ')'; END; END$$`,
+    `DO $$DECLARE p CONSTANT text := '(x'; BEGIN EXECUTE r.p || ' FOR UPDATE)'; END$$`,
+  ])
+    assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+  for (const sql of [
+    `DO $$DECLARE p CONSTANT text := 'SELECT id FROM task'; BEGIN EXECUTE 'SELECT count(*) FROM (' || p || ') s'; EXECUTE p || ' LIMIT 1'; END$$`,
+    `SELECT concat('see (the list', x), '(for update)', upper('a (b')::bpchar || 'c)', u & 'x' FROM t WHERE id IN ('a') AND b = ANY (('{a}')::text[])`,
+    `DO ${doBody(`'WITH picked AS MATERIALIZED (SELECT id FROM ' || quote_ident(t) || (' LIMIT 1 FOR UPDATE)')::text || ' DELETE FROM task USING picked'`)}`,
+  ])
+    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+});
+
+test('PR #1082 r1 F3: a text with more readings than the budget is refused, never read as empty', () => {
+  for (const n of [5, 6, 7, 8, 12])
+    assert.match(claimSubqueryProblems(`DO ${doBody(`${chain(n)} || ${quoted(PROBE)}`)};`).join(), /FU-324/, String(n));
+  assert.deepEqual(r1Scan().missed('F3'), []);
+  // Whatever it holds, and through every composition: nothing proves what was not read.
+  for (const sql of [`SELECT ${chain(8)}`, `SELECT ${quoted(`a note: ${chain(8)}`)}`, `SELECT CAST((${chain(8)})::text AS text) COLLATE "C" || 'x'`, `DO ${doBody(`a || (${chain(8)})`)}`])
+    assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+  assert.deepEqual(claimSubqueryProblems(`DO ${doBody(`${chain(5)} || x`)}`), []);
+});
+
+// PR #1082 r2 N1: a name's spelling does not prove its binding. PostgreSQL 16 runs each UNPROVEN
+// text with other text where 0b3fe835 read the `SELECT 1` of a constant that is not what is read.
+const ONE = `CONSTANT text := 'SELECT 1'`;
+const run = (name) => `EXECUTE 'DELETE FROM task WHERE id IN (' || ${name} || ')'`;
+const viaColumn = (name) => `q text; BEGIN SELECT 'DELETE FROM task WHERE id IN (' || ${name} || ')' INTO q FROM picker; EXECUTE q; END`;
+const claimFn = (args, body) => `CREATE FUNCTION claim(${args}) RETURNS void LANGUAGE plpgsql AS $$${body}$$;`;
+const LONG = 'a'.repeat(63);
+const UNPROVEN = [
+  // The review's: a nested constant beside a parameter (IN; OUT, set with `=`; INOUT), read before
+  // the nested block or after it.
+  claimFn('p text', `BEGIN ${run('p')}; DECLARE p ${ONE}; BEGIN NULL; END; END;`),
+  claimFn('OUT p text', `BEGIN p = picker(); DECLARE p ${ONE}; BEGIN NULL; END; ${run('p')}; END;`),
+  claimFn('INOUT p text', `DECLARE n int; BEGIN DECLARE p ${ONE}; BEGIN NULL; END; ${run('p')}; END;`),
+  // Read before its declaration, the name is still the parameter.
+  claimFn('p text', `DECLARE q text := 'DELETE FROM task WHERE id IN (' || p || ')'; p ${ONE}; BEGIN EXECUTE q; END;`),
+  // A column: under variable_conflict (directive, or the session's setting), and beside "P".
+  claimFn('', `#variable_conflict use_column\nDECLARE p ${ONE}; ${viaColumn('p')};`),
+  `SET plpgsql.variable_conflict = use_column; DO $$DECLARE p ${ONE}; ${viaColumn('p')}$$;`,
+  `DO $$DECLARE "P" ${ONE}; ${viaColumn('p')}$$;`,
+  `DO $$DECLARE p ${ONE}; ${viaColumn('"P"')}$$;`,
+  // A handler's own SQLERRM, a cursor argument of the same 63 bytes, a longer name (`ép`).
+  `DO $$DECLARE sqlerrm ${ONE}; BEGIN RAISE EXCEPTION '%', picker(); EXCEPTION WHEN others THEN ${run('sqlerrm')}; END$$;`,
+  `DO $$DECLARE ${LONG} ${ONE}; c CURSOR (${LONG}b text) FOR SELECT 'DELETE FROM task WHERE id IN (' || ${LONG} || ')'; q text; BEGIN OPEN c(picker()); FETCH c INTO q; EXECUTE q; END$$;`,
+  claimFn('p text', `DECLARE ép ${ONE}; BEGIN ${run('p')}; END;`),
+  // The type decides the value: a `name` ends at 63 bytes (`… FOR UPDATE`), a char(n) loses its spaces.
+  `DO $$DECLARE p CONSTANT name := '${'SELECT id FROM task LIMIT 1 FOR UPDATE'.padStart(63)}d_at'; BEGIN ${run('p')}; END$$;`,
+  `DO $$DECLARE s CONSTANT char(2) := '  '; BEGIN EXECUTE 'DELETE FROM task WHERE id IN (SELECT id FROM task LIMIT 1 FOR UP' || s || 'DATE)'; END$$;`,
+  // Not a read of the variable: a type of that name (after `::`, before a string), and a word SQL
+  // reads as a keyword's value (USER is the role's name), quoted where it is declared or not.
+  `DO $$DECLARE p CONSTANT text := 'WITH picked AS MATERIALIZED '; BEGIN EXECUTE head()::p || '${PICKED}'; END$$;`,
+  `DO $$DECLARE p CONSTANT text := 'WITH picked AS MATERIALIZED '; BEGIN EXECUTE 'DELETE FROM task WHERE id IN ' || p '${PICKED}'; END$$;`,
+  `DO $$DECLARE user ${ONE}; BEGIN ${run('user')}; END$$;`,
+  `DO $$DECLARE "current_schema" ${ONE}; BEGIN ${run('current_schema')}; END$$;`,
+  // No chain starts at a name that is no text: what follows it is read alone too (`SELECT 1)`).
+  claimFn('p text', `BEGIN EXECUTE p || 'SELECT 1)'; DECLARE p CONSTANT text := '('; BEGIN NULL; END; END;`),
+  // A hole in the block: `nested` may be `DECLARE p text := picker(); BEGIN`.
+  `DO $o$BEGIN EXECUTE 'DO $x$DECLARE p CONSTANT text := ''SELECT 1''; BEGIN ' || nested || ' ${run('p').replaceAll("'", "''")}; END; END$x$'; END$o$;`,
+];
+// A text nothing runs as one block proves no scope: the piece of a body, and a script, which psql
+// runs statement by statement (the DECLARE fails, the SELECT reads the column p).
+const NO_BLOCK = [
+  `DECLARE p ${ONE}; BEGIN NULL; END; ${run('p')}; END;`,
+  `DECLARE p ${ONE}; BEGIN; SELECT run_sql('DELETE FROM task WHERE id IN (' || p || ')') FROM (SELECT picker() AS p) s; END;`,
+];
+// Refused by 0b3fe835 too, and still: an unproven constant is ALSO read as its text, in any case;
+// a name that qualifies a column, or is called, is not the constant.
+const STILL_REFUSED = [
+  `DO $$BEGIN DECLARE a CONSTANT text := ${quoted(SPLITS[1][0])}; B CONSTANT text := ${quoted(SPLITS[1][1])}; BEGIN EXECUTE A || "b" || 'DATE SKIP LOCKED)'; END; END$$;`,
+  `DO $$DECLARE a CONSTANT text := ${quoted(SPLITS[1][0])}; B CONSTANT text := ${quoted(SPLITS[1][1])}; BEGIN EXECUTE A || "b" || 'DATE SKIP LOCKED)'; END$$;`,
+  claimFn('text', `BEGIN DECLARE p ${ONE}; BEGIN NULL; END; DECLARE p ALIAS FOR $1; BEGIN ${run('p')}; END; END;`),
+  `DO $$DECLARE p CONSTANT text := '1)'; q text; BEGIN SELECT 'DELETE FROM task WHERE id IN (' || p.picker || ')' INTO q FROM pickers p; EXECUTE q; END$$;`,
+  `DO $$DECLARE p CONSTANT text := '1)'; BEGIN EXECUTE 'DELETE FROM task WHERE id IN (' || p(1) || ')'; END$$;`,
+];
+// Proven: the shape of service-privilege-split.bash (nested blocks, a handler, IF, LOOP, CASE), and
+// a constant of the outermost block, which shadows a parameter of its name.
+const PROVEN = [
+  `DO $$DECLARE Pending CONSTANT text := 'SELECT id FROM task';
+    still CONSTANT text := 'SELECT EXISTS (SELECT 1 FROM (' || pending || ') p WHERE p.id = $1)'; n int;
+  BEGIN
+    EXECUTE 'SELECT count(*) FROM (' || pending || ') p' INTO n;
+    LOOP EXIT WHEN n = 0; IF n > 1 THEN n := CASE WHEN n > 2 THEN 1 ELSE 0 END; END IF;
+      BEGIN n := n - 1; EXCEPTION WHEN others THEN NULL; END;
+      CASE n WHEN 1 THEN NULL; ELSE NULL; END CASE;
+      DECLARE m int; BEGIN m := n; END;
+      EXECUTE pending || ' ORDER BY id LIMIT 1' INTO n;
+      EXECUTE 'SELECT count(*) FROM (' || "pending" || ') p' INTO n; EXECUTE still INTO n USING n;
+    END LOOP;
+  END$$;`,
+  claimFn('p text', `DECLARE p CONSTANT pg_catalog.varchar := 'SELECT id FROM task'; BEGIN EXECUTE 'SELECT count(*) FROM (' || P || ') s'; END;`),
+];
+
+test('PR #1082 r2 N1: a constant is read alone only where its binding is proven', () => {
+  for (const sql of [...UNPROVEN, ...NO_BLOCK, ...STILL_REFUSED])
+    assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
+  for (const sql of PROVEN) assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+  // One reading does not stand for the other: the same text as a block, then as a script.
+  const [seen, body] = [new Set(), `DECLARE p ${ONE}; BEGIN ${run('p')}; END;`];
+  assert.deepEqual(claimSubqueryProblems(body, seen, true, true), []);
+  assert.match(claimSubqueryProblems(body, seen, true).join(), /FU-324/);
+});
+
+test('PR #1082 r2 N1: in every file type, and under a reviewed DO block', () => {
+  const files = {}, expected = [], reviewed = [];
+  const everywhere = (name, text, refused) => {
+    const migration = `services/x-service/prisma/migrations/2_r2_${name}/migration.sql`;
+    const paths = { [`scripts/r2/${name}.sql`]: text, [migration]: text };
+    for (const ext of ['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts']) paths[`scripts/r2/${name}.${ext}`] = js(text);
+    for (const ext of ['sh', 'bash']) paths[`scripts/r2/${name}.${ext}`] = sh(text);
+    Object.assign(files, paths);
+    if (refused) expected.push(...Object.keys(paths).map((path) => `${path}:1`));
+    const body = /^(?:SET [^;]*; )?DO (\$(\w*)\$[^]*\$\2\$);$/.exec(text)?.[1];
+    if (body) reviewed.push({ service: 'x-service', migration: `2_r2_${name}`, sha256: contentHash(body) });
+  };
+  UNPROVEN.forEach((text, n) => everywhere(`u${n}`, text, true));
+  NO_BLOCK.forEach((text, n) => everywhere(`n${n}`, text, true));
+  PROVEN.forEach((text, n) => everywhere(`p${n}`, text, false));
+  // The session's setting, made by another literal of the same file.
+  files['scripts/r2/session.ts'] = `${js('SET plpgsql.variable_conflict = use_column;')}\n${js(`DO $$DECLARE p ${ONE}; ${viaColumn('p')}$$;`)}`;
+  expected.push('scripts/r2/session.ts:2');
+  REVIEWED_DO_BLOCKS.push(...reviewed);
+  try {
+    const found = scanOf('x-service', 'CREATE TABLE task (id text);', '', files);
+    assert.equal(reviewed.length, 13);
+    assert.doesNotMatch(found.join(), /DDL or SQL in a DO block/);
+    const refused = found.filter((p) => /locking subquery/.test(p)).map((p) => p.split(': ')[0]);
+    assert.deepEqual(expected.filter((p) => !refused.includes(p)), []);
+    assert.deepEqual(refused.filter((p) => !expected.includes(p)), []);
+  } finally { REVIEWED_DO_BLOCKS.splice(-reviewed.length); }
+});
 
 test('FU-324 opaque inventory is exact, reasoned, and cannot waive readable SQL', () => {
   const path = 'scripts/claim.mjs', source = 'db.$queryRawUnsafe(runtime);';
