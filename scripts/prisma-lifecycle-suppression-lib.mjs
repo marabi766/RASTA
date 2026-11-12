@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { parseDocument } from 'yaml';
 import { dockerInstructions } from './check-dockerfile-pins-lib.mjs';
 import {
@@ -33,15 +34,17 @@ import { SHELL_WORD } from './ci-shell-text-lib.mjs';
  * a command word is a literal of its `programs` or a file of the inventory, or it is refused, so
  * `env`, `exec`, `sudo`, `xargs`, `npx`, a quoted or computed command word are refused without
  * being named here (PR #1085 r1). A program that can run what it is given has a closed grammar
- * there (PR #1085 r2 F1, FU-334): `pnpm`/`npm` by their option tables, so an option that is not
- * listed (`-c`, `--shell-mode`, `--config.*`) is refused; `bash` and a container's shell by
- * their `-c` body, read by the same reader; `docker` by reviewed options, mounts and container
- * programs. Every file is a member of `files`, the inventory the caller read: a script run by
- * its path, an action a step uses, a Dockerfile a step builds.
+ * there (PR #1085 r2 F1, FU-334): `pnpm`/`npm`, `git`, `go` and `psql` by their option tables, so
+ * an option that is not listed (`-c`, `--shell-mode`, `--config.*`, `-exec`) is refused; `bash`
+ * and a container's shell by their `-c` body, read by the same reader; `node` by a file or
+ * reviewed inline text; `docker` by reviewed options, mounts and container programs. Every file
+ * is a member of `files`, the inventory the caller read: a script run by its path, an action a
+ * step uses, a Dockerfile a step builds.
  * Not proven: what a listed program (`node x.mjs`, a repository script, a reviewed action, an
- * image's own entry point, a `package.json` script) does with the environment and the operands
- * it was given; what a program reads from a variable other than the package managers'
- * `*_config_*` names; and a file a step wrote before it is run or read as configuration.
+ * image's own entry point, a `package.json` script, `curl`, `openssl`) does with the environment
+ * and the operands it was given; what a program reads from a variable other than `PATH` and the
+ * package managers' `*_config_*` names (`NODE_OPTIONS`, `GIT_*`, `DOCKER_HOST`); and a file a
+ * step wrote before it is run or read as configuration (`.npmrc`, an overwritten script).
  *
  * Pure: text in, problems and the lifecycle commands found out.
  */
@@ -60,8 +63,6 @@ const DOCKER_STARTS = new Set(['CMD', 'ENTRYPOINT', 'HEALTHCHECK']);
  * are the base image's programs only until the stage copies a file in or changes a search path.
  */
 const INERT_RUN = /^(?:addgroup|adduser|rm|mkdir|chown|chmod)(?: [\w@%+=:,./-]+)+$/;
-/** All a container may start: `node` itself, on a plain path or on inline text that quotes nothing. */
-const STARTS_NODE = /^(?:\["node"(?:, "[\w./-]+")+\]|node -e "[^"\\$`]*")$/;
 const list = (text) => new Set(text.split(' '));
 /**
  * What the tokenizer does not model but still reads as commands: nothing hides behind these.
@@ -82,9 +83,48 @@ const UNLISTED = 'a command this check cannot prove hands on the environment';
 const REPO_FILE = /^(?:scripts|infrastructure)\/(?!.*\.\.)[\w./-]+$/;
 /** `pnpm_config_<setting>`, `npm_config_<setting>`: a package manager's options, as a variable. */
 const CONFIG_NAME = /(?:^|\s)p?npm_config_/i;
+/** Nor the search path: a command word names the listed program only while nothing moves it. */
 const unassignable = (name) =>
-  CONFIG_NAME.test(name) ? `sets ${name}, a package manager option this check does not read` : null;
+  CONFIG_NAME.test(name)
+    ? `sets ${name}, a package manager option this check does not read`
+    : name === 'PATH'
+      ? 'sets PATH: a command word then names another program'
+      : null;
 const isName = (word) => plain(word) && /^[A-Za-z_]\w*$/.test(word.value);
+const digest = (text) =>
+  `sha256:${createHash('sha256').update(text.replace(/\s+/g, ' ').trim()).digest('hex')}`;
+/**
+ * Inline `node -e` text, by the sha256 of what a reviewer read (white space folded): each loads
+ * nothing that starts a program. To change one: edit it, read it, paste the digest the error prints.
+ */
+export const INLINE_NODE = new Map([
+  [
+    'sha256:008e122f386e03d95b3f56e6eca81a01d59bac15dca50b31b61f315221d34e6c',
+    'ci.yml: prints the results of `needs`; loads no module',
+  ],
+  [
+    'sha256:e1d6392e667e6d2be30cb465e3028a515123912965e086cd8357456d87a93c63',
+    'ci.yml: tests two variables against a hex pattern; loads no module',
+  ],
+  [
+    'sha256:8c814a691b6144ad2e6f27fcaf98350a9c4301f196b3b426751ab11292b04874',
+    'ci.yml: one PING over the clamd socket; loads node:net only',
+  ],
+  [
+    'sha256:ff9ef1de8efb211813bd4295a7732e2e57cbac09ad66dbb5e19d44c23a157a8b',
+    'Dockerfile HEALTHCHECK: one GET of /health/ready; loads http only',
+  ],
+]);
+const inline = (text) =>
+  INLINE_NODE.has(digest(text))
+    ? null
+    : `inline text nobody reviewed (INLINE_NODE, ${digest(text)})`;
+/** All a container may start: `node` itself, on a plain path or on the reviewed health probe. */
+const startsNode = (started) =>
+  /^\["node"(?:, "[\w./-]+")+\]$/.test(started) ||
+  inline(
+    /^node -e "([^"\\$`]*)"$/.exec(started)?.[1].replace(/PORT\|\|\d+\)/, 'PORT||N)') ?? '',
+  ) === null;
 
 const options = (table) => (args) => readOptions(args, table).problem ?? null;
 /** Every option an install-like verb is given here; an operand is a package or a directory. */
@@ -116,6 +156,21 @@ const PNPM = {
   build: () => null,
   exec: starts(/^(?:turbo|jest|playwright)$/),
 };
+/**
+ * `git` and `go` by subcommand, with the options ci.yml gives them: an option before the
+ * subcommand (`git -c alias.x='!…'`), another subcommand (`go run`) and an option that names a
+ * program (`go test -exec`) are not in the tables.
+ */
+const subcommands = (table) => (args) =>
+  plain(args[0]) && Object.hasOwn(table, args[0].value)
+    ? (readOptions(args.slice(1), { ...table[args[0].value], computed: true }).problem ?? null)
+    : 'its subcommand is not one this check reads';
+const GIT = subcommands({
+  'cat-file': { flags: '-e' },
+  'rev-list': { flags: '--count', values: '--min-parents' },
+  log: { flags: '-p -U0 --full-history', values: '--diff-merges' },
+});
+const GO = subcommands({ mod: {}, vet: {}, test: { flags: '-v' }, build: { values: '-o' } });
 /** npm reads an option wherever it stands: only the install verbs, whose every word is read. */
 const NPM = verbs('install i ci', INSTALL_OPTIONS);
 const packageManager = (table, before) => (args) => {
@@ -225,9 +280,25 @@ function hostPolicy(files, cwd) {
   policy.programs = {
     ...verbs(
       'if then elif else fi for while until do done break ! [ { } true test set exit echo cat tail tee ' +
-        'grep seq sleep mkdir chmod rm mktemp command eval node go git curl psql openssl gitleaks mc',
+        'grep seq sleep mkdir chmod rm mktemp command eval curl openssl gitleaks mc',
       true,
     ),
+    git: GIT,
+    go: GO,
+    // SQL written here, or a file of the inventory: a backslash command (`\!`) is psql's own shell.
+    psql: (args, { state }) => {
+      const read = readOptions(args, { flags: '-X -At', values: '-U -d -h -v -c -f' });
+      if (read.problem) return read.problem;
+      for (const { name, value } of read.options) {
+        if (name === '-c' && /^\s*\\/.test(value.value)) return 'a backslash command is not SQL';
+        if (
+          name === '-f' &&
+          (state.moved || !files.has(`${state.cwd && `${state.cwd}/`}${value.value}`))
+        )
+          return `${value.value} is not a file of the inventory`;
+      }
+      return null;
+    },
     export: (args, { state }) => {
       for (const word of args) {
         const name = /^[A-Za-z_]\w*(?=\+?=)/.exec(
@@ -253,6 +324,15 @@ function hostPolicy(files, cwd) {
     docker,
     pnpm: packageManager(PNPM, { values: '--filter -F' }),
     npm: packageManager(NPM, {}),
+    // A script of the inventory, a service's own build output, or reviewed inline text.
+    node: ([first, ...rest], { state }) => {
+      if (!plain(first)) return 'what it runs is computed';
+      if (first.value === '-e')
+        return rest.length === 1 && plain(rest[0]) ? inline(rest[0].value) : 'computed inline text';
+      return first.value === 'dist/main.js' || file(first.value, state) === null
+        ? null
+        : `${first.value} is not a file of the inventory or a service's dist/main.js`;
+    },
   };
   return policy;
 }
@@ -264,9 +344,9 @@ const credentials = (name) =>
     'g',
   );
 const count = (text, pattern) => [...text.matchAll(pattern)].length;
-/** The one line that may write the environment of later steps. */
+/** The lines that may write the environment or the search path of later steps. */
 const GITHUB_ENV =
-  /^\s*(?:#.*|echo "(?!P?NPM_CONFIG_)[A-Z][A-Z0-9_]*=\$\{\w+\}" >> "\$GITHUB_ENV")$/;
+  /^\s*(?:#.*|echo "(?!P?NPM_CONFIG_|PATH=)[A-Z][A-Z0-9_]*=\$\{\w+\}" >> "\$GITHUB_ENV"|echo "\$RUNNER_TEMP\/trivy-db-check-bin" >> "\$GITHUB_PATH")$/;
 
 /**
  * GitHub pastes an expression's value in before bash reads the text. Only a value written in the
@@ -310,7 +390,9 @@ export function scriptProblems(script, files = new Set(), cwd = '') {
   if (
     script
       .split('\n')
-      .some((line) => /\b(?:GITHUB|BASH)_ENV\b/.test(line) && !GITHUB_ENV.test(line))
+      .some(
+        (line) => /\b(?:GITHUB_ENV|BASH_ENV|GITHUB_PATH)\b/.test(line) && !GITHUB_ENV.test(line),
+      )
   )
     problems.push('writes the environment of later steps in a form this check does not read');
   return problems;
@@ -369,7 +451,7 @@ export function dockerfileLifecycle(name, text, _workflows, files = new Set()) {
     } else if (DOCKER_STARTS.has(keyword)) {
       const started =
         keyword === 'HEALTHCHECK' ? rest.replace(/^(?:--[a-z-]+=\w+ +)*CMD /, '') : rest;
-      if (!STARTS_NODE.test(started) || PACKAGE_MANAGER.test(rest))
+      if (!startsNode(started) || PACKAGE_MANAGER.test(rest))
         refuse(
           `${keyword} ${clip(rest)} does not start \`node\` directly: a shell, a script or ` +
             `a variable there runs without ${VARIABLE}`,

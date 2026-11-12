@@ -563,9 +563,21 @@ export const CLI_CONTRACT = Object.freeze({
     accepts: { '--all': 'switch', '--service': 'identifier' },
   },
   'scripts/prisma-generate.mjs': { positionals: [], accepts: { '--schema': 'path' } },
-  // FU-334: options of the pnpm and docker command lines the guard READS; it runs none.
+  // FU-334: options of the pnpm, node, docker, git, go and psql command lines the guard READS; it runs none.
   'scripts/prisma-lifecycle-suppression-lib.mjs': {
-    other: ['--audit-level', '--entrypoint', '--prod', '-v'],
+    other: [
+      '--audit-level',
+      '--count',
+      '--diff-merges',
+      '--entrypoint',
+      '--min-parents',
+      '--prod',
+      '-c',
+      '-e',
+      '-f',
+      '-o',
+      '-v',
+    ],
   },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },

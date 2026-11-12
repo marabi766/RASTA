@@ -10,7 +10,7 @@ import { dockerRun, effectiveShell, readOptions, readShell } from './ci-shell-po
 import { parseCommands } from './ci-shell-text-lib.mjs';
 import * as lifecycleLib from './prisma-lifecycle-suppression-lib.mjs';
 
-const { CONTAINER_SCRIPTS, MOUNTS, lifecycleFileKind } = lifecycleLib;
+const { CONTAINER_SCRIPTS, INLINE_NODE, MOUNTS, lifecycleFileKind } = lifecycleLib;
 // FU-334: every file a step runs, uses or builds is a member of this inventory, read once.
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const FILES = new Set(
@@ -667,7 +667,29 @@ test('an option, a nested shell or a wrapper that runs unread text is refused (F
     ['pnp>m deploy /out', /writes a redirection into a word/],
     ['nod<e scripts/prisma-generate.mjs', /writes a redirection into a word/],
     ['n2>&1pm install', UNPROVEN],
-    // `bash` runs a file of the inventory, or text that was read.
+    // A listed program's own way to run text or another program: no table holds it.
+    ["psql -c '\\! env -i pnpm deploy /out'", form('psql')],
+    ['psql -f /tmp/setup.sql', form('psql')],
+    ['psql -f apps/web/e2e/fixtures/not-in-the-inventory.sql', form('psql')],
+    ['psql --command "SELECT 1"', form('psql')],
+    ["git -c alias.x='!env -i pnpm deploy /out' x", form('git')],
+    ['git --exec-path=/tmp log', form('git')],
+    ['git log --output=/tmp/patch', form('git')],
+    ['git submodule foreach "pnpm deploy /out"', form('git')],
+    ["go test -exec 'env -i' ./...", form('go')],
+    ['go run ./tools/install', form('go')],
+    ['go build -toolexec /tmp/tool .', form('go')],
+    ['go generate ./...', form('go')],
+    // The search path: a command word names the listed program only while nothing moves it.
+    ['PATH=/tmp/bin:$PATH pnpm install', /sets PATH/],
+    ['export PATH="/tmp/bin:$PATH"', form('export')],
+    ['echo /tmp/bin >> "$GITHUB_PATH"', /writes the environment of later steps/],
+    // `node` and `bash` run a file of the inventory, or text that was read.
+    [`node -e "require('child_process').execSync('pnpm deploy /out')"`, form('node')],
+    ['node --require /tmp/hook.js scripts/prisma-generate.mjs', form('node')],
+    ['node /tmp/install.mjs', form('node')],
+    ['node scripts/not-in-the-inventory.mjs', form('node')],
+    ['node -p "1"', form('node')],
     ['bash -c "env -i pnpm deploy /out"', form('bash')],
     ['bash -lc "pnpm install"', form('bash')],
     ['bash /tmp/install.sh', form('bash')],
@@ -686,6 +708,9 @@ test('an option, a nested shell or a wrapper that runs unread text is refused (F
     'pnpm run test:integration --shard=economic -- --verbose',
     'npm install -g pnpm@11.22.0\npnpm config set store-dir /pnpm/store',
     'bash -c "pnpm install --frozen-lockfile"',
+    "psql -X -At -c 'SHOW max_connections'\npsql -v ON_ERROR_STOP=1 -h localhost -U u -d d -f apps/web/e2e/fixtures/contract-statements.sql",
+    'git rev-list --min-parents=3 --count "$BASE..$HEAD"\ngo build -o "$RUNNER_TEMP/bin/tool" .',
+    'echo "$RUNNER_TEMP/trivy-db-check-bin" >> "$GITHUB_PATH"',
     '( cd services/api-gateway && node dist/main.js )\nbash scripts/ci-install-browser.sh',
   ])
     everywhere(script, null, true);
@@ -717,8 +742,13 @@ test('the shell that reads a step and the variables it is given are read at ever
     job(run('')).replace(env, `${env}  pnpm_config_script_shell: /tmp/sh\n`),
     job(run('        env:\n          NPM_CONFIG_SCRIPT_SHELL: /tmp/sh\n')),
     job('      - run: echo "PNPM_CONFIG_SCRIPT_SHELL=${shell}" >> "$GITHUB_ENV"\n'),
+    job(run('        env:\n          PATH: /tmp/bin\n')),
+    job('      - run: echo "PATH=${elsewhere}" >> "$GITHUB_ENV"\n'),
   ])
-    assert.match(errors(text), /a package manager option|writes the environment of later steps/);
+    assert.match(
+      errors(text),
+      /a package manager option|sets PATH|writes the environment of later steps/,
+    );
   for (const instruction of [
     'ENV pnpm_config_script_shell=/tmp/sh',
     'ARG npm_config_script_shell=/tmp/sh',
@@ -733,13 +763,12 @@ test('the shell that reads a step and the variables it is given are read at ever
       ),
       option,
     );
-  // Where a step's text starts: a relative path is the checkout's only below the checkout.
+  // A relative path is the checkout's only below the checkout: `node dist/main.js` elsewhere is not.
+  const built = (directory) =>
+    errors(job(`      - run: node dist/main.js\n        working-directory: ${directory}\n`));
+  assert.equal(built('services/api-gateway'), '');
   for (const directory of ['/tmp', '../elsewhere', '${{ inputs.directory }}', '-x'])
-    assert.match(
-      errors(job(run(`        working-directory: ${directory}\n`))),
-      /working-directory is not/,
-      directory,
-    );
+    assert.match(built(directory), /working-directory is not/, directory);
   assert.match(errors(job(run('        working-directory: services\n'))), form('bash'));
 });
 
@@ -798,8 +827,23 @@ test('a container runs only a reviewed program, body or script (FU-334)', () => 
     assert.ok(MOUNTS.has(reviewed) && FILES.has(file), file);
     assert.equal(`sha256:${createHash('sha256').update(repoText(file)).digest('hex')}`, sha256);
   }
-  // No reviewed mount is stale: each is written in ci.yml.
+  // No reviewed entry is stale: each mount is written in ci.yml, each inline text is run.
   for (const reviewed of MOUNTS) assert.ok(ci.includes(` ${reviewed} `), reviewed);
+  for (const [digest, why] of [...INLINE_NODE]) {
+    INLINE_NODE.delete(digest);
+    try {
+      const real = why.startsWith('ci.yml')
+        ? workflowLifecycle('.github/workflows/ci.yml', ci, {})
+        : dockerfileLifecycle(ENTRY.docker, repoText(ENTRY.docker));
+      assert.match(
+        real.errors.join('\n'),
+        /inline text nobody reviewed|does not start `node`/,
+        why,
+      );
+    } finally {
+      INLINE_NODE.set(digest, why);
+    }
+  }
   // Controls: the forms ci.yml uses.
   for (const script of [
     'docker run --rm --entrypoint sh image@sha256:0 -c "clamd --version; ls -l /var/lib/clamav/"',
