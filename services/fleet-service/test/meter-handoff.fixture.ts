@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { Logger } from '@nestjs/common';
+import { readUrl } from '@rasta/config';
 import { createSystemContext, OutboxRelay, runWithContext } from '@rasta/nest-common';
 import { UsageService } from '../src/fleet/usage.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
@@ -19,11 +20,11 @@ Logger.overrideLogger(false);
 // CI runs fleet and maintenance packages concurrently. A private fleet schema
 // prevents either suite's global relay from claiming the other's outbox rows.
 const schema = `meter_handoff_${randomUUID().replaceAll('-', '')}`;
-const runtimeUrl = new URL(databaseUrl());
+const runtimeUrl = readUrl(databaseUrl());
 const runtimeRole = decodeURIComponent(runtimeUrl.username).replaceAll('"', '""');
 runtimeUrl.searchParams.set('schema', schema);
 process.env.DATABASE_URL = runtimeUrl.toString();
-const ownerUrl = new URL(ownerDatabaseUrl());
+const ownerUrl = readUrl(ownerDatabaseUrl());
 const owner = new PrismaClient({ datasources: { db: { url: ownerUrl.toString() } } });
 ownerUrl.searchParams.set('schema', schema);
 const prisma = newPrisma();
