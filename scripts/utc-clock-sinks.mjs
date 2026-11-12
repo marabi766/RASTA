@@ -21,6 +21,47 @@ const nameOf = (n) => ts.isIdentifier(n) ? n.text :
       ? n.argumentExpression.text : null;
 // FU-325: SQL text a reader does not have (an operand that is not a constant), unlike a bound value.
 export const UNKNOWN_SQL = PLACEHOLDER('text');
+/** A word naming a program that executes SQL text; only psql's arguments are read. */
+export const SQL_CLI = /(?:^|\/)(?:(psql)|pgbench)$/;
+const PSQL_VALUES = ['dbname', 'host', 'port', 'username', 'variable', 'set', 'output', 'log-file',
+  'field-separator', 'record-separator', 'table-attr', 'pset'];
+/**
+ * Where one psql argv carries SQL, every spelling normalized (`-c X`, `-cX`, `-Xqc X`, `--command X`,
+ * `--command=X`, any unambiguous `--comm…`): `{ at, text }` (text inline, or the whole word `at`) and
+ * `{ at, file }`. Empty: psql reads standard input. Null: an option this cannot read, or a word of
+ * unknown count or content where an option may stand.
+ */
+export function psqlSql(words) {
+  const out = [];
+  if (words.includes(undefined)) return null;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (w === '--') break;
+    const long = /^--([^=]+)(?:=([\s\S]*))?$/.exec(w);
+    if (w.startsWith(UNKNOWN_SQL) || long?.[1].includes(UNKNOWN_SQL)) return null;
+    if (long) {
+      const is = (option) => option.startsWith(long[1]);
+      const at = long[2] === undefined ? i + 1 : i;
+      if (is('command')) out.push({ at, text: long[2] });
+      else if (is('file')) out.push({ at, file: long[2] ?? words[at] });
+      else if (!PSQL_VALUES.some(is)) continue;
+      i = at;
+    } else if (/^-./.test(w)) {
+      for (let k = 1; k < w.length; k++) {
+        if ('cfdFhLopPRTUv'.includes(w[k])) {
+          const rest = w.slice(k + 1) || undefined;
+          const at = rest === undefined ? i + 1 : i;
+          if (w[k] === 'c') out.push({ at, text: rest });
+          if (w[k] === 'f') out.push({ at, file: rest ?? words[at] });
+          i = at;
+          break;
+        }
+        if (!'aAbeEHlnqsStxXzwW01'.includes(w[k])) return null;
+      }
+    }
+  }
+  return out;
+}
 
 export function sqlSinkTexts(repository, files = productionFiles(repository)) {
   const authored = authoredFiles(repository);
@@ -383,6 +424,23 @@ export function sqlSinkTexts(repository, files = productionFiles(repository)) {
     if (ts.isNoSubstitutionTemplateLiteral(n)) return [n.text];
     return n.templateSpans.reduce((out, s, i) => combine(combine(out, fragment(s.expression, seen, env, i)), [s.literal.text]), [n.head.text]);
   };
+  // FU-325: a literal naming a SQL CLI is an execution site. Its argv is the array it stands in (or
+  // the one beside it); a SQL word resolves as any sink's text does, or the site is unresolved.
+  const cli = [];
+  for (const ast of sources) walk(ast, (n) => {
+    if (!ts.isStringLiteralLike(n) || !SQL_CLI.test(n.text)) return;
+    const p = n.parent, beside = ts.isCallExpression(p) && p.arguments[0] === n && unwrap(p.arguments[1]);
+    const list = ts.isArrayLiteralExpression(p) ? p.elements.slice(p.elements.indexOf(n) + 1) :
+      beside && ts.isArrayLiteralExpression(beside) ? [...beside.elements] : null;
+    const found = list && SQL_CLI.exec(n.text)[1] && psqlSql(list.map((e) => ts.isSpreadElement(e) ? undefined :
+      ts.isStringLiteralLike(unwrap(e)) ? unwrap(e).text : UNKNOWN_SQL));
+    // `subject`: what identifies the site in the inventory: the argv or the call the name stands in.
+    const site = (node, texts) => (texts?.length ? texts : [null]).forEach((text) =>
+      cli.push({ node, text, file: node.getSourceFile().fileName, sink: n.text.split('/').at(-1), subject: p }));
+    if (!found?.length) site(n, null); // no argv, or SQL from standard input
+    else for (const { at, text, file } of found)
+      site(list[at] ?? n, file !== undefined || !list[at] ? null : text !== undefined ? [text] : resolve(list[at]));
+  });
   return calls.flatMap((call) => {
     const target = targetOf(call), name = nameOf(target);
     if (!SQL_SINKS.has(name)) return [];
@@ -399,6 +457,6 @@ export function sqlSinkTexts(repository, files = productionFiles(repository)) {
     const safe = tagged && /^\$?(?:query|execute)Raw$/.test(name);
     const texts = safe ? template(node, new Set(), new Map()) : resolve(node);
     return (texts?.length ? texts : [null]).map((text) => ({ node, text,
-      file: node.getSourceFile().fileName, sink: name }));
-  });
+      file: node.getSourceFile().fileName, sink: name, subject: call }));
+  }).concat(cli);
 }

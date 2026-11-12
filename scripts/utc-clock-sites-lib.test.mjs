@@ -19,10 +19,11 @@ import {
   localVariableProblems,
   problemsIn,
   replayMigrations,
+  siteKey,
   utcClockProblems,
 } from './utc-clock-sites-lib.mjs';
 import { lex } from './eligibility-clock-sql.mjs';
-import { sqlSinkTexts } from './utc-clock-sinks.mjs';
+import { psqlSql, sqlSinkTexts, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
 import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { authoredFiles } from './authored-source-inventory.cjs';
 
@@ -2496,7 +2497,9 @@ test('PR #1082 r2 N1: in every file type, and under a reviewed DO block', () => 
 
 test('FU-324 opaque inventory is exact, reasoned, and cannot waive readable SQL', () => {
   const path = 'scripts/claim.mjs', source = 'db.$queryRawUnsafe(runtime);';
-  const key = `${path}:1:${source.indexOf('runtime') + 1}:$queryRawUnsafe`;
+  // The key is the file, the callee and the digest of the call: not a line (it moves with any edit).
+  const key = siteKey(path, '$queryRawUnsafe', source.slice(0, -1));
+  assert.match(key, /^scripts\/claim\.mjs:\$queryRawUnsafe:sha256:[0-9a-f]{64}$/);
   const inventory = (entries) => ({ 'scripts/opaque-sql-sinks.json': JSON.stringify(entries) });
   const scan = (text, entries) => scanOf('x-service', 'CREATE TABLE task (id text);', '', {
     [path]: text, ...inventory(entries),
@@ -2504,9 +2507,128 @@ test('FU-324 opaque inventory is exact, reasoned, and cannot waive readable SQL'
   const entries = { [key]: 'Test adapter, SQL supplied by caller' };
   assert.deepEqual(scan(source, entries), []);
   assert.match(scan(source + '\ndb.query(other);', entries).join(), /unresolved executable SQL/);
-  for (const text of ['', '\n' + source, 'db.$queryRawUnsafe("SELECT 1");'])
+  assert.deepEqual(scan('// moved\n\n    db.$queryRawUnsafe(runtime);', entries), []);
+  for (const text of ['', 'db.$queryRawUnsafe(runtime, 1);', 'db.$executeRawUnsafe(runtime);', 'db.$queryRawUnsafe("SELECT 1");'])
     assert.match(scan(text, entries).join(), /stale or invalid opaque SQL inventory entry/);
+  for (const text of ['db.$queryRawUnsafe(runtime, 1);', 'db.$queryRawUnsafe(other);', 'db.$executeRawUnsafe(runtime);', 'tx.$queryRawUnsafe(runtime);'])
+    assert.match(scan(text, entries).join(), /unresolved executable SQL \[scripts\/claim\.mjs:\$\w+:sha256:/, text);
   assert.match(scan(source, { [key]: '' }).join(), /unresolved executable SQL/);
+  // The same call, readable now: its entry is stale, it does not stay in use.
+  assert.match(scan(`const runtime = 'SELECT 1';\n${source}`, entries).join(), /stale or invalid opaque SQL inventory entry/);
   const bad = 'DELETE FROM task WHERE id IN (SELECT id FROM task FOR UPDATE)';
   assert.match(scan(`db.$queryRawUnsafe(${JSON.stringify(bad)});`, entries).join(), /locking subquery/);
+});
+
+// FU-325 part 2: SQL is found where it is executed. A CLI site is read, or it is listed.
+test('FU-325 psql arguments are normalized before the SQL word is read', () => {
+  const word = (argv) => psqlSql(argv)?.map(({ at, text, file }) => file ?? text ?? argv[at]);
+  for (const argv of [['-c', CLAIM], [`-c${CLAIM}`], ['-XqAtc', CLAIM], [`-Xc${CLAIM}`], ['--command', CLAIM],
+    [`--command=${CLAIM}`], [`--comm=${CLAIM}`], ['-d', 'db', '-v', 'x=-c', '--dbname=x', '--set', 'a=b', '-c', CLAIM]])
+    assert.deepEqual(word(argv), [CLAIM], argv.join(' '));
+  assert.deepEqual(word(['-X', '--file=a.sql', '-fb.sql', '-f', '-']), ['a.sql', 'b.sql', '-']);
+  assert.deepEqual(word(['-X', 'db', '--', '-c', CLAIM]), []); // standard input
+  for (const argv of [['-Q'], [undefined, '-c', 'SELECT 1'], [UNKNOWN_SQL, '-c', 'SELECT 1'], [`--${UNKNOWN_SQL}=x`]])
+    assert.equal(psqlSql(argv), null);
+});
+
+const claimScan = (files) =>
+  scanOf('x-service', 'CREATE TABLE task (id text);', '', files).filter((p) => p.includes('FU-324'));
+
+test('FU-325 every execution site is read by its context: CLI spellings, workflows, JS, seeds', () => {
+  const q = JSON.stringify(CLAIM);
+  const files = {
+    'ops/attached.sh': `psql -c${q}`,
+    'ops/long.sh': `psql -X --command=${q}`,
+    'ops/cluster.sh': `docker exec -i pg psql -XqAtc ${q}`,
+    'ops/nested.sh': `bash -c 'psql --comm=${q}'`,
+    'ops/substitution.sh': `n="$(psql -At --command=${q})"`,
+    'ops/heredoc.sh': 'psql -X <<SQL\nDELETE FROM task WHERE id IN (SELECT id FROM task LIMIT 1 $LOCK);\nSQL',
+    'ops/herestring.sh': `psql <<<${q}`,
+    'ops/variable.sh': `psql -v lock='FOR UPDATE' -c 'DELETE FROM task WHERE id IN (SELECT id FROM task LIMIT 1 :lock)'`,
+    'ops/file.sh': 'psql -f ops/fixtures/claim.sql',
+    // What a CLI is given is executed, whatever its head: a text that does not close is unreadable.
+    'ops/unclosed.sh': `psql -c 'SET search_path = (public'`,
+    'ops/fixtures/claim.sql': CLAIM,
+    '.github/workflows/ci.yml': `jobs:\n  a:\n    steps:\n      - run: |\n          psql --command=${q}\n`,
+    'ops/spawn.mjs': `spawnSync('psql', ['-X', ${JSON.stringify(`--command=${CLAIM}`)}]);`,
+    'ops/wrapped.mjs': `run('docker', ['exec', 'pg', '/usr/bin/psql', '-Xc', ${q}]);`,
+    'ops/command.mjs': `execSync(${JSON.stringify(`psql -X --command=${q}`)});`,
+    'services/x-service/prisma/seed.ts': 'db.$executeRawUnsafe(runtimeSql);',
+    // What cannot be read is an unresolved site, never an absent one.
+    'ops/runtime.sh': 'psql -c "$RUNTIME_SQL"',
+    'ops/more.sh': 'psql -c "SELECT 1; $MORE"',
+    'ops/gexec.sh': `psql -c "SELECT 'DELETE FROM task' \\\\gexec"`,
+    'ops/pipe.sh': 'printf %s "$1" | psql -f -',
+    'ops/words.sh': 'psql $ARGS',
+    'ops/option.sh': 'psql "$FIRST" -c "SELECT 1"',
+    'ops/elsewhere.sh': 'psql -f /tmp/elsewhere.sql',
+    'ops/bench.sh': 'pgbench -f probe.sql',
+    'ops/runtime.mjs': "spawnSync('psql', ['-c', runtimeSql]);",
+    'ops/argv.mjs': "spawnSync('psql', args);",
+    'ops/spread.mjs': "spawnSync('psql', ['-d', ...rest, '-c', 'SELECT 1']);",
+    'ops/shell.mjs': 'spawn(\'bash\', [\'-c\', `psql -c "${sql}"`]);',
+    'ops/name.mjs': "export const TOOL = { psql: 'psql' };",
+    'ops/Makefile': 'seed:\n\tpsql -f seed.sql\n',
+  };
+  const found = claimScan(files);
+  for (const path of Object.keys(files).filter((p) => !p.endsWith('.sql')))
+    assert.ok(found.some((p) => p.startsWith(path)), `${path}\n${found.join('\n')}`);
+});
+
+test('FU-325 readable, proven sites pass; documents and tests are not execution sites', () => {
+  const picked = `WITH picked AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id;`;
+  assert.deepEqual(claimScan({
+    'ops/ok.sh': [`psql -X -v ON_ERROR_STOP=1 --username "$U" --dbname "$1" -c 'SELECT 1'`,
+      `psql -c "ALTER DATABASE \\"$1\\" SET app.flag = 'true'"`, `n="$(psql -X -At -c 'SHOW max_connections')"`,
+      `psql -c "SELECT 1 FROM pg_database WHERE datname = '$1' AND 1 IN (SELECT 1)"`,
+      `psql -f ops/fixtures/ok.sql`, `psql -X <<'SQL'`, '\\set ON_ERROR_STOP on', `\\if :flag`, picked, '\\endif', 'SQL'].join('\n'),
+    'ops/fixtures/ok.sql': picked,
+    '.github/workflows/ci.yml': `jobs:\n  a:\n    steps:\n      - run: >-\n          psql -U rasta\n          -c 'SELECT 1'\n`,
+    'ops/ok.mjs': `spawnSync('psql', ['-X', '-d', database, '-c', ${JSON.stringify(picked)}]);`,
+    'README.md': 'psql -c "$ANY"',
+    'ops/test/run.sh': 'psql -c "$ANY"',
+  }), []);
+});
+
+test('FU-325 the inventory lists CLI sites as it lists calls: new, stale and readable SQL fail', () => {
+  const js = "spawnSync('psql', ['-c', runtimeSql]);";
+  const pipe = '# split\nprintf %s "$1" | psql -f -';
+  const listed = siteKey('ops/pipe.sh', 'cli', pipe.split('\n')[1]);
+  const keys = { [listed]: 'SQL text of the caller', [siteKey('ops/run.mjs', 'psql', js.slice(0, -1))]: 'SQL text of the caller' };
+  const scan = (sh, entries = keys) => claimScan({
+    'ops/pipe.sh': sh, 'ops/run.mjs': js, 'scripts/opaque-sql-sinks.json': JSON.stringify(entries),
+  });
+  const stale = new RegExp(`stale or invalid opaque SQL inventory entry: ${listed}`);
+  assert.deepEqual(scan(pipe), []);
+  // The same command on another line, or spaced differently, is the same site; a changed one is not.
+  assert.deepEqual(scan(`\n\n${pipe.replace(' | ', '  |  ')}`), []);
+  assert.match(scan(`${pipe}\npsql -c "$2"`).join(), /pipe\.sh:3: FU-324: unresolved executable SQL/);
+  assert.match(scan(pipe.replace('$1', '$2')).join(), new RegExp(`pipe\\.sh:2: FU-324: unresolved executable SQL[^]*${stale.source}`));
+  assert.match(scan(`#\npsql -c 'SELECT 1'`).join(), stale);
+  assert.match(scan(`#\npsql -c ${JSON.stringify(CLAIM)}`).join(), /locking subquery[^]*stale or invalid/);
+  // A listed site waives nothing that is readable: the picker before the unread meta-command.
+  assert.match(scan(`#\npsql --command=${JSON.stringify(`${CLAIM} \\gexec`)}`).join(), /locking subquery/);
+  assert.match(scan(pipe, { ...keys, [listed]: ' ' }).join(), /unresolved executable SQL/);
+});
+
+test('FU-333 a CTE column list is read as PostgreSQL reads it: the picker passes with it, a malformed list refuses', () => {
+  const claim = (head) => `${head} AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id`;
+  for (const head of ['WITH picked', 'WITH picked(id)', 'WITH picked (id)', 'with picked /* list */ ( id , "other col" )',
+    'WITH RECURSIVE picked(id)', 'WITH a(x, y) AS (SELECT 1, 2), picked(id)', 'WITH a AS (SELECT 1), "Picked"("ID")']) {
+    assert.deepEqual(claimSubqueryProblems(claim(head)), [], head);
+    assert.deepEqual(claimSubqueryProblems(claim(head).replace(' MATERIALIZED', '')), [], head);
+  }
+  for (const head of ['WITH picked()', 'WITH picked(id,)', 'WITH picked(,id)', 'WITH picked(id other)', 'WITH picked((id))',
+    'WITH picked(id.x)', 'WITH picked(1)', "WITH picked('id')", 'WITH picked(id)(id)', 'WITH (id)', 'WITH picked(id) x',
+    'WITH picked(id = 1)', 'WITH picked(SELECT 1)', 'SELECT picked(id)', 'WITH a AS (SELECT 1) SELECT picked(id)', 'WITH 1(id)'])
+    assert.equal(claimSubqueryProblems(claim(head)).length, 1, head);
+  // A piece of a text (its `(` is not in it) is no list either.
+  assert.equal(claimSubqueryProblems(claim('WITH picked x id)'), new Set(), false).length, 1);
+  // The list changes nothing else: a picker in the membership test stays refused, and the head of
+  // a statement is its head with or without the list (the literal is read as executed: `(1`).
+  assert.equal(claimSubqueryProblems(`WITH picked(id) AS (SELECT 1) DELETE FROM task WHERE id IN ${PICKED}`).length, 1);
+  const heads = ['WITH a', 'WITH a(n)', 'WITH RECURSIVE a(n, m)', 'WITH a(n,)'];
+  const found = claimScan(Object.fromEntries(heads.map((head, i) =>
+    [`ops/head${i}.mjs`, `export const sql = ${JSON.stringify(`${head} AS (SELECT 1) SELECT (1`)};`])));
+  assert.deepEqual(found.map((p) => p.split(':')[0]), ['ops/head0.mjs', 'ops/head1.mjs', 'ops/head2.mjs']);
 });
