@@ -58,9 +58,14 @@ complete authoritative full run may enable LEDGER initialization for new assets.
 
 `maintenance_meter_legacy_assets` uses maintenance's existing Prometheus registry.
 It counts the union of local asset replicas and meters without a verified LEDGER
-mode, including missing meter rows. It has no tenant/asset labels. Reads occur on
-scrape; failed reads remove the series (unknown, never zero). It is stopped and
-awaited by the shared shutdown coordinator. Zero covers only known local assets;
+mode, including missing meter rows. It has no tenant/asset labels. A background
+sampler runs at startup and every 30 seconds, with one outstanding read, a 1-second
+connection acquisition bound, a 1-second statement timeout and a 2-second transaction
+bound set per sample. Scrapes only publish the last good count and its monotonic
+`maintenance_meter_legacy_assets_sample_age_seconds`. Rejection or the 5-second
+sampling deadline removes both series (unknown, never zero); an unsettled read
+retains its slot and late results are discarded. The shared shutdown coordinator
+stops the timer, invalidates the read and awaits it by its deadline. Zero covers only known local assets;
 **zero alone is not evidence of inventory completeness or a successful cutover**.
 
 Rollback before any apply: revert this image while retaining PR 7a schema/data;
