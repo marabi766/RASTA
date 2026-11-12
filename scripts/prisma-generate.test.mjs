@@ -538,7 +538,7 @@ test('shell text that could drop the suppression is refused wherever it runs', (
   for (const script of [
     'export PGHOST=localhost PGPORT="$port"\nunset KAFKA_SECRETS_DIR',
     'x_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"\neval "${x_credentials}"',
-    'echo "INTERNAL_TOKEN_SECRET=${secret}" >> "$GITHUB_ENV"',
+    'echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"',
     'if ! command -v gitleaks >/dev/null 2>&1; then pnpm exec turbo run build | tee out.log; fi',
     'docker run --rm --entrypoint sh image@sha256:0 -c "promtool test rules /etc/x.yml"',
   ])
@@ -647,7 +647,7 @@ test('an option, a nested shell or a wrapper that runs unread text is refused (F
     ['npm --prefix /tmp install', form('npm')],
     // The same options as variables: pnpm reads `pnpm_config_<setting>` (measured, 11.22.0).
     ['pnpm_config_script_shell=/tmp/sh pnpm run build', /a package manager option/],
-    ['export PNPM_CONFIG_SCRIPT_SHELL=/tmp/sh', form('export')],
+    ['export PNPM_CONFIG_SCRIPT_SHELL=/tmp/sh', /a package manager option/],
     ['npm_config_script_shell=/tmp/sh npm install', /a package manager option/],
     // Other programs that run what they are given: none is listed, so none is read past.
     ['npx turbo run build', UNPROVEN],
@@ -663,9 +663,9 @@ test('an option, a nested shell or a wrapper that runs unread text is refused (F
     ['/usr/bin/ap[t]-get install -y libnss3', /which this check cannot read/],
     ['echo "$SETUP" | bash </dev/stdin', form('bash')],
     // A redirection written into a word: bash runs `n`, `pnp` and `nod`, not what is spelled.
-    ['n>pm install', /writes a redirection into a word/],
-    ['pnp>m deploy /out', /writes a redirection into a word/],
-    ['nod<e scripts/prisma-generate.mjs', /writes a redirection into a word/],
+    ['n>pm install', UNPROVEN],
+    ['pnp>m deploy /out', UNPROVEN],
+    ['nod<e scripts/prisma-generate.mjs', UNPROVEN],
     ['n2>&1pm install', UNPROVEN],
     // `bash` runs a file of the inventory, or text that was read.
     ['bash -c "env -i pnpm deploy /out"', form('bash')],
@@ -687,6 +687,103 @@ test('an option, a nested shell or a wrapper that runs unread text is refused (F
     'npm install -g pnpm@11.22.0\npnpm config set store-dir /pnpm/store',
     'bash -c "pnpm install --frozen-lockfile"',
     '( cd services/api-gateway && node dist/main.js )\nbash scripts/ci-install-browser.sh',
+  ])
+    everywhere(script, null, true);
+});
+
+// D-173: every probe the reviewers ran on PR #1099 r1 and PR #1101 r1 that this reader and its
+// policy are to refuse, at every entry point, for the reason given. Each was accepted before.
+test('r1 probes: redirections, npm options, bound names and unreviewed lines are refused (D-173)', () => {
+  const reset = 'env -i PATH=/usr/bin:/bin pnpm deploy /out';
+  const line = /only the lines reviewed in REVIEWED are read/;
+  const name = /the search path or an environment file is not text's to set/;
+  for (const [pattern, scripts] of [
+    // #1099 F1: a redirection's target is not the command word, nor a program's operand.
+    [UNPROVEN, ['>', '>>', '<', '<>', '>|', '2>', '&>'].map((to) => `${to}echo ${reset}`)],
+    [UNPROVEN, ['"n">pm install', `bash -c '>echo ${reset}'`, `{fd}>echo ${reset}`]],
+    [form('pnpm'), [`pnpm exec >turbo ${reset}`]],
+    [/a redirection without a target word/, ['echo ok > >(pnpm deploy /out)', 'echo ok >']],
+    // #1099 F2: npm has no `--filter`; what follows it is npm's to read.
+    [
+      form('npm'),
+      ['install', 'i', 'ci'].flatMap((verb) =>
+        ['--filter', '-F'].flatMap((option) =>
+          ['--script-shell=/bin/echo', '--userconfig=/tmp/rc', '--prefix=/tmp', 'left-pad'].map(
+            (hidden) => `npm ${verb} ${option} ${hidden}`,
+          ),
+        ),
+      ),
+    ],
+    // #1099 F3, #1101 F1: every form that binds a protected name, and the files later steps read.
+    [name, ['for pnpm_config_shell_mode in true; do pnpm exec turbo x; done']],
+    [name, ['for PATH in /tmp/bin; do pnpm install; done', 'unset PATH', "bash -c 'unset PATH'"]],
+    [
+      name,
+      ['PATH=/tmp/bin pnpm install', 'export PATH=/tmp/bin', 'RUNNER_TEMP=/tmp', 'BASH_ENV=x'],
+    ],
+    [UNPROVEN, ['readonly PATH=/tmp/bin', 'declare -x PATH=/tmp/bin', 'env PATH=/tmp pnpm i']],
+    [form('export'), ['export -n PATH', 'export PATH$x=1']],
+    [/indirect or assigns/, ['echo "${pnpm_config_shell_mode:=true}"', 'echo "${PATH=/tmp}"']],
+    [/indirect or assigns/, ['p=GITHUB_\'\'PATH; echo /tmp/bin >> "${!p}"']],
+    [/a line this check has not reviewed/, ['echo "X=${payload}" >> "$GITHUB_ENV"']],
+    [/a line this check has not reviewed/, ['echo /tmp/bin >> "$GITHUB_PATH"', 'f="$GITHUB_ENV"']],
+    [/a line this check has not reviewed/, ['echo \'\n# \' x >> "$GITHUB_ENV"']],
+    [form('pnpm'), ['pnpm install --filter --config.script-shell=/bin/echo']],
+    [line, ['set -a', 'set -o allexport']],
+    // #1101 F2, F3, F5: a computed operand, standard input, a file or an option nobody reviewed.
+    [line, ['go test "$OPTION" ./...', 'git log -p "$OPTION"', 'go test -exec=env ./...']],
+    [line, ['cat-file', 'rev-list', 'log'].map((verb) => `git ${verb} "$OPT"`)],
+    [line, ['mod', 'vet', 'test', 'build'].map((verb) => `go ${verb} "$OPT"`)],
+    [line, ['go build -o "$RUNNER_TEMP/trivy-db-check-bin/node" .']],
+    [
+      line,
+      [
+        "echo '\\! env -i pnpm deploy /out' | psql -X",
+        'cat /tmp/setup.sql | psql -X',
+        "bash -c 'psql -X < /tmp/x.sql'",
+      ],
+    ],
+    [line, ['psql -X < /tmp/setup.sql', 'psql -X 0< /tmp/setup.sql', 'psql -f scripts/setup.sql']],
+    [line, ['node /tmp/unread.js', 'node -r /tmp/hook.js dist/main.js', 'node --run build']],
+    [
+      line,
+      ['node -', 'node dist/main.js x', 'node scripts/prisma-generate.mjs $several', 'node -e "1"'],
+    ],
+  ])
+    for (const script of scripts) everywhere(script, pattern);
+  // #1101 F4: what an image starts is one of two exact texts, not a pattern of `node` words.
+  const real = repoText(ENTRY.docker);
+  for (const how of ['CMD', 'ENTRYPOINT', 'HEALTHCHECK CMD'])
+    for (const words of [
+      '"-r", "/tmp/hook.js", "dist/main.js"',
+      '"--import", "/tmp/hook.mjs", "dist/main.js"',
+      '"--run", "build"',
+      '"-"',
+      '"/tmp/unread.js"',
+    ])
+      refused(
+        dockerfileLifecycle,
+        ENTRY.docker,
+        swap(real, 'CMD ["node", "dist/main.js"]', `${how} ["node", ${words}]`),
+        NOT_NODE,
+      );
+  for (const path of ['ENV PATH=/tmp/bin:$PATH', 'ARG PATH=/tmp/bin', 'ARG "PATH"=/tmp/bin'])
+    refused(
+      dockerfileLifecycle,
+      ENTRY.docker,
+      swap(real, 'ENV PATH="$PNPM_HOME:$PATH"', path),
+      /the search path|is not a form this check reads/,
+    );
+  // #1101 F6: an inline program is the text that was reviewed, to the blank.
+  const ci = repoText('.github/workflows/ci.yml');
+  const folded = ci.replace('name + ": " + needs', 'name + ":\n            " + needs');
+  assert.match(workflowLifecycle('ci.yml', folded).errors.join(), line);
+  // Controls: the forms the real files use.
+  for (const script of [
+    'set -euo pipefail\ngit rev-list --count "$SCAN_BASE..$SCAN_HEAD" >/dev/null 2>&1',
+    'PORT=3000 node dist/main.js > /tmp/gateway.log 2>&1 &',
+    'node scripts/prisma-generate.mjs --schema "${dir}/schema.prisma" < /dev/null',
+    'for attempt in $(seq 1 60); do psql -U rasta -d postgres -c "SELECT 1" >/dev/null && break; done',
   ])
     everywhere(script, null, true);
 });
@@ -781,6 +878,8 @@ test('a container runs only a reviewed program, body or script (FU-334)', () => 
     ['docker run --rm --mount type=bind,src=/tmp,dst=/usr/bin image', form('docker')],
     ['cd services\ndocker run --rm -v "$PWD:/src" image semgrep scan', form('docker')],
     ['PWD=/tmp docker run --rm -v "$PWD:/src" image semgrep scan', form('docker')],
+    // PR #1100 r1 F2, closed by the reader of #1099 (every binding form marks the name): `unset`.
+    ['unset PWD\ndocker run --rm -v "$PWD:/src" image semgrep scan', form('docker')],
   ])
     everywhere(script, pattern);
   // The Keycloak gate is the checkout's reviewed script only through the reviewed mount.
@@ -925,6 +1024,21 @@ test('the shared shell reader refuses whatever its policy does not list (FU-334)
     assert.notEqual(problems(text), '', text);
   for (const text of ['echo ok', 'bash -c "echo ok"', 'bash scripts/reviewed.sh', 'sudo echo ok'])
     assert.equal(problems(text), '', text);
+  // r1 F4: a wrapper's grammar is asked too, and an entry that is not `true` or a grammar lists nothing.
+  const wrapped = readShell('sudo echo ok', { programs: { sudo: () => 'DENIED', echo: true } });
+  assert.match(wrapped.problems.join(), /DENIED/);
+  for (const entry of [false, null, undefined])
+    assert.match(
+      readShell('echo ok', { programs: { echo: entry } }).problems.join(),
+      /does not list/,
+    );
+  // r1 F1: a redirection's target is marked, and a descriptor is no word.
+  assert.deepEqual(
+    parseCommands('2>&1 >echo env x <in 3<>f y&>>g').commands[0].words.map(
+      ({ value, redirect }) => (redirect ?? '') + value,
+    ),
+    ['2>&1', '>echo', 'env', 'x', '<in', '3<>f', 'y', '&>>g'],
+  );
   // A policy that gives no rule for a part of the text admits none of it: no assignment, no file.
   assert.match(problems('LEVEL=1 echo ok'), /assigns a variable/);
   assert.equal(readShell('LEVEL=1 echo ok', { ...policy, name: () => null }).problems.length, 0);

@@ -122,7 +122,8 @@ export function continuedDollar(text, at) {
 const PLAIN_EXPANSION = /^\{(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?!$-])\}/;
 
 /**
- * Tokenize shell text into commands {words, depth, scope} of words {value, dynamic, source}. `dynamic` marks
+ * Tokenize shell text into commands {words, depth, scope} of words {value, dynamic, source, redirect}: `redirect`
+ * is set (to the descriptor and operator) on a word that is a redirection's target and so no word of the command. `dynamic` marks
  * a word the shell computes ($var, globs, braces), `source` is the word as written (quotes and
  * expansions included); command substitutions are parsed by the
  * SAME scanner, in place (quotes, escapes and comments decide where one ends), and
@@ -159,13 +160,18 @@ function scan(text, from, depth, mode, out, scopes) {
   let at = from;
   let start = from; // where the word being read began, and one past its last character
   let end = from;
+  let redirect = null; // FU-334 r1 F1: the operator just read; the next word is its target
   const endWord = () => {
     // FU-334: the text the word was written as, so a reviewed form can be bound to its exact spelling
-    if (word) words.push(Object.assign(word, { source: text.slice(start, end) }));
+    if (word)
+      words.push(Object.assign(word, { source: text.slice(start, end) }, redirect && { redirect }));
+    if (word) redirect = null;
     word = null;
   };
   const endCommand = () => {
     endWord();
+    if (redirect) refuse('a redirection without a target word');
+    redirect = null;
     if (words.length) commands.push({ words, depth, scope: scopes.path.join('/') });
     if (words.some((item) => item.value === 'case')) scopes.frozen = true;
     words = [];
@@ -221,6 +227,9 @@ function scan(text, from, depth, mode, out, scopes) {
       const plain = PLAIN_EXPANSION.exec(rest);
       if (plain) return at + plain[0].length;
       refuse('a parameter expansion with an operator, subscript or nested text');
+      // FU-334 r1 F3: `${!x}` reads a name the text computes, `${x:=v}` and `${x=v}` assign one
+      if (/^\{(?:!|[A-Za-z_]\w*(?:\[[^\]]*\])?:?=)/.test(rest))
+        refuse('a parameter expansion that is indirect or assigns');
       return at + 1; // what follows is still scanned
     }
     if (rest.startsWith("'") || rest.startsWith('"')) {
@@ -277,8 +286,17 @@ function scan(text, from, depth, mode, out, scopes) {
     } else if (char === '#' && !word) {
       if (inside) refuse('a comment inside a command substitution');
       else while (at + 1 < text.length && text[at + 1] !== '\n') at++;
-    } else if (char === '<' || char === '>') {
+    } else if (char === '<' || char === '>' || (char === '&' && text[at + 1] === '>')) {
+      // FU-334 r1 F1: the operator ends the word before it (digits alone are its descriptor, not
+      // a word) and makes the next word its target: `>echo env x` runs `env`, `ech>o x` runs `ech`
       refuse(text.startsWith('<<', at) ? 'a here-document' : 'redirection');
+      const fd = word && /^\d+$/.test(text.slice(start, at)) ? text.slice(start, at) : '';
+      if (fd) word = null;
+      endWord();
+      if (redirect) refuse('a redirection without a target word');
+      const [operator] = /^(?:&>>?|<<<|<<-?|<>|<&|>>|>\||>&|[<>])/.exec(text.slice(at));
+      redirect = fd + operator;
+      at += operator.length - 1;
     } else if (char === '(') {
       refuse('a subshell or an arithmetic command');
       endCommand();
