@@ -54,6 +54,22 @@ describe('maintenance-meter-reconcile dry run', () => {
     const source: MeterUsageSource = {
       page: async () => ({ items: records, hasMore: false, nextCursor: null }),
     };
+    // PR 7a already spilled this covered fact; preview must neither duplicate it
+    // nor retain the tentative anchor that fills the missing history.
+    const covered = records[1];
+    await asActor({ organizationId: org.a }, () =>
+      prisma.client.assetUsageEntry.create({
+        data: {
+          usageRecordId: covered.id,
+          organizationId: org.a,
+          assetId,
+          periodStart: new Date(covered.periodStart),
+          periodEnd: new Date(covered.periodEnd),
+          hours: covered.hours,
+          kilometres: '0',
+        },
+      }),
+    );
     const scheduleId = id('MSC');
     await asActor({ organizationId: org.a }, () =>
       prisma.client.maintenanceSchedule.create({
@@ -99,7 +115,7 @@ describe('maintenance-meter-reconcile dry run', () => {
       await asActor({ organizationId: org.a }, () =>
         prisma.client.assetUsageEntry.count({ where: { assetId } }),
       ),
-    ).toBe(0);
+    ).toBe(1);
   });
   it('follows a filtered-empty page and refuses a missing continuation without a partial L', async () => {
     const assetId = await machine();
