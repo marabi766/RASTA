@@ -40,6 +40,49 @@ describe('published security equals the guard decision (FU-075)', () => {
     expect(field.safeParse('   ').success).toBe(false);
   });
 
+  it('publishes both usage queries and only the minimal meter response contract', () => {
+    const userRead = document.paths['/v1/usage-records']!.get!;
+    expect(userRead.parameters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'clientReference', in: 'query', required: false }),
+      ]),
+    );
+    expect(userRead.responses['400']).toBeDefined();
+    const meter = document.paths['/v1/internal/usage-records']!.get!;
+    expect(meter.parameters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'assetId', required: true }),
+        expect.objectContaining({ name: 'cursor', required: false }),
+        expect.objectContaining({
+          name: 'limit',
+          schema: expect.objectContaining({ maximum: 200 }),
+        }),
+      ]),
+    );
+    expect(meter.responses['400']).toBeDefined();
+    const response = meter.responses['200'] as unknown as {
+      content: {
+        'application/json': {
+          schema: { properties: { items: { items: { properties: object } } } };
+        };
+      };
+    };
+    expect(
+      Object.keys(
+        response.content['application/json'].schema.properties.items.items.properties,
+      ).sort(),
+    ).toEqual([
+      'hourMeter',
+      'hours',
+      'id',
+      'kilometres',
+      'odometer',
+      'organizationId',
+      'periodEnd',
+      'periodStart',
+    ]);
+  });
+
   it('documents bearer, internal token, both or none exactly where the guard admits them', () => {
     const expected = new Map<string, string[]>();
     for (const controller of controllers) {
@@ -73,6 +116,6 @@ describe('published security equals the guard decision (FU-075)', () => {
       }
     }
     expect(seen.sort()).toEqual(Object.keys(SERVICE_ROUTES).sort());
-    expect(seen.length).toBe(4);
+    expect(seen.length).toBe(5);
   });
 });
