@@ -60,8 +60,9 @@ export class UsageController {
   @ApiOperation({
     summary: 'List usage records, newest first',
     description:
-      'Filter by `assetId`, `driverId`, `source` and a `from`/`to` window over the period end. ' +
-      'A caller holding only DRIVER or OPERATOR sees their own records. Cursor-paginated.',
+      'Filter by `assetId`, `driverId`, `source`, exact `clientReference` and a `from`/`to` window over the period end. ' +
+      'A caller holding only DRIVER or OPERATOR sees their own records. Cursor-paginated. ' +
+      'An empty result is unknown, never proof of retirement or that no record exists.',
   })
   list(@Query(zodPipe(listUsageQuerySchema)) query: ListUsageQuery) {
     return this.usage.list(query);

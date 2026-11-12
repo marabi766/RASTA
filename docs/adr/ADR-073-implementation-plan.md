@@ -1,7 +1,7 @@
 # ADR-073 — برنامه‌ی اجرا (EXP-005)
 
 > برش PR به PR برای [ADR-073](ADR-073-pwa-and-offline-usage-queue.md). **PR 1 (PR #372، بستن بازپخش کارکرد) در 2026-10-24
-> ادغام شد؛ PR 2a: [x] پیاده‌سازی انتساب با بازه‌ی گزارش‌شده؛ PR 0 (همین، طراحی) در جریان است**؛ این سند وضعیت نیست، نقشه است. هر PR جداگانه با CI سبز ادغام می‌شود؛ هر PR سرویس
+> ادغام شد؛ PR 2a: [x] پیاده‌سازی انتساب با بازه‌ی گزارش‌شده؛ PR 9: [x] دو خواندن fleet؛ PR 0 (همین، طراحی) در جریان است**؛ این سند وضعیت نیست، نقشه است. هر PR جداگانه با CI سبز ادغام می‌شود؛ هر PR سرویس
 > آزمون جداسازی مستاجر و آزمون Idempotency دارد، و هر PR پورتال آزمون اینکه هیچ نتیجه‌ای بی نمایش از صف بیرون نمی‌رود.
 
 **اندازه:** `S` ≈ تا ۳۰۰ خط تغییر با آزمون؛ `M` ≈ ۳۰۰ تا ۹۰۰؛ `L` ≈ ۹۰۰ تا ۲۰۰۰؛ `XL` بیش از آن (همان مقیاس برنامه‌ی ADR-071).
@@ -166,6 +166,14 @@ PR 2b پیش از پاسخ Q-150 ادغام نمی‌شود؛ تا آن زمان
   dev/test روشن، در Production طبق شرط بالا.
 
 ### PR 7 — شمارنده‌ی نگهداری مستقل از ترتیب رسیدن (`L`، پیش‌نیاز)
+
+PR 7 is split by the PM (task 1358): **7a** supplies the reversible ledger/precision migrations,
+strict consumer validation and the shared `insertUsageEntry`, `lockUsageMeter`,
+`calculateLedgerMeter` helpers. **7b remains required**: reconciliation, completeness/catch-up proof,
+cutover, the legacy-assets gauge and the runbook. Existing and new assets remain `LEGACY` in 7a.
+Historical LEGACY events without interval endpoints are retained with nullable endpoints;
+LEDGER calculation refuses any incomplete entry. 7b must resolve those facts from fleet and prove
+interval completeness before cutover; counting rows alone cannot establish it.
 
 - Migration برگشت‌پذیر: جدول `asset_usage_entry` (کلید `usage_record_id`؛ `asset_id`، `organization_id`، `period_start`،
   `period_end`، `hours` `NUMERIC(10,2)`، `kilometres`، `hour_meter`، `odometer` `NUMERIC(12,2)`؛ ایندکس `(asset_id, period_end)`؛

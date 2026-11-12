@@ -20,6 +20,7 @@ import {
 const assetId = seedIdSchema(ID_PREFIXES.asset);
 const userId = seedIdSchema(ID_PREFIXES.user);
 const driverId = seedIdSchema(ID_PREFIXES.driver);
+const clientReference = plainText().min(8).max(128);
 
 export const DRIVER_STATUSES = ['ACTIVE', 'SUSPENDED', 'DEACTIVATED'] as const;
 export const USAGE_SOURCES = ['MANUAL', 'TELEMATICS', 'IMPORTED'] as const;
@@ -261,7 +262,7 @@ export const recordUsageSchema = z
      * body only; anything else under a taken reference is `409
      * IDEMPOTENCY_KEY_REUSED` (UsageService).
      */
-    clientReference: plainText().min(8).max(128).optional(),
+    clientReference: clientReference.optional(),
   })
   .strict()
   .refine((dto) => dto.hours !== undefined || dto.kilometres !== undefined, {
@@ -277,6 +278,7 @@ export type RecordUsageDto = z.infer<typeof recordUsageSchema>;
 
 export const listUsageQuerySchema = cursorPaginationSchema
   .extend({
+    clientReference: clientReference.optional(),
     assetId: assetId.optional(),
     driverId: driverId.optional(),
     source: usageSourceSchema.optional(),
@@ -286,6 +288,11 @@ export const listUsageQuerySchema = cursorPaginationSchema
   .strict();
 
 export type ListUsageQuery = z.infer<typeof listUsageQuerySchema>;
+
+export const listMeterUsageQuerySchema = cursorPaginationSchema
+  .extend({ assetId, cursor: z.string().min(1).max(512).optional() })
+  .strict();
+export type ListMeterUsageQuery = z.infer<typeof listMeterUsageQuerySchema>;
 
 // ---------------------------------------------------------------------------
 // Availability and utilization

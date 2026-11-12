@@ -3,6 +3,7 @@ import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } fro
 import type { EventEnvelope } from '@rasta/contracts';
 import {
   invalidPayloadError,
+  UnprocessableEventError,
   requireEnvelopeTenant,
   type EventConsumer,
   type EventHandler,
@@ -13,7 +14,7 @@ import { SERVICE_NAME } from '../config/env';
 import { MaintenanceRepository } from '../maintenance/maintenance.repository';
 import { DueAnnouncerService } from '../maintenance/due-announcer.service';
 import { CONSUMED_EVENTS, usageRecordedSchema } from '../maintenance/events';
-import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import { UsageMeterRefusal, UsageAlreadyProcessed } from '../maintenance/usage-meter';
 
 /**
  * Turns fleet-service's usage stream into a service schedule that knows how
@@ -141,33 +142,35 @@ export class UsageConsumer implements OnModuleInit, OnApplicationShutdown {
 
     const now = new Date();
 
-    const applied = await this.repository.transaction(async (tx: ExtendedPrismaClient) => {
-      // The idempotency marker and the meter update commit together, so a
-      // crash between them cannot leave the event marked handled with the
-      // hours unrecorded — or, worse, the hours recorded twice on the retry.
-      const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
-      if (!fresh) {
-        this.logger.debug(`${envelope.eventName} ${envelope.eventId} already applied`);
-        return false;
-      }
-
-      await this.repository.foldUsageIntoMeter(tx, {
-        assetId: payload.assetId,
-        organizationId,
-        // Absent is zero for a delta: fleet-service requires at least one of
-        // hours or kilometres, so a reading with only kilometres is valid and
-        // must not be refused.
-        hoursDelta: payload.hours ?? '0',
-        kilometresDelta: payload.kilometres ?? '0',
-        reportedHourMeter: payload.hourMeter ?? null,
-        reportedOdometer: payload.odometer ?? null,
-        usageRecordId: payload.usageRecordId,
-        periodEnd: payload.periodEnd ? new Date(payload.periodEnd) : null,
-        now,
-      });
-
-      return true;
-    });
+    let applied: boolean;
+    try {
+      applied = await this.repository.transaction(async (tx) =>
+        this.repository.foldUsageIntoMeter(
+          tx,
+          {
+            assetId: payload.assetId,
+            organizationId,
+            hoursDelta: payload.hours ?? '0',
+            kilometresDelta: payload.kilometres ?? '0',
+            reportedHourMeter: payload.hourMeter ?? null,
+            reportedOdometer: payload.odometer ?? null,
+            usageRecordId: payload.usageRecordId,
+            periodStart: payload.periodStart ? new Date(payload.periodStart) : null,
+            periodEnd: payload.periodEnd ? new Date(payload.periodEnd) : null,
+            now,
+          },
+          envelope.eventId,
+          CONSUMER_NAME,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof UsageAlreadyProcessed) return 'SKIPPED';
+      if (!(error instanceof UsageMeterRefusal)) throw error;
+      throw new UnprocessableEventError(
+        'VALIDATION_FAILED',
+        `${envelope.eventName} ${envelope.eventId} ${error.code}`,
+      );
+    }
 
     if (!applied) return 'SKIPPED';
 

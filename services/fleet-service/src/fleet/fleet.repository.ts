@@ -12,6 +12,7 @@ import {
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
+import type { MeterUsageView } from './meter-usage';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import { Prisma } from '../generated/prisma';
@@ -668,6 +669,7 @@ export class FleetRepository {
         ...(query.assetId ? { assetId: query.assetId } : {}),
         ...(query.driverId ? { driverId: query.driverId } : {}),
         ...(query.source ? { source: query.source } : {}),
+        ...(query.clientReference !== undefined ? { clientReference: query.clientReference } : {}),
         ...(constraints.length > 0 ? { AND: constraints } : {}),
       },
       orderBy: { id: 'desc' },
@@ -675,6 +677,44 @@ export class FleetRepository {
     });
 
     return page(rows, query.limit, (row) => row.id);
+  }
+
+  /** A cursor must name a real row of this asset at this exact instant; PK point read, never a scan. */
+  async hasMeterUsageCursor(assetId: string, after: { end: Date; id: string }): Promise<boolean> {
+    const rows = await this.client.$queryRaw<{ id: string }[]>`
+      SELECT id FROM usage_record
+      WHERE id = ${after.id} AND asset_id = ${assetId} AND period_end = ${after.end}
+      LIMIT 1
+    `;
+    return rows.length === 1;
+  }
+
+  /**
+   * ADR-073 § 4 F: intentionally across owners, ONLY via MeterUsageService's
+   * maintenance-service check. Raw SQL projects only the physical meter fields.
+   * A strict tuple comparison and matching order preserve equal-end ties.
+   */
+  async listMeterUsage(
+    assetId: string,
+    limit: number,
+    after?: { end: Date; id: string },
+  ): Promise<
+    (Omit<MeterUsageView, 'periodStart' | 'periodEnd'> & {
+      periodStart: Date;
+      periodEnd: Date;
+    })[]
+  > {
+    return this.client.$queryRaw`
+      SELECT id, organization_id AS "organizationId",
+             period_start AS "periodStart", period_end AS "periodEnd",
+             hours::text, kilometres::text, hour_meter::text AS "hourMeter", odometer::text
+      FROM usage_record
+      WHERE asset_id = ${assetId}
+        AND (${after?.end ?? null}::timestamp IS NULL
+             OR (period_end, id) > (${after?.end ?? null}::timestamp, ${after?.id ?? null}::text))
+      ORDER BY period_end ASC, id ASC
+      LIMIT ${limit + 1}
+    `;
   }
 
   /**
