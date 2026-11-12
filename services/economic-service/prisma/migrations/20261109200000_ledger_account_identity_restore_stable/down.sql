@@ -2,7 +2,8 @@
 --
 -- Gives back, byte for byte, the trigger of 20261104120000: the same condition as one row
 -- comparison. It refuses and allows the same updates, so nothing is rewritten and nothing is
--- refused; the restore drill's SOURCE/REF gate refuses a restore again until this is re-applied.
+-- refused; a restore prints the trigger differently from its source again (the restore drill's
+-- fold, FU-327, passes that and lists the trigger) until this is re-applied.
 --
 -- Before 20261104120000's own down, never after it: that one drops the trigger in whichever form
 -- it stands, and a re-deploy would then bring the row comparison back and skip this migration.

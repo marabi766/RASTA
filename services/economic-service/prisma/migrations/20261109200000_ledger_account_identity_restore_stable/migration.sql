@@ -9,8 +9,10 @@
 -- PostgreSQL does not keep a row comparison. It keeps one `IS DISTINCT FROM` per column, joined
 -- by OR two at a time, prints that with a parenthesis per pair, and reads its own print back as
 -- one OR of five. So a restored database prints the trigger differently from the database it was
--- dumped from, and the restore drill's SOURCE/REF gate (D-068), which lets nothing but a CHECK
--- line differ, refuses the restore. The gate is right and stays as it is: the definition moves.
+-- dumped from. The restore drill refused that until FU-327 taught its SOURCE/REF comparison this
+-- one regrouping, for every object alike; it now passes the trigger and lists it under
+-- `foldedBooleanLists`. Written as PostgreSQL prints it, the trigger is its own round trip: source
+-- and restore are equal byte for byte with no rule applied, and the trigger leaves that list.
 --
 -- ## What changes
 --
