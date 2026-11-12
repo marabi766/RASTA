@@ -19,10 +19,12 @@ import {
   listAvailabilityWindowsQuerySchema,
   listDriversQuerySchema,
   listUsageQuerySchema,
+  listMeterUsageQuerySchema,
   recordUsageSchema,
   updateDriverSchema,
   utilizationQuerySchema,
 } from '../fleet/dto';
+import { meterUsagePageSchema } from '../fleet/meter-usage';
 import { transferClearanceSchema } from '../fleet/transfer-clearance';
 
 /**
@@ -59,6 +61,7 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
   'GET /v1/drivers/{id}/assignments': toJsonSchema(listAssignmentsQuerySchema),
   'GET /v1/assignments': toJsonSchema(listAssignmentsQuerySchema),
   'GET /v1/usage-records': toJsonSchema(listUsageQuerySchema),
+  'GET /v1/internal/usage-records': toJsonSchema(listMeterUsageQuerySchema),
   'GET /v1/fleet/availability': toJsonSchema(availabilityQuerySchema),
   'GET /v1/fleet/availability/windows': toJsonSchema(listAvailabilityWindowsQuerySchema),
   'GET /v1/fleet/utilization': toJsonSchema(utilizationQuerySchema),
@@ -90,7 +93,8 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/assignments': [...WRITE, 503, 504],
   'POST /v1/assignments/{id}/end': WRITE,
   'DELETE /v1/assignments/{id}': WRITE,
-  'GET /v1/usage-records': COMMON,
+  'GET /v1/usage-records': [...COMMON, 400],
+  'GET /v1/internal/usage-records': [...COMMON, 400],
   'GET /v1/usage-records/{id}': READ_ONE,
   // A tenant claim the token does not carry is a 403; a record outside it, 404.
   'GET /v1/internal/usage-records/{id}': READ_ONE,
@@ -126,6 +130,7 @@ const STATUS_TEXT: Record<number, string> = {
  * (`source-fact.ts`, `asset-work-state.ts`, `transfer-clearance.ts`) — and must match the decorators exactly.
  */
 export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/usage-records': 'users-refused',
   'GET /v1/internal/usage-records/{id}': 'users-refused',
   'GET /v1/internal/assets/{assetId}/assignment-state': 'users-refused',
   'POST /v1/internal/assets/{assetId}/transfer-clearance': 'users-refused',
@@ -171,7 +176,12 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',
-        content: { 'application/json': { schema: {} } },
+        content: {
+          'application/json': {
+            schema:
+              key === 'GET /v1/internal/usage-records' ? toJsonSchema(meterUsagePageSchema) : {},
+          },
+        },
       };
 
       for (const status of ERRORS[key] ?? []) {

@@ -3127,5 +3127,19 @@
     "hash": "81ce96343c289e3477f27d7c92a1ecca5fee2b1f698aa5b9899dc2d61a4ec574",
     "occurrence": 0,
     "decision": "platform-wide: obtains the database clock; no domain rows accessed"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 684,
+    "hash": "62fe1efae2c588bcb586fd2f54c80da4d719494b9922fd82858929e9fe02b044",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 section 4 F physical asset meter reconciliation across owners; MeterUsageService admits only maintenance-service service identities, strictly validated asset/time/id cursor with primary-key anchor lookup and bounded minimal meter projection; no user, driver, notes, reference or reward fields"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 707,
+    "hash": "27360f95bffbb6777e0caa1fa50f25edb7b7098c8bc1aad72f54007ae45b3224",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 section 4 F physical asset meter reconciliation across owners; MeterUsageService admits only maintenance-service service identities, strictly validated asset/time/id cursor with primary-key anchor lookup and bounded minimal meter projection; no user, driver, notes, reference or reward fields"
   }
 ]
