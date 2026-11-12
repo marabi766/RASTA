@@ -115,11 +115,12 @@ describe('UsageService replay binding', () => {
       }),
       findDriverByUserId: jest.fn(async (userId: string, _tx?: unknown) => drivers[userId] ?? null),
       findAssetRef: jest.fn(async () => ({ id: ASSET, organizationId: ORG })),
-      findActiveAssignmentForDriver: jest.fn(async (driverId: string) => ({
+      findActiveAssignmentForUsage: jest.fn(async (_tx: unknown, driverId: string) => ({
         id: `ASG_${driverId}`,
+        startedAt: new Date(0),
         assetId: ASSET,
       })),
-      findActiveAssignmentForAsset: jest.fn(async () => null),
+      findCoveringAssignment: jest.fn(async () => null),
       findDriverById: jest.fn(async (driverId: string) => ({ id: driverId })),
       transaction: jest.fn(async (fn: (client: unknown) => Promise<unknown>) => fn(tx)),
       lockAssetRef: jest.fn(async () => undefined),
@@ -396,8 +397,8 @@ describe('UsageService replay binding', () => {
       await expect(as(driverA, () => usage.record(request))).resolves.toMatchObject({
         id: 'USG_STORED',
       });
-      // Once to resolve the operator, before the transaction; then the read
-      // rule of the replay, inside it.
+      // The read rule of the replay uses the transaction connection;
+      // replay never resolves the operator again.
       expect(repository.findDriverByUserId).toHaveBeenLastCalledWith('USR-DRIVER-A', tx);
     });
 
@@ -421,7 +422,7 @@ describe('UsageService replay binding', () => {
       const { usage, repository, tx } = setup({
         underLock: storedRow(driverA, request, { driverId: DRIVER_A }),
       });
-      repository.findActiveAssignmentForDriver.mockResolvedValueOnce(null as never);
+      repository.findActiveAssignmentForUsage.mockResolvedValueOnce(null as never);
 
       await expect(as(driverA, () => usage.record(request))).resolves.toMatchObject({
         id: 'USG_STORED',
@@ -446,7 +447,7 @@ describe('UsageService replay binding', () => {
       await refusal(as(supervisor1, () => usage.record(dto())));
 
       const other = setup({ underLock: storedRow(driverA, dto(), { driverId: DRIVER_A }) });
-      other.repository.findActiveAssignmentForDriver.mockResolvedValueOnce(null as never);
+      other.repository.findActiveAssignmentForUsage.mockResolvedValueOnce(null as never);
       await refusal(as(driverB, () => other.usage.record(dto())));
     });
 
