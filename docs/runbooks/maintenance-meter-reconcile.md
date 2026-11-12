@@ -6,7 +6,9 @@ first-meter initialization remain for 7b-2b-ii. New assets still start LEGACY;
 this slice never authorizes offline rollout or infers completion from gauge zero.
 
 Build maintenance-service, provide its normal runtime environment plus
-`FLEET_SERVICE_URL`, then run from the workspace root:
+`FLEET_SERVICE_URL`. Apply also requires `METER_RECONCILE_OPERATOR_ID`, the
+configured operator platform ID (printable ASCII, 1–256 characters); missing or
+malformed identity refuses before database access. Then run from the workspace root:
 
 ```sh
 pnpm --filter @rasta/maintenance-service maintenance-meter-reconcile --organization-id ORG_ID --dry-run
@@ -31,6 +33,16 @@ false. An asset's sourceComplete is true only after verified apply commits.
 Dry-run rolls back all staging, never announces, and keeps sourceComplete false.
 The inherited preview refusal code CUTOVER_PROOF_REQUIRED means no cutover was
 committed. Live page-only sources remain preview-only, never apply fallbacks.
+
+Every applied meter transition enqueues `MAINTENANCE_METER_RECONCILED` v1 in
+that meter transaction, even with no due schedules. Audit retains previous/new
+mode, exact counters and ledger metadata, certificate digest, snapshot, run ID
+and operator. Replay compares the state under the shared lock: unchanged state
+(including timestamp-only repeats) emits nothing; a later actual transition
+produces fresh evidence. The run ID is also the event correlation ID.
+Snapshot markers over 2,000 characters refuse apply to preserve audit's scalar
+bounds; dry-run still accepts the source certificate's larger marker limit.
+The normal maintenance outbox relay and audit domain projector must be running.
 
 ## Certificate and durable handoff
 

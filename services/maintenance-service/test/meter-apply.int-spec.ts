@@ -123,7 +123,7 @@ describe('actual LEDGER apply and fleet transactional outbox handoff', () => {
         throw new Error('must not fall back to pages');
       },
     };
-    return new MeterReconcile(prisma, source);
+    return new MeterReconcile(prisma, source, undefined, 'USR_ITEST');
   }
   const apply = (assetId: string, c?: MeterCertificate) =>
     command(c).reportAsset(org.a, assetId, new Date(), true);
@@ -170,6 +170,7 @@ describe('actual LEDGER apply and fleet transactional outbox handoff', () => {
             },
           },
           announcer,
+          'USR_ITEST',
         ).reportAsset(org.a, assetId, new Date(), true);
       expect(await run()).toMatchObject({
         outcome: 'APPLIED',
@@ -342,7 +343,12 @@ describe('actual LEDGER apply and fleet transactional outbox handoff', () => {
       page: jest.fn(),
     };
     expect(
-      await new MeterReconcile(prisma, source).reportAsset(org.a, assetId, new Date(), true),
+      await new MeterReconcile(prisma, source, undefined, 'USR_ITEST').reportAsset(
+        org.a,
+        assetId,
+        new Date(),
+        true,
+      ),
     ).toMatchObject({ refusal: 'SOURCE_READ_FAILED', sourceComplete: false });
     expect(source.page).not.toHaveBeenCalled();
     await expectMeter(assetId, '100', 'LEGACY');
@@ -370,6 +376,7 @@ describe('actual LEDGER apply and fleet transactional outbox handoff', () => {
       prisma,
       { certificate: async () => certificate(assetId), page: jest.fn() },
       failed,
+      'USR_ITEST',
     );
     expect(await run.reportAsset(org.a, assetId, new Date(), true)).toMatchObject({
       outcome: 'APPLIED',

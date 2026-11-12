@@ -1,4 +1,12 @@
-import { type MeterCertificate } from '@rasta/contracts';
+import {
+  type MeterCertificate,
+  maintenanceMeterReconciledPayloadV1,
+  meterReconcileOperatorSchema,
+  MAINTENANCE_METER_RECONCILED,
+  MAINTENANCE_METER_RECONCILED_VERSION,
+} from '@rasta/contracts';
+import { ulid } from 'ulid';
+import { MAINTENANCE_TOPIC } from '../config/env';
 import { readMeterCertificate, verifyMeterCertificate } from './meter-certificate';
 import { z } from 'zod';
 import {
@@ -110,6 +118,7 @@ class PreviewComplete extends Error {
 
 /** Per-asset cutover. Global inventory/marker activation is a separate operation. */
 export class MeterReconcile {
+  private readonly runId = ulid();
   constructor(
     private readonly prisma: PrismaService,
     private readonly source: MeterUsageSource,
@@ -117,6 +126,7 @@ export class MeterReconcile {
       DueAnnouncerService,
       'announceForAsset'
     > = new DueAnnouncerService(new MaintenanceRepository(prisma)),
+    private readonly operatorId?: string,
   ) {}
 
   async report(
@@ -129,6 +139,8 @@ export class MeterReconcile {
     sourceComplete: false;
     assets: MeterReconcileAssetReport[];
   }> {
+    if (apply && !meterReconcileOperatorSchema.safeParse(this.operatorId).success)
+      throw new Error('OPERATOR_ID_REQUIRED');
     const assets: MeterReconcileAssetReport[] = [];
     let after = '';
     for (;;) {
@@ -164,6 +176,8 @@ export class MeterReconcile {
       outcome: 'REFUSED',
       refusal: 'CUTOVER_PROOF_REQUIRED',
     };
+    if (apply && !meterReconcileOperatorSchema.safeParse(this.operatorId).success)
+      return { ...report, refusal: 'OPERATOR_ID_REQUIRED' };
     // Partition reports by the current local asset owner. Orphan meters are included
     // under their last recorded tenant; this is an operator report, not authorization.
     if (!(await this.assets(organizationId, '', 1, assetId)).length)
@@ -177,6 +191,7 @@ export class MeterReconcile {
           await this.source.certificate(organizationId, assetId),
           assetId,
         );
+        if (apply) maintenanceMeterReconciledPayloadV1.shape.snapshot.parse(certificate.snapshot);
         records.push(...certificate.facts);
         report.sourceSnapshot = certificate.snapshot;
       } else {
@@ -212,7 +227,8 @@ export class MeterReconcile {
         createSystemContext({
           organizationId,
           callerService: 'maintenance-service',
-          correlationId: 'maintenance-meter-reconcile',
+          correlationId: this.runId,
+          userId: this.operatorId,
         }),
         async () =>
           this.prisma.transaction(
@@ -261,6 +277,38 @@ export class MeterReconcile {
                 )
                 .map((s) => s.id);
               if (!apply) throw new PreviewComplete({ ...report, outcome: 'PREVIEW' });
+              if (!certificate) throw new Error('CUTOVER_PROOF_REQUIRED');
+              const state = (mode: 'LEGACY' | 'LEDGER', value: typeof ledger | typeof meter) => ({
+                mode,
+                hours: difference(value.hour_meter, '0'),
+                kilometres: difference(value.odometer, '0'),
+                recordCount: value.record_count,
+                lastPeriodEnd: value.last_period_end?.toISOString() ?? null,
+                lastUsageRecordId: value.last_usage_record_id,
+              });
+              const before = state(meter.meter_source, meter);
+              const after = state('LEDGER', ledger);
+              // Under the shared lock: timestamp-only retries write no transition evidence.
+              if (JSON.stringify(before) !== JSON.stringify(after)) {
+                await new MaintenanceRepository(this.prisma).enqueueEvent(tx, {
+                  aggregateType: 'AssetUsageMeter',
+                  aggregateId: assetId,
+                  eventName: MAINTENANCE_METER_RECONCILED,
+                  eventVersion: MAINTENANCE_METER_RECONCILED_VERSION,
+                  topic: MAINTENANCE_TOPIC,
+                  organizationId,
+                  payload: maintenanceMeterReconciledPayloadV1.parse({
+                    assetId,
+                    organizationId,
+                    before,
+                    after,
+                    certificateDigest: certificate.digest,
+                    snapshot: certificate.snapshot,
+                    runId: this.runId,
+                    operatorId: this.operatorId,
+                  }),
+                });
+              }
               // Staging precedes the shared lock. An unseen post-snapshot fact
               // either committed before verification (exact-set refusal), or
               // must take this lock after commit and observe LEDGER. No fact

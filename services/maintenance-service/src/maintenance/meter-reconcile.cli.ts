@@ -1,3 +1,4 @@
+import { meterReconcileOperatorSchema } from '@rasta/contracts';
 import { z } from 'zod';
 import { assertNoMigratorCredentials, commandFailure, serviceUrlSchema } from '@rasta/config';
 import { InternalTokenService, preflightRuntimeRole } from '@rasta/nest-common';
@@ -9,6 +10,9 @@ import { parseMeterReconcileArgs } from './meter-reconcile.args';
 
 async function main(): Promise<number> {
   const { organizationId, apply } = parseMeterReconcileArgs(process.argv.slice(2));
+  const operatorId = process.env.METER_RECONCILE_OPERATOR_ID;
+  if (apply && !meterReconcileOperatorSchema.safeParse(operatorId).success)
+    throw new Error('OPERATOR_ID_REQUIRED');
   assertNoMigratorCredentials(process.env);
   const env = loadMaintenanceEnv();
   // Existing service URL validation; never repeat a bad environment value.
@@ -30,7 +34,7 @@ async function main(): Promise<number> {
         env.INTERNAL_TOKEN_TTL_SECONDS,
       ),
     });
-    const report = await new MeterReconcile(prisma, source).report(
+    const report = await new MeterReconcile(prisma, source, undefined, operatorId).report(
       organizationId,
       new Date(),
       apply,

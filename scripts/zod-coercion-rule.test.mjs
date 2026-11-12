@@ -470,7 +470,7 @@ it('FU-181 refuses the stale partial contracts barrel', () => {
     writeFileSync(barrel, stale);
     assert.equal(
       createHash('sha256').update(stale).digest('hex'),
-      'a1498b8fbed9d95a86c1d6173eba583172f77aae0c6e3a72b14ee383cf40e5e1',
+      'c00b540de2dbd5520aa889fc345fbd6b5cf7385f7a1b57eecee5731eebd13877',
     );
     assert.equal(imported(root, '@rasta/contracts', 'isoDateTime'), undefined);
   } finally {
