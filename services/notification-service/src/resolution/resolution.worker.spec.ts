@@ -19,6 +19,7 @@ const options: ResolutionWorkerOptions = {
   pollIntervalMs: 60_000,
   batchSize: 10,
   leaseSeconds: 60,
+  processingBudgetMs: 1_000,
   backoffMaxSeconds: 600,
   maxRecipients: 500,
   inAppTtlDays: 60,
@@ -89,7 +90,7 @@ function fakeRepository(claimed: NotificationIntent[]): FakeRepository {
     repository: undefined as unknown as NotificationRepository,
   };
   state.repository = {
-    claimPending: jest.fn(async () => state.claimed),
+    claimPending: jest.fn(async () => state.claimed.splice(0, 1)),
     deferResolution: jest.fn(
       async (row: NotificationIntent, errorClass: string, nextResolutionAt: Date) => {
         state.contextsSeen.push(tryGetContext()?.organizationId);
@@ -434,6 +435,11 @@ describe('ResolutionWorker', () => {
       }) as typeof fetch,
     );
     const repo = fakeRepository([intent()]);
+    (repo.repository.claimPending as jest.Mock)
+      .mockResolvedValueOnce([intent()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([intent()])
+      .mockResolvedValue([]);
     const worker = new ResolutionWorker(
       repo.repository,
       adapter,
@@ -527,4 +533,91 @@ describe('ResolutionWorker', () => {
       expect(logger.lines.join('\n')).not.toContain('abandoned');
     });
   });
+});
+
+// FU-320/FU-321: deferred I/O and the monotonic clock exercise the actual worker.
+describe('claim admission and abandonment', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it.each([0, 1, options.leaseSeconds * 1000])(
+    'checks remaining lease after claim acknowledgement (+%s)',
+    async (extra) => {
+      const repo = fakeRepository([intent()]);
+      const recipients = port(async () => ({
+        recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER', email: null }],
+        truncated: false,
+      }));
+      const current = new ResolutionWorker(repo.repository, recipients, options, silent());
+      let finish!: (rows: unknown[]) => void;
+      (repo.repository.claimPending as jest.Mock)
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        )
+        .mockResolvedValue([]);
+      const running = current.tick();
+      await jest.advanceTimersByTimeAsync(
+        options.leaseSeconds * 1000 - options.processingBudgetMs + extra,
+      );
+      finish([intent()]);
+      expect(await running).toBe(extra === 0 ? 1 : 0);
+      expect(repo.dispatched).toHaveLength(extra === 0 ? 1 : 0);
+      expect(repo.repository.claimPending).toHaveBeenCalledWith(
+        options.owner,
+        1,
+        options.leaseSeconds,
+      );
+    },
+  );
+
+  it.each(['grace', 'late success', 'late rejection'])(
+    '%s: submitted work never records a late outcome',
+    async (scenario) => {
+      const repo = fakeRepository([intent()]);
+      const recipients = port(async () => ({
+        recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER', email: null }],
+        truncated: false,
+      }));
+      const current = new ResolutionWorker(repo.repository, recipients, options, silent());
+      let finish!: (value: Awaited<ReturnType<RecipientPort['resolve']>>) => void;
+      let reject!: (error: Error) => void;
+      jest.spyOn(recipients, 'resolve').mockImplementationOnce(
+        () =>
+          new Promise((resolve, refuse) => {
+            finish = resolve;
+            reject = refuse;
+          }),
+      );
+      (repo.repository.claimPending as jest.Mock)
+        .mockResolvedValueOnce([intent()])
+        .mockResolvedValue([]);
+      const running = current.tick().then(
+        () => 'completed',
+        () => 'refused',
+      );
+      await jest.advanceTimersByTimeAsync(0);
+      expect(recipients.resolve).toHaveBeenCalledTimes(1);
+      const stopping = current.stop({ deadlineAt: Date.now() + 1000 });
+      await jest.advanceTimersByTimeAsync(scenario === 'grace' ? 999 : 1000);
+      if (scenario !== 'grace') await stopping;
+      if (scenario === 'late rejection') reject(new Error('late response'));
+      else
+        finish({
+          recipients: [{ userId: 'USR_1', role: 'FLEET_MANAGER', email: null }],
+          truncated: false,
+        });
+      expect(await running).toBe(scenario === 'grace' ? 'completed' : 'refused');
+      await stopping;
+      expect(repo.dispatched).toHaveLength(scenario === 'grace' ? 1 : 0);
+      expect(repo.deferred).toHaveLength(0);
+      expect(repo.suppressed).toHaveLength(0);
+      expect(await current.tick()).toBe(0);
+      current.start();
+      expect(current.isRunning()).toBe(false);
+      expect(repo.repository.claimPending).toHaveBeenCalledTimes(1);
+    },
+  );
 });

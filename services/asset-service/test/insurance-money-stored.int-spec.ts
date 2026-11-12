@@ -206,8 +206,8 @@ describe('a negative insurance amount stored before the constraints', () => {
         WHERE conname = ANY($1::text[]) AND convalidated`,
       Object.values(CONSTRAINTS).map(([, constraint]) => constraint),
     );
-    await owner.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await owner.stop();
+    await prisma.stop();
     expect(validated[0]!.n).toBe(4);
   });
 

@@ -34,7 +34,10 @@ async function main(): Promise<void> {
     emit({ event: 'summary', ...report, assigned: assigned.length });
     process.exitCode = report.converged ? 0 : 1;
   } finally {
-    await prisma.onModuleDestroy();
+    if (!(await prisma.stop()).drained) {
+      process.stderr.write('Database close UNCONFIRMED; prior work may have committed\n');
+      process.exitCode = 1;
+    }
   }
 }
 

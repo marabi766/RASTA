@@ -76,7 +76,7 @@ describe('tenant isolation', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   describe('reads', () => {

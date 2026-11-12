@@ -51,7 +51,7 @@
   {
     "file": "services/asset-service/src/asset/asset.repository.ts",
     "line": 306,
-    "hash": "d12ec918571fb93eefeaa357165adf920dda27d48224b48df7322a4a475a1079",
+    "hash": "813b4b2fc857187fe5ded1a00fa57d1ccc9838fe3a00a371a9095f0fe51fceb2",
     "occurrence": 0,
     "decision": "platform-wide: insurance expiry worker claims or counts due policies across tenants, preserving each row tenant for subsequent event processing"
   },
@@ -352,7 +352,7 @@
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
     "line": 118,
-    "hash": "829571358b114bc47db8825fbf8055cb25cbe9ca09bf13651a0e0649a32c4832",
+    "hash": "6cdece31217237f79403a788b8595623eb0c037b54facb2096596fa0bcb0c1e3",
     "occurrence": 0,
     "decision": "platform-wide: background policy-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -366,7 +366,7 @@
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
     "line": 188,
-    "hash": "c21f00dc9e61338ccfae724a5267276406669fc8c00265098591d1265a0c2fe6",
+    "hash": "10652e2c30dbf95053252c156c1ef3ec15f32db2238d03619682a73435db3170",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
@@ -380,7 +380,7 @@
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
     "line": 227,
-    "hash": "d67a73441987b256f0940077c36aaf9631b2fab15c93df026b126027c027c800",
+    "hash": "ed8d49bf5583958d7136f05bba84b87bed607c78b76386e2d4b5bea1c0702663",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
@@ -450,7 +450,7 @@
   {
     "file": "services/construction-service/src/tender/award-standing-check.repository.ts",
     "line": 66,
-    "hash": "2d167435c28e0aab3a4c4dcc8100ddd13f620f45b90fb03d0d6af061d4f39269",
+    "hash": "ace0b4d68e1cd6ca497a6dd74f28a63240456505166d8738a69fb975e152249c",
     "occurrence": 0,
     "decision": "platform-wide: background award-standing-check worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -562,7 +562,7 @@
   {
     "file": "services/construction-service/src/tender/tender-close.repository.ts",
     "line": 75,
-    "hash": "52877bf60e44a82b90b189b90f914e1fbfe0778745ca9599887bbe895ec2c409",
+    "hash": "8bc5c03a3b12e7d4b942d8a86cc22534ec6807ec6d0f56e860d161f02fc17916",
     "occurrence": 0,
     "decision": "platform-wide: background tender-close worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -653,7 +653,7 @@
   {
     "file": "services/contract-service/src/policy/policy-reconciliation.repository.ts",
     "line": 183,
-    "hash": "0234d38b8570753e83be28388123bdbb24e55bf8c27eaf1eda269474b69a085e",
+    "hash": "58daca8e7b2585b254a8d51f58901c4b979adcd933a931834c735ac5e825ae64",
     "occurrence": 0,
     "decision": "platform-wide: background policy-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -800,7 +800,7 @@
   {
     "file": "services/document-service/src/scanning/scan.repository.ts",
     "line": 52,
-    "hash": "ac150202fd48245a922423599e56acae1cf2804b954ea7f89903e5123a450a1c",
+    "hash": "09f8aaad07acfe9247103753f9a499054d4ee21b7d3446943d30358367de4bd2",
     "occurrence": 0,
     "decision": "platform-wide: background scan worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -841,98 +841,105 @@
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 87,
-    "hash": "5dfe8f0d4513b745010dfed27d2d839ae3b0c6e779643e8386731d59560927cb",
+    "line": 88,
+    "hash": "125a433b1a93cc794606ee9cb6ae924c885dd5b3837386e100a39cfcadb44c5f",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 116,
-    "hash": "519babb8fc1debfb77509308ab5118fd630daeb1d274d5a831741d6f4eaa804e",
+    "line": 109,
+    "hash": "43fd6803a9fe05f00f937b69c4f831c0f6a7fc3fc1783a6015488b4016953bec",
+    "occurrence": 0,
+    "decision": "platform-wide: recordOutcome inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
+  },
+  {
+    "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
+    "line": 139,
+    "hash": "0b09225431b5d3f07d8235ebf0768073db5a482244bb7e773c3b3e3327f80d70",
     "occurrence": 0,
     "decision": "platform-wide: background payment-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 155,
+    "line": 178,
     "hash": "612ca2ad1170bb5807b25c85b3e75469cc1fb78c94f651c87154f883c42dce5c",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 168,
-    "hash": "71a18ea07213a555c06800de9b9a2e2ca493dce50976ba0644b8bb355a4165fc",
+    "line": 191,
+    "hash": "63284d3b4ed51e16b4666704151f6d642064055ca01a68b7ab1d8eef29570480",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 183,
+    "line": 205,
     "hash": "5d190d26c0dec4de32041278ddc45b655edde2960a652bee8a4e98e25ff60ee6",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 214,
+    "line": 236,
     "hash": "7bd692b3378fefb4974bf6f808d97e3cefaba1923261b1147f9968c3f8edcad9",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 245,
+    "line": 267,
     "hash": "48df634680df58816821e8977272f406062b91f8835a127cf800a6c1640f506e",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 258,
-    "hash": "a8436f5fbda722e568d1140d76fc8e1a60172e36f5c3b8ce1e9c2555962f7e36",
+    "line": 280,
+    "hash": "616c1ea4c6c53d7a616ddd01b7cb26b9a0be295db2b19ab1e9062c8691ecd1fd",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 281,
+    "line": 302,
     "hash": "e9eebdd886b3e9f05bc95f955fc57c38167098c26523c9815d9da8085d50ea1f",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 305,
+    "line": 326,
     "hash": "0b89d90f9c16fca47a7e1fd352168b3a8afbc565f85893e738530cd077bd4e02",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 350,
+    "line": 371,
     "hash": "7ff83f7601e35bdd6109d23a61f2966a5c7eb1b8140c555c9b6f17985af69b07",
     "occurrence": 0,
     "decision": "platform-wide: payment reconciler heals missing tasks across tenants from explicitly eligible payment markers"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 388,
+    "line": 409,
     "hash": "1b0622aa2a9b65f5c0a13cf168c3a0e548fc73aa0fb9b54fef027fccf208a9ba",
     "occurrence": 0,
     "decision": "platform-wide: heal inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 413,
-    "hash": "e67af55778befa5d70acddc7eb9d56293ab3e31d6a366228be23457a75743046",
+    "line": 434,
+    "hash": "3548475f1c5988597f7869a1c2f7c45cac1ecceddf0502ec38e7d245e3e2bc30",
     "occurrence": 0,
     "decision": "platform-wide: payment reconciler retires stale tasks across tenants under row locks when their marker and hold are absent"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 480,
+    "line": 498,
     "hash": "0359ec214755d85e66b4cb84106b0e55edab84493b9c48742b11369a951024e3",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
@@ -1128,6 +1135,20 @@
   },
   {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 190,
+    "hash": "311f52e4291738a117867563984fb7f98d9cdfb4a43e2aec79355e6b4aaab944",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 205,
+    "hash": "2f9d3fb6b375d29863041300e173a1baf85ee803b11ce5b585cc470df77d2504",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 341,
     "hash": "c34032d3ad4ed017ee261922279fe4bf6011924bd7ad453bcf9294851e7f54a6",
     "occurrence": 0,
@@ -1220,7 +1241,7 @@
   {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 558,
-    "hash": "fa0a34db5eb25db9e8e177675c1650a19b346e21127c58d1255617298dab56cb",
+    "hash": "bc9fa8556ab393bc5005b711b2be4e1ba592628944ef11af051eb28efb797a60",
     "occurrence": 0,
     "decision": "platform-wide: asset transfer fences and release tombstones follow the global machine across owners; keyed by asset and fence, with bounded expiry"
   },
@@ -2284,7 +2305,7 @@
   {
     "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
     "line": 572,
-    "hash": "fa0a34db5eb25db9e8e177675c1650a19b346e21127c58d1255617298dab56cb",
+    "hash": "bc9fa8556ab393bc5005b711b2be4e1ba592628944ef11af051eb28efb797a60",
     "occurrence": 0,
     "decision": "platform-wide: asset transfer fences and release tombstones follow the global machine across owners; keyed by asset and fence, with bounded expiry"
   },
@@ -2336,13 +2357,6 @@
     "hash": "06e447bb67c6c8639097a63dbfa273222584cf81c530a538f69b5643a57b31ff",
     "occurrence": 0,
     "decision": "has bound organization predicate"
-  },
-  {
-    "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
-    "line": 782,
-    "hash": "6d0a6664e5bff317648ce35f00c702fc78989f285cb9ddfb807d7e79996b063c",
-    "occurrence": 0,
-    "decision": "platform-wide: foldUsageIntoMeter inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
   },
   {
     "file": "services/maintenance-service/src/prisma/prisma.service.ts",
@@ -2907,7 +2921,7 @@
   {
     "file": "services/procurement-service/src/demand/window-sweep.repository.ts",
     "line": 64,
-    "hash": "1234c7773332e85abcb5f1c0b74947c917048e6200661422eb0b4183054f4e8a",
+    "hash": "11051f56ae598e6f62e7b01274399107184c4c0e4c3e688ef5cb4ba1027ac707",
     "occurrence": 0,
     "decision": "platform-wide: background window-sweep worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -2991,7 +3005,7 @@
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",
     "line": 303,
-    "hash": "1dec3cf27e2f1c106e21bc6ed7b259914b74b0923502179278cff44037e3b3a8",
+    "hash": "9f19eaf3b106902bd2c12daedd6b2dc0f35f94a6c48acf714418d695a2839aa4",
     "occurrence": 0,
     "decision": "platform-wide: background rfq worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
@@ -3106,5 +3120,68 @@
     "hash": "81ce96343c289e3477f27d7c92a1ecca5fee2b1f698aa5b9899dc2d61a4ec574",
     "occurrence": 0,
     "decision": "platform-wide: obtains the database clock; no domain rows accessed"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 684,
+    "hash": "62fe1efae2c588bcb586fd2f54c80da4d719494b9922fd82858929e9fe02b044",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 section 4 F physical asset meter reconciliation across owners; MeterUsageService admits only maintenance-service service identities, strictly validated asset/time/id cursor with primary-key anchor lookup and bounded minimal meter projection; no user, driver, notes, reference or reward fields"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 707,
+    "hash": "27360f95bffbb6777e0caa1fa50f25edb7b7098c8bc1aad72f54007ae45b3224",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 section 4 F physical asset meter reconciliation across owners; MeterUsageService admits only maintenance-service service identities, strictly validated asset/time/id cursor with primary-key anchor lookup and bounded minimal meter projection; no user, driver, notes, reference or reward fields"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
+    "line": 788,
+    "hash": "9aba39ed55b219193fc041e3e33f1a219846143bfb88ac2459ecf3d8be758a00",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 49,
+    "hash": "535e7f3addffbb783f60820ec184f39357068ac54e9378ab420798929e465ad6",
+    "occurrence": 0,
+    "decision": "platform-wide: insertUsageEntry explicitly binds the validated envelope organization into each immutable quantity fact; no implicit tenant default"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 62,
+    "hash": "e5b93ed147ab653a54492de8490748cdc139c705e617e57664344f6f101f6194",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 88,
+    "hash": "2a15ae9f18702fdcf26e3ec40708c2b8d4e6f2515db312c071b3c6d1746f01d0",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 93,
+    "hash": "d857c38a0226818dcfc08979f584f764ec8fcdd0e58f33c63036d273ba16b3c5",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 117,
+    "hash": "1e7f1260f602881d5c4413e6808c4ccbef71c3a98486ed631c76da8afb951a91",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 151,
+    "hash": "9685de3810212cfc8dad2935f95a7772a83e5a7b3d66dc2a66126c1bc1589742",
+    "occurrence": 0,
+    "decision": "platform-wide: calculateLegacyMeter computes numeric constants from the already locked physical meter; no database rows read"
   }
 ]

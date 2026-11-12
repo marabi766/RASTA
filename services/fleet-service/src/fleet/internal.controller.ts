@@ -1,6 +1,8 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import { AllowService, zodPipe } from '@rasta/nest-common';
+import type { ListMeterUsageQuery } from './dto';
+import { METER_USAGE_CALLER, MeterUsageService, type MeterUsagePage } from './meter-usage';
 import {
   AssetWorkStateService,
   WORK_STATE_CALLER,
@@ -30,7 +32,26 @@ import {
 @ApiTags('fleet-internal')
 @Controller({ path: 'internal/usage-records', version: '1' })
 export class FleetInternalController {
-  constructor(private readonly facts: UsageFactService) {}
+  constructor(
+    private readonly facts: UsageFactService,
+    private readonly meter: MeterUsageService,
+  ) {}
+
+  @Get()
+  @AllowService(METER_USAGE_CALLER)
+  @ApiOperation({
+    summary: 'Page one physical asset’s usage across owners (internal)',
+    description:
+      'Only maintenance-service service tokens; every user and other service receives 403. ' +
+      'Returns only id, organizationId, periodStart, periodEnd and the four quantities. ' +
+      'Live ascending keyset order (periodEnd, id); limit defaults to 25, maximum 200. ' +
+      'Pass nextCursor until hasMore=false. The opaque cursor is strictly validated against an existing asset/time/id tuple; ' +
+      'Malformed, mismatched or nonexistent cursor tuples return 400. Inserts behind the cursor require a fresh scan; ' +
+      'this is not a frozen snapshot. No retirement claims are returned.',
+  })
+  list(@Query() query: ListMeterUsageQuery): Promise<MeterUsagePage> {
+    return this.meter.list(query);
+  }
 
   @Get(':id')
   @AllowService(SOURCE_FACT_CALLER)

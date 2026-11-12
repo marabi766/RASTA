@@ -51,7 +51,7 @@ describe('the economic suite mutates only what it owns', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** A tenant no `cleanup` call in this file is ever given. */

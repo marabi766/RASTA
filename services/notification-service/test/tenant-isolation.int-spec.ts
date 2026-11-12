@@ -57,7 +57,7 @@ describe('tenant isolation', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   });
 
   it("delivers each tenant's event to that tenant's recipients and nobody else", async () => {

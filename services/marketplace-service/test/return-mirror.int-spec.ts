@@ -142,7 +142,7 @@ describe('return mirror (RUN-005 PR 3)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, orgs);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   function mirrorWith(rules: { partialDispatchAllowed: boolean }) {
@@ -811,7 +811,7 @@ describeWithKafka('return mirror over Kafka', () => {
     await dlqReader?.disconnect();
     await producer?.disconnect();
     await cleanup(prisma, orgs);
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   }, 60_000);
 
   it('mirrors a step inventory published', async () => {

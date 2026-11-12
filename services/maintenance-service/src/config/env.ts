@@ -62,7 +62,11 @@ export const maintenanceEnvSchema = baseEnvSchema
      * constant buried in the evaluator (AGENTS.md § 9), and any schedule may
      * override it.
      */
-    MAINTENANCE_DEFAULT_LEAD_DAYS: z.coerce.number().int().min(0).max(365).prefault(7),
+    MAINTENANCE_DEFAULT_LEAD_DAYS: z
+      .string()
+      .regex(/^[0-9]{1,3}$/)
+      .prefault('7')
+      .pipe(wholeNumberEnv(0, 365)),
 
     /**
      * Whether this instance evaluates time-based schedules on a timer.

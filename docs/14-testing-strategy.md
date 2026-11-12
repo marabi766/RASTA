@@ -948,22 +948,65 @@ SOURCE dump with the same pinned `pg_dump` and flags. Restore it into a fresh
 scratch database, then dump that database to obtain REF. Do not modify SOURCE.
 Compare the real archive's restored schema with REF using strict byte equality;
 strip only the two generated version header lines at their exact header position.
-No SQL, whitespace or expression normalization is allowed.
+No SQL, whitespace or expression normalization is allowed in that comparison.
 
 Between SOURCE and REF only, equal line counts and an identical multiset of CHECK
-identities (database, schema, table, constraint name) are required. Every differing
-line must be a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE
-SQL context. Function bodies, comments and COMMENT strings never qualify. A
-non-CHECK difference, dropped/extra object or renamed constraint refuses. Report
+identities (database, schema, table, constraint name) are required. A line may then
+differ in exactly two ways, and anything else refuses:
+
+1. It is a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE SQL
+   context, owned by the same constraint on both sides. A CHECK-looking line in a
+   function body, comment or COMMENT string never qualifies. Every line in the CHECK
+   span must be equal after the D-171 fold below and the exact cast-placement rule
+   below, applied to both complete dumps; whole-line differences are not allowed.
+2. It is any other line (a SQL-standard routine body, view, trigger condition, index
+   predicate, policy, default, generated column) and it is equal after the one fold
+   defined below. This fold is the only exception to byte equality outside CHECK
+   lines. Both complete dumps are folded and every line
+   is compared after its permitted rules, including a line whose original bytes matched: a fold
+   removes two parentheses, often on two lines, so two different groupings of a
+   multi-line expression can come out equal on every line whose bytes differed and
+   unequal only on a line whose bytes matched.
+
+Any line not equal after its permitted rules, a CHECK span mismatch, a dropped/extra
+object or a renamed constraint refuses. Refusals identify only the dump object, never SQL. Report
 only the observed number of differing CHECK lines per database; do not hard-code
 exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
 ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
 
-PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
-`= ANY ((ARRAY['USER'::character varying, ...])::"text"[])` can return as
-`= ANY (ARRAY[('USER'::character varying)::"text", ...])`.
+The fold, one rule for every object alike (FU-327), applied to both dumps before
+SOURCE and REF are compared: a parenthesised list of parenthesised
+operands joined by one connective (`AND` or `OR`) loses its own parentheses when it
+is the first operand of the group around it and that same connective follows it.
+This is what PostgreSQL's grammar does on reading SQL (gram.y `makeAndExpr` /
+`makeOrExpr`): a tree that analysis nested (`BETWEEN`, a row comparison) is printed
+from SOURCE as `((a) AND (b)) AND (c)` and read back into REF as the single list
+`(a) AND (b) AND (c)`, the same boolean by associativity. It covers every stored
+expression tree (SQL-standard routine bodies, views, trigger conditions, index
+predicates, policies, defaults) with no object list. Nothing else is folded: another connective
+(`((a) OR (b)) AND (c)`), a trailing list, bare operands, a subquery, strings, `$$`
+bodies and comments keep their bytes. Objects with a line whose bytes differed and
+that is equal after the fold are listed (dump identity, no SQL) in
+`before.reference.foldedBooleanLists`.
+RESTORED against REF and REF against its fixed point stay raw byte equality.
 
-REF equality proves the backup under test restores to exactly what PostgreSQL itself produces from the source schema. The SOURCE-vs-REF allowance TRUSTS PostgreSQL's own schema dump/restore for CHECK text: it does not prove semantic equivalence of those lines (a same-name CHECK with a different bound would also pass that structural guard — e.g. economic init migration :648-649). The fixed point proves stability for one more round trip only.
+The CHECK-only cast-placement rule (FU-331), derived from the six differing CHECK
+lines in the pinned-image FU-327 SOURCE/REF dumps, rewrites exactly
+`ANY ((ARRAY['x'::character varying, ...])::"text"[])` to
+`ANY (ARRAY[('x'::character varying)::"text", ...])`. The array must be nonempty;
+every element must be an ordinary single-quoted string literal cast to
+`character varying`, with exactly the dump's spelling and separators. Only the
+outer `"text"[]` cast becomes the same `"text"` cast on each element. Both dumps
+receive this rule, so either direction compares equally. Literal bytes, element
+order/count, both cast types, the comparison operator and every other operand
+stay intact. No other cast or expression is normalized; strings, quoted
+identifiers, dollar bodies and comments are opaque. A different bound, column,
+operator, element, cast type or operand refuses, including within a CASE span.
+
+REF equality proves the backup under test restores to exactly what PostgreSQL itself
+produces from the source schema. SOURCE/REF additionally proves equality under only
+the two specified deparse rules; it does not establish general SQL equivalence.
+The fixed point proves stability for one more round trip only.
 
 Restore REF into a second fresh scratch database and dump it: these bytes must
 also equal REF. Missing REF, missing fixed-point evidence, a skipped allowance
@@ -981,8 +1024,25 @@ Version 5 JSON includes mandatory `referenceChecked`, `allowanceChecked` and
 `fixedPointEqual` gates plus per-database `before.reference.checkLinesDifferent`
 and `before.reference.milliseconds` (extra reference collection/restore/dump and
 fixed-point time). The PG suite prints that extra time separately in local and CI
-logs. CI budgets remain **10 minutes per job / 5 minutes for the PG test step**;
-main integration job/step budgets are unchanged. Runtime tenant isolation is not
+logs. The comparison-suite budgets remain **10 minutes per job / 5 minutes for
+its PG test step**; main integration job/step budgets are unchanged. The separate
+full 16-database drill is part of the **same `ci.yml` run**: every `mq/train-*` PR
+unconditionally, every push to `main`, and ordinary PRs matching
+`DRILL_PATHS` or configuration-derived install inputs in
+`scripts/backup-restore-drill-scope.mjs` (schemas/migrations,
+seeds, Compose/PostgreSQL bootstrap and pins, drill workflows/scripts, Prisma
+wrappers, env/database-URL wiring and seed/build dependencies). Only proven
+ordinary documentation PRs outside those inputs skip it; unclassified paths,
+unsupported install configuration or unknown metadata run it. An always-running
+verdict makes skip-on-train red. It starts beside existing
+jobs, never after the test/build gates, with a 30-minute job / 20-minute command
+limit. Setup, drill, summary and recovery step budgets total 29 minutes, reserving
+one minute for runner overhead. Superseded PR runs retain CI cancellation; recovery
+is attempted with `always()`, and hosted runner VMs are discarded after
+cancellation. The shared workflow also runs
+nightly on `main` at 03:17 UTC (including the monthly 1st) and on dispatch, using
+one step list. See [the runbook](runbooks/backup-restore-drill.md#ci-and-scheduled-full-drill)
+for inputs, synthetic-data boundaries, cleanup and separate wall-time reporting. Runtime tenant isolation is not
 proved. This drill does not prove PITR, WAL archiving, operational RPO/RTO,
 large-data recovery time, direct equality of every column value (rows use MD5
 rather than collision-free proof), production-role recovery (bootstrap supplies

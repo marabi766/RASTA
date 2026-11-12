@@ -47,7 +47,7 @@ describe('a wallet or escrow account never sums below zero at commit (real datab
 
   afterAll(async () => {
     await cleanup(prisma, [org.a]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
     await Promise.all([owner.$disconnect(), runtime.$disconnect(), other.$disconnect()]);
   });
 

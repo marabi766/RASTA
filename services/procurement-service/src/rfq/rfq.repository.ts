@@ -300,22 +300,26 @@ export class RfqRepository {
     return runUnscoped(
       'the RFQ close sweeper claims PUBLISHED RFQs past their deadline of every tenant; each is then closed in its own tenant (ADR-070 § 3)',
       () =>
-        this.prisma.client.$queryRawUnsafe<ClaimedRfq[]>(
-          `UPDATE "rfq"
-              SET "sweep_lease_until" = clock_timestamp() + ($2::int * interval '1 second'),
-                  "sweep_fence" = $3
-            WHERE "id" IN (
-                  SELECT "id" FROM "rfq"
+        this.prisma.transaction((tx) =>
+          tx.$queryRawUnsafe<ClaimedRfq[]>(
+            `WITH picked AS MATERIALIZED (
+                  SELECT "id" AS picked_id FROM "rfq"
                    WHERE "status" = 'PUBLISHED' AND "quotation_closing_at" <= clock_timestamp()
                      AND ("sweep_lease_until" IS NULL OR "sweep_lease_until" <= clock_timestamp())
                      AND ("sweep_next_attempt_at" IS NULL OR "sweep_next_attempt_at" <= clock_timestamp())
                    ORDER BY "quotation_closing_at", "id"
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
+            UPDATE "rfq"
+              SET "sweep_lease_until" = clock_timestamp() + ($2::int * interval '1 second'),
+                  "sweep_fence" = $3
+             FROM picked
+            WHERE "rfq"."id" = picked.picked_id
         RETURNING "id", "organization_id" AS "organizationId", "sweep_fence" AS "fence"`,
-          limit,
-          leaseSeconds,
-          fence,
+            limit,
+            leaseSeconds,
+            fence,
+          ),
         ),
     );
   }

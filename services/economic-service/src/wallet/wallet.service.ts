@@ -1,7 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
-import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
+import {
+  RastaError,
+  getContext,
+  getOrganizationId,
+  WorkerBoundary,
+  WorkerDrain,
+  workerOperation,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { isUniqueViolation } from '../ledger/ledger.repository';
@@ -44,6 +52,13 @@ export const HOLD_NOT_FUNDED =
  */
 @Injectable()
 export class WalletService {
+  private samplingStopped = false;
+  private readonly samplingWorker = new WorkerBoundary(() => undefined);
+  private readonly samplingDrain = new WorkerDrain(
+    this.samplingWorker,
+    { stop: async () => undefined },
+    () => undefined,
+  );
   constructor(
     private readonly repository: WalletRepository,
     private readonly ledger: LedgerService,
@@ -630,7 +645,18 @@ export class WalletService {
   }
 
   /** Operational gauges. Cross-tenant by nature; no tenant ever sees them. */
-  async sampleGauges(): Promise<void> {
-    holdsActiveTotal.set({ service: SERVICE_NAME }, await this.repository.countActiveHolds());
+  sampleGauges(): Promise<void> {
+    if (this.samplingStopped) return Promise.resolve();
+    return this.samplingWorker.run(async () => {
+      const count = await workerOperation(() => this.repository.countActiveHolds());
+      this.samplingWorker.assertActive();
+      holdsActiveTotal.set({ service: SERVICE_NAME }, count);
+    });
+  }
+
+  /** Also drains direct sampleGauges calls, under the sampler's coordinator deadline. */
+  stopSampling(options: OutboxStopOptions = {}): Promise<void> {
+    this.samplingStopped = true;
+    return this.samplingDrain.stop(options);
   }
 }

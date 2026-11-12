@@ -286,6 +286,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
         OrderSagaClient,
         ReturnMirrorConsumer,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -295,6 +296,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
         starter: OrderSagaClient,
         mirror: ReturnMirrorConsumer,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: MarketplaceEnv,
       ) =>
         new OutboxShutdown({
@@ -303,6 +305,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
           workers: [saga, starter, mirror],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

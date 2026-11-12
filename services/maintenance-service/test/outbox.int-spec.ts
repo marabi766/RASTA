@@ -36,7 +36,7 @@ describe('transactional outbox', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function outboxFor(aggregateId: string) {

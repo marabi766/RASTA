@@ -1,5 +1,10 @@
-import { createSafePrismaClient } from '@rasta/nest-common';
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import {
+  DatabaseTeardown,
+  type DatabaseCloseReport,
+  type OutboxStopOptions,
+  createSafePrismaClient,
+} from '@rasta/nest-common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
   CONTENTION_TRANSACTION_MAX_WAIT_MS,
@@ -10,6 +15,7 @@ import {
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
 import { Prisma, PrismaClient } from '../generated/prisma';
+import { withCommitReporting } from './commit-reporting';
 import { walletBelowZeroRefusal } from '../wallet/balances';
 
 /**
@@ -82,9 +88,10 @@ export const TENANT_SCOPE_EXEMPTIONS = {
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()
-export class PrismaService implements OnModuleInit, OnModuleDestroy {
+export class PrismaService implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
   private readonly base: PrismaClient;
+  private teardown?: DatabaseTeardown;
 
   /** The client every repository uses. Tenant scoping is already applied. */
   readonly client: ExtendedPrismaClient;
@@ -105,7 +112,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   private buildClient() {
-    return this.base.$extends(
+    const client = this.base.$extends(
       createTenantGuardExtension({
         scalarFkFamily: 'economic',
         scopedModels: TENANT_SCOPED_MODELS,
@@ -117,6 +124,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         },
       }),
     );
+    return withCommitReporting(client);
   }
 
   async onModuleInit(): Promise<void> {
@@ -144,8 +152,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.base.$disconnect();
+  /** Closed only by the coordinator, after the worker drain and publishers. */
+  stop(options: OutboxStopOptions = {}): Promise<DatabaseCloseReport> {
+    return (this.teardown ??= new DatabaseTeardown(this.base, this.logger)).stop(options);
   }
 
   /**

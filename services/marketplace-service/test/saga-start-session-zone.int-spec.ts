@@ -14,7 +14,7 @@ describe('order saga_start deadlines in any session zone (PostgreSQL)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const place = async () => {

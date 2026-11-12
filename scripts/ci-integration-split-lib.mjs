@@ -1027,6 +1027,18 @@ export function jobBudgetProblems(
   ];
   for (const [id, job] of Object.entries(jobs)) {
     if (!isMapping(job)) continue;
+    // A reusable-workflow call cannot carry timeout-minutes or steps: its
+    // runner jobs own their limits (guarded in that workflow's own suite).
+    // Admit local calls only; never mistake a mixed/remote call for a runner.
+    if (Object.hasOwn(job, 'uses')) {
+      if (
+        !/^\.\/\.github\/workflows\/[\w-]+\.ya?ml$/.test(job.uses) ||
+        Object.hasOwn(job, 'steps') ||
+        Object.hasOwn(job, 'timeout-minutes')
+      )
+        problems.push(`${id} is not a local reusable-workflow call without runner settings`);
+      continue;
+    }
     const limit = job['timeout-minutes'];
     // The split jobs and the aggregate are refused by jobLevel() already.
     if (!isMinutes(limit) && !splitIds.includes(id) && id !== AGGREGATE_JOB) {
@@ -1250,6 +1262,7 @@ function runVerdictCases(script, options, env, needsVar, needs) {
     const outcome = spawnSync('bash', [...options, script], {
       env: {
         PATH: process.env.PATH,
+        PRISMA_SKIP_POSTINSTALL_GENERATE: 'true', // FU-329: as every rebuilt child environment
         ...Object.fromEntries(Object.entries(env).map(([key, value]) => [key, textOf(value)])),
         [needsVar]: JSON.stringify(context, null, 2),
       },

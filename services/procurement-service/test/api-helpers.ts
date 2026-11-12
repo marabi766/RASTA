@@ -1,3 +1,4 @@
+import { claimedItemBudgetMs, PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS } from '@rasta/config';
 import { VersioningType, type INestApplication } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
@@ -254,6 +255,7 @@ export async function startApi(
           intervalMs: 60_000,
           batchSize: 20,
           leaseSeconds: 60,
+          processingBudgetMs: claimedItemBudgetMs(PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS),
           retryBackoffBaseSeconds: 10,
           retryBackoffMaxSeconds: 900,
           ...overrides,
@@ -264,6 +266,7 @@ export async function startApi(
         intervalMs: 60_000,
         batchSize: 20,
         leaseSeconds: 60,
+        processingBudgetMs: claimedItemBudgetMs(PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS),
         retryBackoffBaseSeconds: 10,
         retryBackoffMaxSeconds: 900,
         ...overrides,

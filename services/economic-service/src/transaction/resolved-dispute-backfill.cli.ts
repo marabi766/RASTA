@@ -34,7 +34,9 @@ async function main(): Promise<number> {
     );
     return backfillExitCode(summary);
   } finally {
-    await prisma.onModuleDestroy();
+    await prisma.stop().then(({ drained }) => {
+      if (!drained) throw new Error('Database close UNCONFIRMED');
+    });
   }
 }
 

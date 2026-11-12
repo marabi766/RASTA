@@ -140,7 +140,7 @@ export function stripComments(sql) {
       out += sql.slice(i, stop);
       i = stop;
     } else if (c === '-' && sql[i + 1] === '-') {
-      while (i < sql.length && sql[i] !== '\n') i += 1;
+      while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') i += 1;
       out += ' ';
     } else if (c === '/' && sql[i + 1] === '*') {
       let depth = 1;
@@ -154,7 +154,7 @@ export function stripComments(sql) {
           i += 2;
         } else i += 1;
       }
-      out += ' ';
+      out += depth ? ' /*' : ' ';
     } else {
       out += c;
       i += 1;
@@ -184,7 +184,10 @@ export function lex(sql) {
     const c = text[i];
     const rest = text.slice(i);
     let m;
-    if (/\s/.test(c)) i += 1;
+    if (rest.startsWith('/*')) {
+      push('comment', rest, i, true);
+      break;
+    } else if (/\s/.test(c)) i += 1;
     else if (c === '') {
       const end = text.indexOf('', i);
       push('placeholder', text.slice(i + 1, end < 0 ? text.length : end), i, end < 0);

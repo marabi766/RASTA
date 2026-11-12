@@ -40,7 +40,7 @@ describe('organization stream sequencing', () => {
     // is the usual way — `prisma` was never assigned, and an unguarded call
     // here throws a `TypeError` that reports itself *after* the real cause and
     // reads like the failure. The cause has to stay the last thing said.
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   });
 
   const assertConsistent = (row: {

@@ -1,7 +1,14 @@
-import { createSafePrismaClient } from '@rasta/nest-common';
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import {
+  CLAIM_TRANSACTION_MAX_WAIT_MS,
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+} from '@rasta/config';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
+  DatabaseTeardown,
+  type DatabaseCloseReport,
+  type OutboxStopOptions,
+  createSafePrismaClient,
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
@@ -49,9 +56,10 @@ export const TENANT_SCOPE_EXEMPT_MODELS = Object.keys(TENANT_SCOPE_EXEMPTIONS) a
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()
-export class PrismaService implements OnModuleInit, OnModuleDestroy {
+export class PrismaService implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
   private readonly base: PrismaClient;
+  private readonly teardown: DatabaseTeardown;
 
   /** The client every repository uses. Tenant scoping is already applied. */
   readonly client: ExtendedPrismaClient;
@@ -61,6 +69,10 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
       () =>
         new PrismaClient({
           datasources: { db: { url: databaseUrl } },
+          transactionOptions: {
+            timeout: PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+            maxWait: CLAIM_TRANSACTION_MAX_WAIT_MS,
+          },
           log: [
             { emit: 'event', level: 'warn' },
             { emit: 'event', level: 'error' },
@@ -69,6 +81,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
       'DATABASE_URL_PROCUREMENT',
     );
     this.client = this.buildClient();
+    this.teardown = new DatabaseTeardown(this.base, this.logger);
   }
 
   private buildClient() {
@@ -111,8 +124,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.base.$disconnect();
+  /** Closed only by OutboxShutdown, after workers and publishers have drained. */
+  stop(options: OutboxStopOptions = {}): Promise<DatabaseCloseReport> {
+    return this.teardown.stop(options);
   }
 
   /** Liveness of the database, for the readiness probe. Never throws. */

@@ -110,7 +110,7 @@ describe('document references on an ownership transfer (Q-99)', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('A → B: the new owner’s dossier lists no inherited reference, and A’s stay A’s own rows', async () => {

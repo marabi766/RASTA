@@ -122,8 +122,10 @@ export function continuedDollar(text, at) {
 const PLAIN_EXPANSION = /^\{(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?!$-])\}/;
 
 /**
- * Tokenize shell text into commands {words, depth} of words {value, dynamic}. `dynamic` marks
- * a word the shell computes ($var, globs, braces); command substitutions are parsed by the
+ * Tokenize shell text into commands {words, depth, scope} of words {value, dynamic, source, redirect}: `redirect`
+ * is set (to the descriptor and operator) on a word that is a redirection's target and so no word of the command. `dynamic` marks
+ * a word the shell computes ($var, globs, braces), `source` is the word as written (quotes and
+ * expansions included); command substitutions are parsed by the
  * SAME scanner, in place (quotes, escapes and comments decide where one ends), and
  * their commands are returned with the others. `problems` lists everything the scanner
  * does not fully understand - it refuses, it never skips: a parameter expansion with an
@@ -137,12 +139,17 @@ export function parseCommands(text) {
   const unreadable =
     shellTextProblem(text) ?? (NON_ASCII.test(text) ? 'a non-ASCII character' : null);
   if (unreadable) out.problems.push(unreadable);
-  scan(String(text), 0, 0, 'top', out);
+  scan(String(text), 0, 0, 'top', out, { path: [], opened: 0, frozen: false });
   return out;
 }
 
-/** Scans `text` from `from`; `mode` is top level, `$( )` or a backtick body. Returns the index it stopped at. */
-function scan(text, from, depth, mode, out) {
+/**
+ * Scans `text` from `from`; `mode` is top level, `$( )` or a backtick body. Returns the index it stopped at.
+ * FU-334: `scopes` names the subshell each command runs in (`( )`, `$( )`, backticks), as the path of the
+ * ones open around it: a `cd` or an assignment in one does not reach a command outside it. A `case`
+ * pattern closes with a `)` that opens nothing, so after a `case` no scope is closed any more.
+ */
+function scan(text, from, depth, mode, out, scopes) {
   const { commands, problems } = out;
   const refuse = (reason) => {
     if (!problems.includes(reason)) problems.push(reason);
@@ -150,14 +157,27 @@ function scan(text, from, depth, mode, out) {
   const inside = mode !== 'top';
   let words = [];
   let word = null;
+  let at = from;
+  let start = from; // where the word being read began, and one past its last character
+  let end = from;
+  let redirect = null; // FU-334 r1 F1: the operator just read; the next word is its target
   const endWord = () => {
-    if (word) words.push(word);
+    // FU-334: the text the word was written as, so a reviewed form can be bound to its exact spelling
+    if (word)
+      words.push(Object.assign(word, { source: text.slice(start, end) }, redirect && { redirect }));
+    if (word) redirect = null;
     word = null;
   };
   const endCommand = () => {
     endWord();
-    if (words.length) commands.push({ words, depth });
+    if (redirect) refuse('a redirection without a target word');
+    redirect = null;
+    if (words.length) commands.push({ words, depth, scope: scopes.path.join('/') });
+    if (words.some((item) => item.value === 'case')) scopes.frozen = true;
     words = [];
+  };
+  const leave = () => {
+    if (!scopes.frozen) scopes.path.pop();
   };
   const add = (char) => {
     word ??= { value: '', dynamic: false };
@@ -175,8 +195,10 @@ function scan(text, from, depth, mode, out) {
       refuse('command substitutions nested too deeply');
       return text.length;
     }
+    scopes.path.push(++scopes.opened);
     if (nestedMode === 'paren') {
-      const end = scan(text, start, depth + 1, 'paren', out);
+      const end = scan(text, start, depth + 1, 'paren', out, scopes);
+      leave();
       if (end >= text.length) refuse('unterminated command substitution');
       return end;
     }
@@ -187,7 +209,8 @@ function scan(text, from, depth, mode, out) {
       end = text.length;
     }
     // The body is cut out first, then read as a command line of its own.
-    scan(text.slice(start, end), 0, depth + 1, 'tick', out);
+    scan(text.slice(start, end), 0, depth + 1, 'tick', out, scopes);
+    leave();
     return end;
   };
   const dollar = (at) => {
@@ -204,6 +227,9 @@ function scan(text, from, depth, mode, out) {
       const plain = PLAIN_EXPANSION.exec(rest);
       if (plain) return at + plain[0].length;
       refuse('a parameter expansion with an operator, subscript or nested text');
+      // FU-334 r1 F3: `${!x}` reads a name the text computes, `${x:=v}` and `${x=v}` assign one
+      if (/^\{(?:!|[A-Za-z_]\w*(?:\[[^\]]*\])?:?=)/.test(rest))
+        refuse('a parameter expansion that is indirect or assigns');
       return at + 1; // what follows is still scanned
     }
     if (rest.startsWith("'") || rest.startsWith('"')) {
@@ -214,8 +240,10 @@ function scan(text, from, depth, mode, out) {
     markDynamic();
     return at + (/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])/.exec(rest)?.[0].length ?? 0);
   };
-  for (let at = from; at < text.length; at++) {
+  for (; at < text.length; at++) {
     const char = text[at];
+    if (word) end = at;
+    else start = at;
     if (char === '\\') {
       if (inside) refuse('a backslash inside a command substitution');
       if (text[at + 1] === '\n') {
@@ -258,14 +286,25 @@ function scan(text, from, depth, mode, out) {
     } else if (char === '#' && !word) {
       if (inside) refuse('a comment inside a command substitution');
       else while (at + 1 < text.length && text[at + 1] !== '\n') at++;
-    } else if (char === '<' || char === '>') {
+    } else if (char === '<' || char === '>' || (char === '&' && text[at + 1] === '>')) {
+      // FU-334 r1 F1: the operator ends the word before it (digits alone are its descriptor, not
+      // a word) and makes the next word its target: `>echo env x` runs `env`, `ech>o x` runs `ech`
       refuse(text.startsWith('<<', at) ? 'a here-document' : 'redirection');
+      const fd = word && /^\d+$/.test(text.slice(start, at)) ? text.slice(start, at) : '';
+      if (fd) word = null;
+      endWord();
+      if (redirect) refuse('a redirection without a target word');
+      const [operator] = /^(?:&>>?|<<<|<<-?|<>|<&|>>|>\||>&|[<>])/.exec(text.slice(at));
+      redirect = fd + operator;
+      at += operator.length - 1;
     } else if (char === '(') {
       refuse('a subshell or an arithmetic command');
       endCommand();
+      scopes.path.push(++scopes.opened);
     } else if (char === ')') {
       endCommand();
       if (mode === 'paren') return at;
+      leave();
       refuse('an unbalanced closing parenthesis');
     } else if (char === '&' && text[at + 1] === '&') {
       at++;
@@ -282,6 +321,7 @@ function scan(text, from, depth, mode, out) {
       add(char);
     }
   }
+  end = text.length;
   endCommand();
   return text.length;
 }

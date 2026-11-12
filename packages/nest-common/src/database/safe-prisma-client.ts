@@ -1,3 +1,4 @@
+import { assertWorkerActive, hasWorkerContext, workerOperation } from '../worker-boundary';
 import type { DATABASE_SERVICES } from '@rasta/config';
 import { clientFailureCode } from './client-failure';
 import {
@@ -10,6 +11,15 @@ import {
   transactionIdentity,
   uncheckedTransactionRefusal,
 } from './utc-session';
+
+const admissionClosers = new WeakMap<object, () => void>();
+
+/** Only guarded clients can participate in coordinated teardown. */
+export function closePrismaAdmission(client: object): void {
+  const close = admissionClosers.get(client);
+  if (!close) throw new Error('Database teardown requires a safe Prisma client');
+  close();
+}
 
 export type RuntimeDatabaseSetting = `DATABASE_URL_${(typeof DATABASE_SERVICES)[number]}`;
 
@@ -82,11 +92,12 @@ function checkingTransaction(
   client: SessionCheckClient,
   [work, ...rest]: unknown[],
   prove: (transaction: unknown) => void,
+  beforeCommit: <R>(work: () => PromiseLike<R>) => Promise<R>,
 ): { args: unknown[]; result: (value: unknown) => unknown } {
   if (typeof work === 'function') {
     const checked = async (tx: SessionCheckClient, ...more: unknown[]): Promise<unknown> => {
       await tx.$queryRawUnsafe(UTC_SESSION_CHECK_SQL);
-      return (work as (...args: unknown[]) => unknown)(tx, ...more);
+      return beforeCommit(async () => (work as (...args: unknown[]) => unknown)(tx, ...more));
     };
     return { args: [checked, ...rest], result: (value) => value };
   }
@@ -126,6 +137,24 @@ export function createSafePrismaClient<T extends object>(
 ): T {
   try {
     const raw = open();
+    let closing = false;
+    let admissionClosed = false;
+    const assertOpen = (): void => {
+      if (admissionClosed || (closing && hasWorkerContext())) {
+        throw new Error('Database shutdown: new operation refused');
+      }
+    };
+    const admitted = <R>(work: () => PromiseLike<R>): Promise<R> =>
+      workerOperation(() => {
+        assertOpen();
+        return work();
+      });
+    const beforeCommit = <R>(work: () => PromiseLike<R>): Promise<R> =>
+      admitted(async () => {
+        const result = await work();
+        assertOpen();
+        return result;
+      });
     const bare = raw as unknown as SessionCheckClient;
     const extended = (client: object, extension: unknown): object =>
       Reflect.apply(Reflect.get(client, '$extends') as (...args: unknown[]) => object, client, [
@@ -141,7 +170,7 @@ export function createSafePrismaClient<T extends object>(
           args: unknown;
           query: (args: unknown) => PromiseLike<unknown>;
         }) {
-          return databaseOperation(() => query(args), setting);
+          return admitted(() => databaseOperation(() => query(args), setting));
         },
       },
     };
@@ -161,6 +190,8 @@ export function createSafePrismaClient<T extends object>(
           query: (args: unknown) => PromiseLike<unknown>;
           __internalParams?: { transaction?: { kind?: unknown; index?: unknown } };
         }) {
+          assertWorkerActive();
+          assertOpen();
           const { args, model, operation, query } = params;
           const identity = transactionIdentity(params);
           if (isZoneFreeOperation(model, operation)) return query(args);
@@ -200,8 +231,8 @@ export function createSafePrismaClient<T extends object>(
       }
       return guarded;
     };
-    const protect = (unchecked: object): T =>
-      new Proxy(extended(unchecked, sessionCheck) as T, {
+    const protect = (unchecked: object): T => {
+      const guarded = new Proxy(extended(unchecked, sessionCheck) as T, {
         get(client, key, receiver) {
           refuseUncheckedPredecessor(key);
           const value: unknown = Reflect.get(client, key, receiver);
@@ -218,24 +249,37 @@ export function createSafePrismaClient<T extends object>(
           }
           if (typeof value === 'function' && key === '$transaction') {
             return (...args: unknown[]) =>
-              databaseOperation(async () => {
-                const checked = checkingTransaction(
-                  client as unknown as SessionCheckClient,
-                  args,
-                  prove,
-                );
-                return checked.result(
-                  await (Reflect.apply(value, client, checked.args) as PromiseLike<unknown>),
-                );
-              }, setting);
+              admitted(() =>
+                databaseOperation(async () => {
+                  const checked = checkingTransaction(
+                    client as unknown as SessionCheckClient,
+                    args,
+                    prove,
+                    beforeCommit,
+                  );
+                  return checked.result(
+                    await (Reflect.apply(value, client, checked.args) as PromiseLike<unknown>),
+                  );
+                }, setting),
+              );
           }
           if (typeof value === 'function' && (key === '$connect' || key === '$disconnect')) {
-            return (...args: unknown[]) =>
-              databaseOperation(
-                () => Reflect.apply(value, client, args) as PromiseLike<unknown>,
-                setting,
-                true,
-              );
+            return (...args: unknown[]) => {
+              if (key === '$disconnect') closing = true;
+              return key === '$disconnect'
+                ? databaseOperation(
+                    () => Reflect.apply(value, client, args) as PromiseLike<unknown>,
+                    setting,
+                    true,
+                  )
+                : admitted(() =>
+                    databaseOperation(
+                      () => Reflect.apply(value, client, args) as PromiseLike<unknown>,
+                      setting,
+                      true,
+                    ),
+                  );
+            };
           }
           // Prisma extensions omit $on; retain the original event-registration API.
           if (key === '$on') {
@@ -254,6 +298,11 @@ export function createSafePrismaClient<T extends object>(
           return value;
         },
       });
+      admissionClosers.set(guarded, () => {
+        admissionClosed = true;
+      });
+      return guarded;
+    };
     // The extensions change diagnostics and refusals only; the generated model/method shape stays T.
     return protect(extended(raw, diagnostics));
   } catch (error) {

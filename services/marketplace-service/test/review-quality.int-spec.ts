@@ -26,7 +26,7 @@ describe('separate review quality answer (real PostgreSQL)', () => {
   });
   afterAll(async () => {
     await cleanup(prisma, Object.values(org));
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function completedOrder(): Promise<string> {

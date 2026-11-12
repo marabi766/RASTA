@@ -1,3 +1,4 @@
+import { WorkerBoundary, WorkerAbandonedError } from '../worker-boundary';
 import { inspect } from 'node:util';
 import { clientFailureCode } from './client-failure';
 import { createSafePrismaClient, DatabaseConnectionError } from './safe-prisma-client';
@@ -239,3 +240,63 @@ test.each(['P1001', 'P1002', 'P1017', 'P2024', 'P2037'])(
     expect(raw.$transaction).toHaveBeenCalledTimes(1);
   },
 );
+
+test('FU-321: nested transaction continuations and late outcomes are refused', async () => {
+  const raw = client();
+  const guarded = createSafePrismaClient(() => raw, 'DATABASE_URL_ASSET').$extends({});
+  const warn = jest.fn();
+  const worker = new WorkerBoundary(warn);
+  let finish = (): void => undefined;
+  raw.$transaction.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = () => resolve('late');
+      }),
+  );
+  const running = worker.run(async () => {
+    await guarded.$transaction(() => Promise.resolve());
+  });
+  worker.abandon();
+  finish();
+  await expect(running).rejects.toBeInstanceOf(WorkerAbandonedError);
+  await expect(
+    worker.run(() => guarded.$transaction(() => Promise.resolve())),
+  ).rejects.toBeInstanceOf(WorkerAbandonedError);
+  expect(raw.$transaction).toHaveBeenCalledTimes(1);
+  expect(warn).toHaveBeenCalled();
+});
+
+test('FU-321: disconnect permanently refuses worker operations across extensions', async () => {
+  const raw = client();
+  raw.$disconnect.mockResolvedValue();
+  const guarded = createSafePrismaClient(() => raw, 'DATABASE_URL_ASSET');
+  await guarded.$disconnect();
+  const worker = new WorkerBoundary(jest.fn());
+  await expect(
+    worker.run(() => guarded.$extends({}).$transaction(() => Promise.resolve())),
+  ).rejects.toThrow('Database shutdown');
+  await expect(worker.run(() => guarded.$connect())).rejects.toThrow('Database shutdown');
+  expect(raw.$transaction).not.toHaveBeenCalled();
+  expect(raw.$connect).not.toHaveBeenCalled();
+});
+
+test('CI: an already submitted result outside an abandoned worker survives disconnect', async () => {
+  const raw = client();
+  raw.$disconnect.mockResolvedValue();
+  let finish = (): void => undefined;
+  raw.$transaction.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = () => resolve('submitted');
+      }),
+  );
+  const guarded = createSafePrismaClient(() => raw, 'DATABASE_URL_ASSET');
+  const pending = guarded.$transaction(() => Promise.resolve());
+  await guarded.$disconnect();
+  finish();
+  await expect(pending).resolves.toBe('submitted');
+  const worker = new WorkerBoundary(jest.fn());
+  await expect(worker.run(() => guarded.$transaction(() => Promise.resolve()))).rejects.toThrow(
+    'Database shutdown',
+  );
+});

@@ -170,7 +170,7 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
       `DELETE FROM asset_transfer_fence WHERE organization_id = ANY($1::text[])`,
       [org.a, org.b],
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   beforeEach(() => {
@@ -415,7 +415,7 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
       expect(await replica(assetId)).toMatchObject({ organizationId: org.b, status: 'ACTIVE' });
       expect(await fenceOwners(assetId)).toEqual([]);
     } finally {
-      await tiny.onModuleDestroy();
+      await tiny.stop();
     }
   }, 30_000);
 

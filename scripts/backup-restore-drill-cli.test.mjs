@@ -357,9 +357,12 @@ async function referenceCliFixture(directory, mode) {
   for (const entry of readdirSync(join(root, 'services'))) {
     writeFileSync(
       join(root, 'services', entry, 'package.json'),
-      JSON.stringify({ scripts: { 'db:migrate': 'true' } }),
+      JSON.stringify({ scripts: { 'db:migrate': 'true', 'db:seed': 'true' } }),
     );
   }
+  // The seed's explicit generation: a stand-in, so the seed launch after it is reached.
+  mkdirSync(join(root, 'scripts'));
+  writeFileSync(join(root, 'scripts', 'prisma-generate.mjs'), '');
   const names = readdirSync(join(root, 'services')).map(
     (name) => 'rasta_' + name.replace(/-service$/, ''),
   );
@@ -388,7 +391,7 @@ async function referenceCliFixture(directory, mode) {
   const replacements = {
     'bypass-ref': [
       'before.reference = await collectReference(source, `rasta_${service}`, before.schemaDump);',
-      'before.reference = { checkLinesDifferent: 0, milliseconds: 0 };',
+      'before.reference = { checkLinesDifferent: 0, foldedBooleanLists: [], milliseconds: 0 };',
     ],
     'bypass-fixed': [
       "const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point', {",
@@ -413,11 +416,12 @@ async function referenceCliFixture(directory, mode) {
   }
   writeFileSync(target, implementation);
   const dump =
-    '--\n-- PostgreSQL database dump\n--\n\n-- Dumped from database version 16.4\n-- Dumped by pg_dump version 16.4\n\nSET statement_timeout = 0;\nCREATE TABLE "public"."fixture" (\n    "id" integer,\n    CONSTRAINT "ck" CHECK ((id >= 0))\n);\n--\n-- PostgreSQL database dump complete\n--\n\n';
+    '--\n-- PostgreSQL database dump\n--\n\n-- Dumped from database version 16.4\n-- Dumped by pg_dump version 16.4\n\nSET statement_timeout = 0;\nCREATE TABLE "public"."fixture" (\n    "id" integer,\n    CONSTRAINT "ck" CHECK (((id >= 0) AND (id <= 10)) AND (id <> 5))\n);\n--\n-- PostgreSQL database dump complete\n--\n\n';
   writeFileSync(join(directory, 'schema.sql'), dump);
   writeFileSync(
     join(directory, 'pnpm'),
     `#!/bin/sh
+printf '%s %s\\n' "\${PRISMA_SKIP_POSTINSTALL_GENERATE-unset}" "$*" >> '${directory}/pnpm-calls'
 ${mode === 'failed-migrate' ? 'case "$*" in *db:migrate*) echo PRIVATE_MIGRATION_SQL; echo PRIVATE_MIGRATION_SQL >&2; exit 43;; esac' : ':'}
 exit 0
 `,
@@ -445,7 +449,7 @@ case "$*" in
       *'drill_ref_'*) ${mode === 'failed-ref-dump' ? 'echo PRIVATE_REF_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
       *'drill_fixed_'*) ${mode === 'failed-fixed-dump' ? 'echo PRIVATE_FIXED_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
     esac
-    ${['check-drift', 'ignore-input'].includes(mode) ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0))/(id >= 0)/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
+    ${['check-drift', 'ignore-input'].includes(mode) ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0) AND (id <= 10)) AND/(id >= 0) AND (id <= 10) AND/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
   *'pg_restore '*) ${mode === 'failed-archive' ? 'echo PRIVATE_ARCHIVE_SQL; echo PRIVATE_ARCHIVE_SQL >&2; exit 42' : ':'} ;;
   *'psql '*)
     body=$(cat)
@@ -504,7 +508,8 @@ for (const mode of [
     let child;
     try {
       const { root, path } = await referenceCliFixture(directory, mode);
-      child = start(directory, root, {}, path);
+      // FU-329: the caller does not suppress hook generation, so what pnpm receives is the drill's.
+      child = start(directory, root, { PRISMA_SKIP_POSTINSTALL_GENERATE: '' }, path);
       let stdout = '',
         stderr = '';
       child.stdout.on('data', (chunk) => {
@@ -542,6 +547,19 @@ for (const mode of [
         readdirSync(directory).some((name) => name.startsWith('rasta-restore-drill-')),
         false,
       );
+      // Every pnpm the drill starts can reinstall stale dependencies: all three launch sites
+      // (build, migrate, seed) hand it the suppression, read from pnpm's own environment.
+      const launches = readFileSync(join(directory, 'pnpm-calls'), 'utf8').trim().split('\n');
+      assert.deepEqual(
+        launches.filter((line) => !line.startsWith('true ')),
+        [],
+      );
+      if (success)
+        for (const site of ['exec turbo run build', 'run db:migrate', 'run db:seed'])
+          assert.ok(
+            launches.some((line) => line.startsWith(`true ${site}`)),
+            site,
+          );
       if (mode === 'bypass-fixed' || mode === 'wrong-input') {
         assert.equal(report.error.message, 'Invalid schema dump provenance');
         assert.doesNotMatch(report.error.message, /TypeError|undefined|properties/);
@@ -594,11 +612,11 @@ for (const mode of [
         // from SOURCE's separate dump, and the fixed point from REF (never SOURCE again).
         const ref = readFileSync(join(directory, 'ref-input'), 'utf8');
         const fixed = readFileSync(join(directory, 'fixed-input'), 'utf8');
-        assert.match(ref, /CHECK \(\(id >= 0\)\)/);
+        assert.match(ref, /CHECK \(\(\(id >= 0\) AND \(id <= 10\)\) AND/);
         if (mode === 'check-drift') {
-          assert.match(fixed, /CHECK \(id >= 0\)/);
-          assert.doesNotMatch(fixed, /CHECK \(\(id >= 0\)\)/);
-        } else assert.match(fixed, /CHECK \(\(id >= 0\)\)/);
+          assert.match(fixed, /CHECK \(\(id >= 0\) AND \(id <= 10\) AND/);
+          assert.doesNotMatch(fixed, /CHECK \(\(\(id >= 0\) AND \(id <= 10\)\) AND/);
+        } else assert.match(fixed, /CHECK \(\(\(id >= 0\) AND \(id <= 10\)\) AND/);
       }
       if (mode === 'baseline') {
         assert.equal(report.databases.length, 16);

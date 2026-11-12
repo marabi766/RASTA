@@ -410,6 +410,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         SettlementCompletedConsumer,
         SettlementReconciliationSweeper,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -421,6 +422,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         settlements: SettlementCompletedConsumer,
         settlementReconciliation: SettlementReconciliationSweeper,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: ContractEnv,
       ) =>
         new OutboxShutdown({
@@ -429,6 +431,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
           workers: [reconciliation, awarded, moves, settlements, settlementReconciliation],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

@@ -82,7 +82,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const year = 365 * 86_400_000;

@@ -158,7 +158,7 @@ describeWithKafka('maintenance event flow over Kafka', () => {
     await consumer?.disconnect();
     await publisher?.stop();
     await cleanup(prisma, [org.a, org.b]);
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   }, 60_000);
 
   // -------------------------------------------------------------------------

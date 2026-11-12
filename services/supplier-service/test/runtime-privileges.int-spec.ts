@@ -90,8 +90,8 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
   });
 
   afterAll(async () => {
-    await runtime.onModuleDestroy();
-    await owner.onModuleDestroy();
+    await runtime.stop();
+    await owner.stop();
   });
 
   function asRuntime(sql: string): Promise<number> {
@@ -332,7 +332,7 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
     });
 
     afterAll(async () => {
-      await elsewhere.onModuleDestroy();
+      await elsewhere.stop();
     });
 
     it('does not own the database and holds neither CREATEDB nor CREATEROLE', async () => {

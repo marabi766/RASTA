@@ -362,6 +362,7 @@ const CONSUMED_TOPICS = [
         TimelineConsumer,
         DocumentRemovalConsumer,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -371,6 +372,7 @@ const CONSUMED_TOPICS = [
         timeline: TimelineConsumer,
         documentRemoval: DocumentRemovalConsumer,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: AssetEnv,
       ) =>
         new OutboxShutdown({
@@ -379,6 +381,7 @@ const CONSUMED_TOPICS = [
           workers: [expirySweep, timeline, documentRemoval],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

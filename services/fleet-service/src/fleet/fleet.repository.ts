@@ -5,12 +5,14 @@ import {
   allocateStreamSeqSql,
   buildOutboxRow,
   createSystemContext,
+  getOrganizationId,
   runUnscoped,
   runWithContext,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
+import type { MeterUsageView } from './meter-usage';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import { Prisma } from '../generated/prisma';
@@ -171,6 +173,42 @@ export class FleetRepository {
 
   async findActiveAssignmentForDriver(driverId: string, tx?: ExtendedPrismaClient) {
     return (tx ?? this.client).assignment.findFirst({ where: { driverId, endedAt: null } });
+  }
+
+  /**
+   * Exactly one covering assignment, or unknown. The asset lock serializes
+   * inserts/transfers; FOR SHARE also orders assignment endings (which do not
+   * all take the asset lock). Raw reads therefore carry the tenant explicitly.
+   * Two rows suffice to prove ambiguity without reading the whole history.
+   */
+  async findCoveringAssignment(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    periodStart: Date,
+    periodEnd: Date,
+    driverId?: string,
+  ): Promise<{ id: string; driverId: string } | null> {
+    const rows = await tx.$queryRaw<{ id: string; driverId: string }[]>`
+      SELECT id, driver_id AS "driverId" FROM assignment
+      WHERE organization_id = ${getOrganizationId()} AND asset_id = ${assetId}
+        AND started_at <= ${periodStart}
+        AND (ended_at IS NULL OR ${periodEnd} <= ended_at)
+        AND (${driverId ?? null}::text IS NULL OR driver_id = ${driverId ?? null})
+      LIMIT 2 FOR SHARE`;
+    return rows.length === 1 ? (rows[0] ?? null) : null;
+  }
+
+  /** Active assignment authorization for usage, stable until its write commits. */
+  async findActiveAssignmentForUsage(
+    tx: ExtendedPrismaClient,
+    driverId: string,
+  ): Promise<{ id: string; assetId: string; startedAt: Date } | null> {
+    const rows = await tx.$queryRaw<{ id: string; assetId: string; startedAt: Date }[]>`
+      SELECT id, asset_id AS "assetId", started_at AS "startedAt" FROM assignment
+      WHERE organization_id = ${getOrganizationId()} AND driver_id = ${driverId}
+        AND ended_at IS NULL
+      LIMIT 1 FOR SHARE`;
+    return rows[0] ?? null;
   }
 
   /**
@@ -556,14 +594,15 @@ export class FleetRepository {
   async purgeExpiredReleases(): Promise<number> {
     return this.transaction(
       (tx) => tx.$executeRaw`
-        DELETE FROM asset_transfer_release
-        WHERE (asset_id, fence_id) IN (
+        WITH picked AS MATERIALIZED (
           SELECT asset_id, fence_id FROM asset_transfer_release
           WHERE expires_at < now()
           ORDER BY expires_at
           LIMIT ${RELEASE_PURGE_BATCH}
           FOR UPDATE SKIP LOCKED
-        )`,
+        )
+        DELETE FROM asset_transfer_release AS t USING picked
+        WHERE t.asset_id = picked.asset_id AND t.fence_id = picked.fence_id`,
     );
   }
 
@@ -630,6 +669,7 @@ export class FleetRepository {
         ...(query.assetId ? { assetId: query.assetId } : {}),
         ...(query.driverId ? { driverId: query.driverId } : {}),
         ...(query.source ? { source: query.source } : {}),
+        ...(query.clientReference !== undefined ? { clientReference: query.clientReference } : {}),
         ...(constraints.length > 0 ? { AND: constraints } : {}),
       },
       orderBy: { id: 'desc' },
@@ -637,6 +677,44 @@ export class FleetRepository {
     });
 
     return page(rows, query.limit, (row) => row.id);
+  }
+
+  /** A cursor must name a real row of this asset at this exact instant; PK point read, never a scan. */
+  async hasMeterUsageCursor(assetId: string, after: { end: Date; id: string }): Promise<boolean> {
+    const rows = await this.client.$queryRaw<{ id: string }[]>`
+      SELECT id FROM usage_record
+      WHERE id = ${after.id} AND asset_id = ${assetId} AND period_end = ${after.end}
+      LIMIT 1
+    `;
+    return rows.length === 1;
+  }
+
+  /**
+   * ADR-073 § 4 F: intentionally across owners, ONLY via MeterUsageService's
+   * maintenance-service check. Raw SQL projects only the physical meter fields.
+   * A strict tuple comparison and matching order preserve equal-end ties.
+   */
+  async listMeterUsage(
+    assetId: string,
+    limit: number,
+    after?: { end: Date; id: string },
+  ): Promise<
+    (Omit<MeterUsageView, 'periodStart' | 'periodEnd'> & {
+      periodStart: Date;
+      periodEnd: Date;
+    })[]
+  > {
+    return this.client.$queryRaw`
+      SELECT id, organization_id AS "organizationId",
+             period_start AS "periodStart", period_end AS "periodEnd",
+             hours::text, kilometres::text, hour_meter::text AS "hourMeter", odometer::text
+      FROM usage_record
+      WHERE asset_id = ${assetId}
+        AND (${after?.end ?? null}::timestamp IS NULL
+             OR (period_end, id) > (${after?.end ?? null}::timestamp, ${after?.id ?? null}::text))
+      ORDER BY period_end ASC, id ASC
+      LIMIT ${limit + 1}
+    `;
   }
 
   /**

@@ -507,9 +507,15 @@ for (const service of DATABASE_SERVICES) {
             if (phase === 'disconnect') {
               if (prisma.stop) {
                 const result = await prisma.stop();
-                assert.deepEqual(result, { drained: false, unsettled: 0 });
+                assert.equal(result.drained, false);
                 assert.equal(logs.length, 1);
-                assert.ok(logs[0].includes('DatabaseConnectionError: DATABASE_URL_IDENTITY: database connection failed (code P1000); driver diagnostics withheld'));
+                if ('unsettled' in result) {
+                  assert.deepEqual(result, { drained: false, unsettled: 0 });
+                  assert.ok(logs[0].includes('DatabaseConnectionError: DATABASE_URL_${service.toUpperCase()}: database connection failed (code P1000); driver diagnostics withheld'));
+                } else {
+                  assert.deepEqual(result, { drained: false });
+                  assert.ok(logs[0].includes('Database disconnect failed; close UNCONFIRMED'));
+                }
                 failure = logs[0];
               } else if ('${service}' === 'analytics') {
                 await prisma.onApplicationShutdown();

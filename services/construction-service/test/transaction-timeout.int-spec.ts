@@ -148,7 +148,7 @@ describe('the interactive transaction timeout', () => {
 
   afterAll(async () => {
     await observer.$disconnect();
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** Returns once no connection under test is inside a transaction. */
@@ -227,7 +227,7 @@ describe('the interactive transaction timeout', () => {
         expect(await startedBy((s) => s.transaction(one), longer)).toEqual([BUDGET_MS * 4]);
         expect(await startedBy((s) => s.snapshot(one), longer)).toEqual([BUDGET_MS * 4]);
       } finally {
-        await longer.onModuleDestroy();
+        await longer.stop();
       }
     });
 
@@ -264,7 +264,7 @@ describe('the interactive transaction timeout', () => {
         expect(endedByTimeout(observation, BUDGET_MS)).toBe(false);
         expect(endedByTimeout(observation, BUDGET_MS * 4)).toBe(true);
       } finally {
-        await longer.onModuleDestroy();
+        await longer.stop();
       }
     });
   });
@@ -393,7 +393,13 @@ describe('the interactive transaction timeout', () => {
 
   it('wires a value set explicitly — both bounds and one above the default — and commits on it', async () => {
     for (const ms of [5_000, 30_000, 60_000]) {
-      const env = testEnv({ CONSTRUCTION_TRANSACTION_TIMEOUT_MS: String(ms) });
+      const env = testEnv({
+        CONSTRUCTION_TRANSACTION_TIMEOUT_MS: String(ms),
+        // FU-320: longer transaction bounds require feasible sweeper leases too.
+        CONSTRUCTION_RECONCILE_LEASE_SECONDS: '300',
+        CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '300',
+        CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '300',
+      });
       expect(await commitsOn(env)).toEqual([ms, ms]);
     }
   });

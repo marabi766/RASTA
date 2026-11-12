@@ -98,7 +98,7 @@ describe('malware scanning with a real ClamAV', () => {
   afterAll(async () => {
     // Removes the EICAR object from the bucket along with everything else.
     await cleanup(prisma, [org.a, org.b, org.platform, foreignOrg], wiring.storage);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asOrgA = <T>(fn: () => Promise<T>, roles = ['ORGANIZATION_ADMIN']) =>

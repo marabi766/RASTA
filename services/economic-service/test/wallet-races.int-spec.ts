@@ -38,7 +38,7 @@ describe('wallet races and refusals (real database)', () => {
     // `PLATFORM_ORGANIZATION_ID` itself, so the platform tenant was, and
     // still is, cleaned — by the helper, not by this argument.
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   describe('opening a wallet', () => {

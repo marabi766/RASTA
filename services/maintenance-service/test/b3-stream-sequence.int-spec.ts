@@ -31,7 +31,7 @@ describe('maintenance stream sequencing', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const outboxFor = (assetId: string) =>

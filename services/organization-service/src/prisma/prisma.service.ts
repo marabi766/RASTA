@@ -1,5 +1,10 @@
-import { createSafePrismaClient } from '@rasta/nest-common';
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import {
+  DatabaseTeardown,
+  type DatabaseCloseReport,
+  type OutboxStopOptions,
+  createSafePrismaClient,
+} from '@rasta/nest-common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import { assertRuntimeRole as assertConnectedRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -22,8 +27,9 @@ import { PrismaClient } from '../generated/prisma';
  * and heavily commented rather than spread across the repository.
  */
 @Injectable()
-export class PrismaService implements OnModuleInit, OnModuleDestroy {
+export class PrismaService implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
+  private teardown?: DatabaseTeardown;
   readonly client: PrismaClient;
 
   constructor(databaseUrl: string) {
@@ -65,8 +71,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.client.$disconnect();
+  /** The coordinator closes this pool after workers and publishers, by its deadline. */
+  stop(options: OutboxStopOptions = {}): Promise<DatabaseCloseReport> {
+    return (this.teardown ??= new DatabaseTeardown(this.client, this.logger)).stop(options);
   }
 
   async isHealthy(): Promise<boolean> {

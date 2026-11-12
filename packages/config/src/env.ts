@@ -282,6 +282,21 @@ export function wholeNumberEnv(min: number, max: number) {
     .pipe(z.number().int().min(min).max(max));
 }
 
+/** A defaulted setting with a digit cap derived from its safe-integer maximum. */
+export function boundedWholeNumberEnv(
+  min: number,
+  max: number,
+  fallback: number,
+): z.ZodType<number, string | undefined> {
+  if (parseWholeNumber(String(fallback), { min, max }) === null)
+    throw new RangeError('Invalid bounded whole-number default');
+  return z
+    .string()
+    .regex(new RegExp(`^[0-9]{1,${String(max).length}}$`), WHOLE_NUMBER_EXPECTED)
+    .prefault(String(fallback))
+    .pipe(wholeNumberEnv(min, max));
+}
+
 /** Digits only, with explicit finite safe-integer bounds; callers choose any trimming. */
 export function parseWholeNumber(
   text: string,

@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
+  claimedItemBudgetMs,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
+  boundedWholeNumberEnv,
   databaseEnvSchema,
   fixedEnvMessages,
   kafkaEnvSchema,
@@ -24,6 +26,9 @@ import {
 
 /** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
 const { fixed, seal } = fixedEnvMessages();
+const SWEEP_LEASE_TOO_SHORT = fixed(
+  'Sweeper lease must exceed the complete claimed-item budget (claim, request, processing, failure recording and margin)',
+);
 
 const EVALUATORS_MIN_OVER_MAX = fixed(
   'CONSTRUCTION_EVALUATION_MIN_EVALUATORS may not exceed CONSTRUCTION_EVALUATION_MAX_EVALUATORS: no bid could ever be complete',
@@ -392,66 +397,31 @@ export const constructionEnvSchema = baseEnvSchema
      * for the proposer and the approver; if it cannot be read, the opening is refused.
      */
     IDENTITY_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3101'),
-    CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(100)
-      .max(60_000)
-      .prefault(5000),
-    CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(100)
-      .max(60_000)
-      .prefault(5000),
+    CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS: boundedWholeNumberEnv(100, 60_000, 5000),
+    CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS: boundedWholeNumberEnv(100, 60_000, 5000),
     /** One page of the snapshot, headers to parse; an answer too slow is a failed attempt, retried. */
-    CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(100)
-      .max(60_000)
-      .prefault(5000),
+    CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: boundedWholeNumberEnv(100, 60_000, 5000),
     /** Wait between failed attempts to load the snapshot. */
-    CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS: z.coerce
-      .number()
-      .int()
-      .min(100)
-      .max(600_000)
-      .prefault(15_000),
-    CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(100)
-      .max(30_000)
-      .prefault(3000),
+    CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS: boundedWholeNumberEnv(100, 600_000, 15_000),
+    CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: boundedWholeNumberEnv(100, 30_000, 3000),
 
     /**
      * The sweeper behind ORGANIZATION_MOVED (Q-83, docs/23 D-041). A sweep
      * every `INTERVAL_MS` claims at most `BATCH_SIZE` due tasks, so one sweep
-     * costs at most BATCH_SIZE × CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS;
-     * `LEASE_SECONDS` must exceed that, or a slow sweep loses its claims to
-     * another instance (harmless — the writes are conditional — but wasteful).
+     * claims one item when ready; the lease covers its request and database work;
+     * `LEASE_SECONDS` must cover the claimed-item budget or boot refuses it;
+     * no waiting batch member holds a lease.
      * A failed task is retried after `BACKOFF_SECONDS`, doubling to `BACKOFF_MAX_SECONDS`.
      */
-    CONSTRUCTION_RECONCILE_INTERVAL_MS: z.coerce
-      .number()
-      .int()
-      .min(500)
-      .max(300_000)
-      .prefault(5000),
-    CONSTRUCTION_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    CONSTRUCTION_RECONCILE_INTERVAL_MS: boundedWholeNumberEnv(500, 300_000, 5000),
+    CONSTRUCTION_RECONCILE_BATCH_SIZE: boundedWholeNumberEnv(1, 500, 20),
     CONSTRUCTION_RECONCILE_LEASE_SECONDS: z
       .string()
       .regex(/^[0-9]{1,4}$/)
       .prefault('120')
       .pipe(wholeNumberEnv(10, 3600)),
-    CONSTRUCTION_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).prefault(30),
-    CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(86_400)
-      .prefault(900),
+    CONSTRUCTION_RECONCILE_BACKOFF_SECONDS: boundedWholeNumberEnv(1, 3600, 30),
+    CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS: boundedWholeNumberEnv(1, 86_400, 900),
 
     /**
      * The sweeper that closes tenders past `bid_closing_at` (ADR-065 § 3). A sweep
@@ -459,16 +429,11 @@ export const constructionEnvSchema = baseEnvSchema
      * in one short transaction (no network call), so a tender is closed at most one
      * interval late — which only delays the state: a bid after the deadline is refused
      * by the database's clock whether or not the sweeper has run. `LEASE_SECONDS` must
-     * exceed one sweep (`BATCH_SIZE` × a close, milliseconds each); a tender whose
+     * cover one claimed item (claim, close, failure recording and margin); a tender whose
      * close failed is claimed again when its lease runs out.
      */
-    CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS: z.coerce
-      .number()
-      .int()
-      .min(500)
-      .max(300_000)
-      .prefault(5000),
-    CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS: boundedWholeNumberEnv(500, 300_000, 5000),
+    CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: boundedWholeNumberEnv(1, 500, 20),
     CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: z
       .string()
       .regex(/^[0-9]{1,4}$/)
@@ -480,61 +445,35 @@ export const constructionEnvSchema = baseEnvSchema
      * cannot be closed neither takes every sweep's first slot nor starves the later
      * overdue ones. `RastaConstructionTenderCloseRetriesHigh` fires past 5 failures.
      */
-    CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(3600)
-      .prefault(10),
-    CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(86_400)
-      .prefault(900),
+    CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS: boundedWholeNumberEnv(1, 3600, 10),
+    CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS: boundedWholeNumberEnv(1, 86_400, 900),
 
     /**
      * The sweeper that makes the standing check after an award (ADR-067 § 3, residual), the close
      * sweeper's shape: a sweep every `INTERVAL_MS` claims at most `BATCH_SIZE` pending checks under a
      * lease of `LEASE_SECONDS` and a fencing token, asks supplier-service about each winner (a network
      * call, outside any transaction) and settles each in one short transaction. `LEASE_SECONDS` must
-     * exceed one sweep (`BATCH_SIZE` × the supplier request timeout). A check whose answer could not be
+     * cover one claimed item (claim, request, settle, failure recording and margin). A check whose answer could not be
      * had is not claimed again for `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^attempts)`.
      * `ALERT_AGE_SECONDS`: a check still PENDING past this age is counted by the overdue gauge, which
      * `RastaConstructionAwardStandingCheckOverdue` alerts on.
      */
-    CONSTRUCTION_AWARD_CHECK_INTERVAL_MS: z.coerce
-      .number()
-      .int()
-      .min(500)
-      .max(300_000)
-      .prefault(10_000),
-    CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).prefault(10),
+    CONSTRUCTION_AWARD_CHECK_INTERVAL_MS: boundedWholeNumberEnv(500, 300_000, 10_000),
+    CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: boundedWholeNumberEnv(1, 100, 10),
     CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: z
       .string()
       .regex(/^[0-9]{1,4}$/)
       .prefault('120')
       .pipe(wholeNumberEnv(10, 3600)),
-    CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(3600)
-      .prefault(10),
-    CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(86_400)
-      .prefault(900),
-    CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(10)
-      .max(604_800)
-      .prefault(600),
+    CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS: boundedWholeNumberEnv(1, 3600, 10),
+    CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS: boundedWholeNumberEnv(1, 86_400, 900),
+    CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS: boundedWholeNumberEnv(10, 604_800, 600),
 
-    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).prefault(1),
+    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z
+      .string()
+      .regex(/^[0-9]{1,4}$/)
+      .prefault('1')
+      .pipe(wholeNumberEnv(0, 1000)),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
     CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),
     CONSTRUCTION_PROGRESS_ALLOW_DECREASE: booleanEnv(false),
@@ -576,12 +515,7 @@ export const constructionEnvSchema = baseEnvSchema
      * Default 0 — the platform invents no minimum; the window must only be a
      * window that has not already closed.
      */
-    CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(0)
-      .max(31_536_000)
-      .prefault(0),
+    CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS: boundedWholeNumberEnv(0, 31_536_000, 0),
 
     /**
      * The most receipts a tender's chain may hold (construction audit F2): every submission and
@@ -631,12 +565,11 @@ export const constructionEnvSchema = baseEnvSchema
      * never a silent default: too short refuses the openings the caps permit, too long holds the
      * tender's lock past any sane request.
      */
-    CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(TENDER_OPEN_TIMEOUT_MIN_MS)
-      .max(TENDER_OPEN_TIMEOUT_MAX_MS)
-      .prefault(TENDER_OPEN_TIMEOUT_DEFAULT_MS),
+    CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: boundedWholeNumberEnv(
+      TENDER_OPEN_TIMEOUT_MIN_MS,
+      TENDER_OPEN_TIMEOUT_MAX_MS,
+      TENDER_OPEN_TIMEOUT_DEFAULT_MS,
+    ),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z
@@ -674,17 +607,26 @@ export const constructionEnvSchema = baseEnvSchema
      * that 5 000 ms, which would fail commands that pass today; at most a minute,
      * which is already longer than any command here should hold its locks.
      */
-    CONSTRUCTION_TRANSACTION_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(5_000)
-      .max(60_000)
-      .prefault(15_000),
+    CONSTRUCTION_TRANSACTION_TIMEOUT_MS: boundedWholeNumberEnv(5_000, 60_000, 15_000),
   })
   // The two key settings are one setting (Codex review of #163): keys with a
   // CURRENT that is not among them — or a CURRENT with no keys — used to pass
   // startup and fail only when a tender was first published. Judged together, here.
   .superRefine((env, ctx) => {
+    const transactionMs = env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS;
+    for (const [field, requestMs] of [
+      ['CONSTRUCTION_RECONCILE_LEASE_SECONDS', env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS],
+      ['CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS', 0],
+      ['CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS', env.CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS],
+    ] as const) {
+      if (env[field] * 1000 <= claimedItemBudgetMs(transactionMs, requestMs))
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: SWEEP_LEASE_TOO_SHORT,
+        });
+    }
+
     if (env.CONSTRUCTION_EVALUATION_MIN_EVALUATORS > env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

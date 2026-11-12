@@ -64,7 +64,7 @@ describe('fleet stream sequencing', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** Every outbox row this service wrote, newest last. */

@@ -134,7 +134,7 @@ describe('documents on an insurance claim (Q-128)', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('attaches a document: one row, one event on the claim’s stream, one dossier line, listed on the read', async () => {

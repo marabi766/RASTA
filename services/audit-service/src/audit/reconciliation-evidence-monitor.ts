@@ -1,4 +1,4 @@
-import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
 import { ENV } from '../tokens';
 import type { AuditEnv } from '../config/env';
 import { auditReconciliationEvidenceMissing } from '../observability/metrics';
@@ -32,7 +32,7 @@ import { SamplingLoop, type SamplingSignal } from './sampling-loop';
  * documented exception to A-04 and what it may never return.
  */
 @Injectable()
-export class ReconciliationEvidenceMonitor implements OnModuleInit, OnModuleDestroy {
+export class ReconciliationEvidenceMonitor implements OnModuleInit {
   private readonly loop = new SamplingLoop(async (signal) => {
     // A sample that fails leaves the last value in place rather than reporting a reassuring zero.
     await this.sample(new Date(), signal);
@@ -44,15 +44,11 @@ export class ReconciliationEvidenceMonitor implements OnModuleInit, OnModuleDest
     prisma: PrismaService,
   ) {
     // Stopped, and awaited, before the client disconnects: Nest destroys providers concurrently.
-    prisma.beforeDisconnect(() => this.loop.stop());
+    prisma.beforeDisconnect((options) => this.loop.stop(options));
   }
 
   onModuleInit(): void {
     this.loop.start();
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    await this.loop.stop();
   }
 
   /** Counts the gaps written inside the look-back window and exports the number. */

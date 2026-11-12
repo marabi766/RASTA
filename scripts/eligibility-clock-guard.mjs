@@ -225,6 +225,13 @@ export const REVIEWED_SITES = [
       'from/to are the utilization window: query input or new Date() (availability.service.ts:318-322)',
   },
   {
+    site: 'services/fleet-service/src/fleet/fleet.repository.ts#findCoveringAssignment',
+    columns: ['started_at', 'ended_at'],
+    verdict: 'not-db-clock',
+    reason:
+      'periodStart/periodEnd = new Date(dto.periodStart/periodEnd) in UsageService.resolveOperator: reported request interval, not a database clock reading',
+  },
+  {
     site: 'services/fleet-service/src/fleet/fleet.repository.ts#findOverlappingUsage',
     columns: ['period_start', 'period_end'],
     verdict: 'not-db-clock',
@@ -241,6 +248,20 @@ export const REVIEWED_SITES = [
     columns: ['started_at'],
     verdict: 'not-db-clock',
     reason: 'new Date(query.from/to): request filters',
+  },
+  {
+    site: 'services/fleet-service/src/fleet/fleet.repository.ts#hasMeterUsageCursor',
+    columns: ['period_end'],
+    verdict: 'not-db-clock',
+    reason:
+      'after.end is a canonical UTC instant from the validated request cursor, compared with its primary-key anchor; not a clock',
+  },
+  {
+    site: 'services/fleet-service/src/fleet/fleet.repository.ts#listMeterUsage',
+    columns: ['period_end'],
+    verdict: 'not-db-clock',
+    reason:
+      'after.end is a canonical UTC instant decoded from the request cursor and validated against its existing usage row; keyset position, not a clock',
   },
   {
     site: 'services/fleet-service/src/fleet/fleet.repository.ts#listUsage',

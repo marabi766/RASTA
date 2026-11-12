@@ -287,6 +287,12 @@ async function main(): Promise<void> {
 main()
   .catch((error) => {
     console.error('Organization seed failed:', error);
-    process.exit(1);
+    process.exitCode = 1;
   })
-  .finally(() => void database.onModuleDestroy());
+  .finally(async () => {
+    const closed = await database.stop();
+    if (!closed.drained) {
+      console.error('Organization seed cleanup UNCONFIRMED; prior work may have committed.');
+      process.exitCode = 1;
+    }
+  });

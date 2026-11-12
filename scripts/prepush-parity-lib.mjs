@@ -649,6 +649,8 @@ export function controlledEnv(base) {
     CI: 'true',
     TURBO_TELEMETRY_DISABLED: '1',
     SERVICE_ENV_WITHHELD_BASE: base,
+    // As CI's workflow env: a check that starts pnpm must not generate from its hook (FU-329).
+    PRISMA_SKIP_POSTINSTALL_GENERATE: 'true',
   };
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'SystemRoot']) {
     if (process.env[key]) env[key] = process.env[key];
@@ -674,7 +676,7 @@ export function runParity(
   base,
   {
     select = scopeFromRoot,
-    execute = executeCheck,
+    execute: runCheck = executeCheck,
     read = load,
     report = (line) => process.stdout.write(`${line}\n`),
   } = {},
@@ -696,7 +698,7 @@ export function runParity(
   for (const entry of checks) {
     report(`CI quality / ${entry.ci.name ?? entry.script}: ${entry.script}`);
     const expected = { script: entry.script, command: entry.command, env: { ...env } };
-    execute(root, entry, { ...env });
+    runCheck(root, entry, { ...env });
     receipts.push(expected); // Only after successful synchronous execution.
   }
   const after = inputs();

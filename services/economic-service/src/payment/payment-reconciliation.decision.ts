@@ -75,7 +75,9 @@ function retryFor(answer: ProviderRefundAnswer): Verdict {
 }
 
 /** What the provider's answer established, or null when it established nothing. */
-function established(answer: ProviderRefundAnswer): 'REFUNDED' | 'DECLINED' | 'NOT_REACHED' | null {
+export function established(
+  answer: ProviderRefundAnswer,
+): 'REFUNDED' | 'DECLINED' | 'NOT_REACHED' | null {
   if (answer === null || answer === 'UNREACHABLE') return null;
   if (answer.refund === 'REFUNDED') return 'REFUNDED';
   if (answer.refund === 'DECLINED') return 'DECLINED';

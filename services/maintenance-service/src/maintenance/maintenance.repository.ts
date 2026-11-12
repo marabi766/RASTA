@@ -9,6 +9,15 @@ import { resolvePartitionKey } from './routing';
 import type { MaintenanceEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import {
+  insertUsageEntry,
+  lockUsageMeter,
+  calculateLedgerMeter,
+  calculateLegacyMeter,
+  UsageMeterRefusal,
+  UsageAlreadyProcessed,
+  type UsageMeterInput,
+} from './usage-meter';
 import { COSTABLE_REPAIR_ORDER_STATUSES, OPEN_REQUEST_STATUSES } from './lifecycle';
 import type { ListRepairOrdersQuery, ListRequestsQuery, ListSchedulesQuery } from './dto';
 
@@ -570,14 +579,15 @@ export class MaintenanceRepository {
   async purgeExpiredReleases(): Promise<number> {
     return this.transaction(
       (tx) => tx.$executeRaw`
-        DELETE FROM asset_transfer_release
-        WHERE (asset_id, fence_id) IN (
+        WITH picked AS MATERIALIZED (
           SELECT asset_id, fence_id FROM asset_transfer_release
           WHERE expires_at < now()
           ORDER BY expires_at
           LIMIT ${RELEASE_PURGE_BATCH}
           FOR UPDATE SKIP LOCKED
-        )`,
+        )
+        DELETE FROM asset_transfer_release AS t USING picked
+        WHERE t.asset_id = picked.asset_id AND t.fence_id = picked.fence_id`,
     );
   }
 
@@ -748,68 +758,44 @@ export class MaintenanceRepository {
     );
   }
 
-  /**
-   * Folds one usage reading into a machine's meter.
-   *
-   * The counters only ever move forward, and the SQL says so rather than the
-   * caller: `GREATEST` of what the instrument reported and what we had plus
-   * the period's delta. Doing it in the statement rather than in JavaScript
-   * means a concurrent second reading cannot read the old value, compute from
-   * it, and overwrite the first — the update is atomic against the row.
-   *
-   * Idempotency is *not* provided here. It comes from `processed_event`, in
-   * the same transaction: this statement is not idempotent on its own and must
-   * never be called without that marker, or a redelivered event would add its
-   * hours a second time and defer a service that is due.
-   */
+  /** Marker, ledger fact and meter commit atomically. Lock precedes state and replay reads. */
   async foldUsageIntoMeter(
     tx: ExtendedPrismaClient,
-    input: {
-      assetId: string;
-      organizationId: string;
-      hoursDelta: string;
-      kilometresDelta: string;
-      reportedHourMeter: string | null;
-      reportedOdometer: string | null;
-      usageRecordId: string;
-      periodEnd: Date | null;
-      now: Date;
-    },
-  ): Promise<void> {
+    input: UsageMeterInput,
+    eventId: string,
+    consumerName: string,
+  ): Promise<boolean> {
+    await insertUsageEntry(tx, input);
+    const locked = await lockUsageMeter(tx, input);
+    const processed = await tx.processedEvent.findUnique({
+      where: { eventId_consumerName: { eventId, consumerName } },
+    });
+    if (processed) throw new UsageAlreadyProcessed();
+    if (locked.meter_source !== 'LEDGER' && locked.meter_source !== 'LEGACY')
+      throw new UsageMeterRefusal('UNKNOWN_METER_SOURCE');
+    if (locked.meter_source === 'LEDGER' && (!input.periodStart || !input.periodEnd)) {
+      throw new UsageMeterRefusal('INCOMPLETE_INTERVAL');
+    }
+    const result =
+      locked.meter_source === 'LEDGER'
+        ? await calculateLedgerMeter(tx, input.assetId)
+        : await calculateLegacyMeter(tx, locked, input);
+    // Validation, locked-state checks and unbounded calculation all precede the marker.
+    const fresh = await this.markEventProcessed(tx, eventId, consumerName);
+    if (!fresh) throw new UsageAlreadyProcessed();
     await runUnscoped(
-      'usage meter is a read model keyed by asset; the event tenant is written explicitly',
-      async () => {
-        await tx.$executeRaw`
-          INSERT INTO asset_usage_meter (
-            asset_id, organization_id, hour_meter, odometer,
-            last_usage_record_id, last_period_end, record_count, updated_at
-          )
-          VALUES (
-            ${input.assetId},
-            ${input.organizationId},
-            GREATEST(${input.hoursDelta}::numeric, COALESCE(${input.reportedHourMeter}::numeric, 0)),
-            GREATEST(${input.kilometresDelta}::numeric, COALESCE(${input.reportedOdometer}::numeric, 0)),
-            ${input.usageRecordId},
-            ${input.periodEnd},
-            1,
-            ${input.now}
-          )
-          ON CONFLICT (asset_id) DO UPDATE SET
-            hour_meter = GREATEST(
-              asset_usage_meter.hour_meter + ${input.hoursDelta}::numeric,
-              COALESCE(${input.reportedHourMeter}::numeric, 0)
-            ),
-            odometer = GREATEST(
-              asset_usage_meter.odometer + ${input.kilometresDelta}::numeric,
-              COALESCE(${input.reportedOdometer}::numeric, 0)
-            ),
-            last_usage_record_id = ${input.usageRecordId},
-            last_period_end = ${input.periodEnd},
-            record_count = asset_usage_meter.record_count + 1,
-            updated_at = ${input.now}
-        `;
-      },
+      'physical meter update is asset-scoped across owners, never an authorization decision',
+      async () => tx.$executeRaw`
+      UPDATE asset_usage_meter SET hour_meter = ${result.hour_meter}::numeric,
+        odometer = ${result.odometer}::numeric, last_period_end = ${result.last_period_end},
+        last_usage_record_id = ${result.last_usage_record_id},
+        record_count = CASE WHEN meter_source = 'LEDGER' THEN ${result.record_count}
+          ELSE record_count + 1 END,
+        updated_at = ${input.now}
+      WHERE asset_id = ${input.assetId}
+    `,
     );
+    return true;
   }
 
   // -------------------------------------------------------------------------

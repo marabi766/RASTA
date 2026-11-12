@@ -136,7 +136,7 @@ describe('insurance claims', () => {
         orgs,
       );
     }
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('walks a claim from filed to settled, writing one row, four events and four dossier lines', async () => {

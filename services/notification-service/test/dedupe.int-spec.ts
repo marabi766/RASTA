@@ -41,7 +41,7 @@ describe('semantic deduplication against PostgreSQL', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   });
 
   it('collapses 120 distinct sweep emissions into at most five intents, and five in-app rows per recipient', async () => {

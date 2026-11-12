@@ -1,3 +1,4 @@
+import { assertWorkerActive, workerOperation } from '@rasta/nest-common';
 import { Injectable, Logger } from '@nestjs/common';
 import { RastaError, createSystemContext, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -67,8 +68,11 @@ export class AwardStandingCheckService {
   ): Promise<StandingCheckResult> {
     let report;
     try {
-      report = await this.standing.windowReport(claim.winnerOrganizationId, claim.windowStart);
+      report = await workerOperation(() =>
+        this.standing.windowReport(claim.winnerOrganizationId, claim.windowStart),
+      );
     } catch (error) {
+      assertWorkerActive();
       awardStandingChecksTotal.inc({ service: SERVICE_NAME, outcome: 'unavailable' });
       this.logger.warn(
         `${describe(claim)}: supplier-service could not say (${closedCodeOf(error)}); retried after a backoff`,

@@ -144,7 +144,7 @@ describeWithKafka('the performance consumer gate, on the authenticated broker', 
     afterAll(async () => {
       await producer?.disconnect();
       await moduleRef?.close();
-      await prisma?.onModuleDestroy();
+      await prisma?.stop();
       restore?.();
     }, 60_000);
 

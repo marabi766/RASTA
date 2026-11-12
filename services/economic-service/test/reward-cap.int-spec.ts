@@ -37,7 +37,7 @@ describe('rewards (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function createRule(overrides: Record<string, unknown>) {

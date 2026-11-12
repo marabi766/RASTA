@@ -255,13 +255,17 @@ test('every economic exemption says which query or invariant it serves', () => {
 // a legitimate exemption (none needed a fix migration). Without the exemptions
 // the check reports exactly these twelve, so each one is load-bearing.
 const OPTED_IN = {
-  fleet: ['asset_transfer_release_pkey'],
+  fleet: ['asset_transfer_release_pkey', 'usage_record_asset_id_period_end_id_idx'],
   identity: [
     'ix_security_event_outbox_claimable',
     'ix_security_event_outbox_closed_windows',
     'membership_user_id_status_idx',
   ],
-  maintenance: ['asset_transfer_release_pkey', 'ux_request_open_per_asset'],
+  maintenance: [
+    'asset_transfer_release_pkey',
+    'asset_usage_entry_asset_id_period_end_idx',
+    'ux_request_open_per_asset',
+  ],
   marketplace: [
     'ix_order_saga_start_due',
     'ix_offer_product_status',

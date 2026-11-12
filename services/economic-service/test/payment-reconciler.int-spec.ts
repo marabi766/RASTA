@@ -1,9 +1,13 @@
 import { eligibilityClockSql } from '@rasta/testing';
 import { setEligibilityFixture } from '@rasta/testing';
 import { ulid } from 'ulid';
-import { getOrganizationId, runUnscoped } from '@rasta/nest-common';
+import { getOrganizationId, runUnscoped, WorkerAbandonedError } from '@rasta/nest-common';
+import { Logger } from '@nestjs/common';
+import { paymentIntentsTotal, paymentReconciliationTotal } from '../src/observability/metrics';
 import { PrismaClient } from '../src/generated/prisma';
 import {
+  plantPaymentIntent,
+  plantPaymentTask,
   asActor,
   cleanup,
   newPrisma,
@@ -23,7 +27,7 @@ import { LedgerBalanceAudit } from '../src/wallet/balance-audit';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
 import { ECONOMIC_EVENTS } from '../src/events/events';
 import type { EconomicEnv } from '../src/config/env';
-import type { PrismaService } from '../src/prisma/prisma.service';
+import type { PrismaService, ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import type { RefundRequest, RefundStatusQuery, RefundStatusResult } from '../src/payment/provider';
 
 /**
@@ -84,7 +88,7 @@ describe('the payment reconciler (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const reconcilerWith = (overrides: Partial<EconomicEnv> = {}, withProvider = provider) =>
@@ -151,6 +155,32 @@ describe('the payment reconciler (real database)', () => {
         'paymentPendingDue',
         await fixtureTaskIds(paymentIntentId, true),
       ),
+    );
+
+  /**
+   * The states a B0 instance (no task writes) leaves, planted after the service's own flow:
+   * the database now refuses B0's writes themselves (`trg_payment_intent_evidenced`, #1017 r1),
+   * so a still-running B0 fails closed, and only rows from before the trigger reach the heal.
+   */
+  const b0LeftNoTask = (paymentIntentId: string) =>
+    // The suite removes the task, as B0 never wrote it: with its decision and recorded answers.
+    plantPaymentTask(
+      [`DELETE FROM payment_reconciliation_decision WHERE payment_intent_id = $1`, paymentIntentId],
+      [`DELETE FROM payment_provider_outcome WHERE payment_intent_id = $1`, paymentIntentId],
+      [`DELETE FROM payment_reconciliation_task WHERE payment_intent_id = $1`, paymentIntentId],
+    );
+  const b0ClosedNothing = (paymentIntentId: string, status: 'PENDING' | 'ESCALATED' = 'PENDING') =>
+    // The suite reopens the task, as B0 never closed it: its decision goes with the close.
+    plantPaymentTask(
+      [`DELETE FROM payment_reconciliation_decision WHERE payment_intent_id = $1`, paymentIntentId],
+      [
+        `UPDATE payment_reconciliation_task
+            SET status = $2::"PaymentReconciliationStatus", done_at = NULL, resolution = NULL,
+                resolved_by = NULL
+          WHERE payment_intent_id = $1`,
+        paymentIntentId,
+        status,
+      ],
     );
 
   const intentOf = (paymentIntentId: string) =>
@@ -261,12 +291,75 @@ describe('the payment reconciler (real database)', () => {
   }
 
   describe('an unknown refund: the provider is asked first', () => {
+    it.each([false, true])(
+      'replays an abandoned transaction once (committed=%s)',
+      async (committed) => {
+        const organizationId = `${org.a}-ABANDON-${committed}`;
+        const made = await unknownButRefunded(organizationId);
+        let release!: () => void;
+        let entered!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const started = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const original = prisma.transaction.bind(prisma);
+        const wait = async <T>(result: T): Promise<T> => {
+          entered();
+          await held;
+          return result;
+        };
+        jest
+          .spyOn(prisma, 'transaction')
+          .mockImplementationOnce(
+            async <T>(work: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> =>
+              committed ? wait(await original(work)) : original(async (tx) => wait(await work(tx))),
+          );
+        const log = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+        const refunds = jest.spyOn(paymentIntentsTotal, 'inc');
+        const reconciliations = jest.spyOn(paymentReconciliationTotal, 'inc');
+        const sweeper = sweeperWith();
+        const run = sweeper.runOnce();
+        const abandoned = expect(run).rejects.toBeInstanceOf(WorkerAbandonedError);
+        await started;
+        await sweeper.stop({ deadlineAt: Date.now() - 1 });
+        release();
+        await abandoned;
+        expect(log).not.toHaveBeenCalled();
+        expect(refunds).not.toHaveBeenCalled();
+        expect(reconciliations).not.toHaveBeenCalled();
+        jest.restoreAllMocks();
+        if (!committed) {
+          await runUnscoped('expire the abandoned lease for a new instance', async () =>
+            setEligibilityFixture(prisma, 'paymentExpired', await fixtureTaskIds(made.intentId)),
+          );
+        }
+        await sweeperWith().runOnce();
+        await sweeperWith().runOnce();
+        await expectRecordedRefund(made);
+        expect(
+          await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_RESOLVED),
+        ).toHaveLength(1);
+        expect(await tasksOf(made.intentId)).toEqual([
+          expect.objectContaining({ status: 'DONE', attempts: 0 }),
+        ]);
+      },
+    );
+
     it('records a refund the provider made, once, and says so', async () => {
       const organizationId = `${org.a}-REFUNDED`;
       const made = await unknownButRefunded(organizationId);
       const ask = jest.spyOn(provider, 'getRefundStatus');
+      const refunds = jest.spyOn(paymentIntentsTotal, 'inc');
+      const reconciliations = jest.spyOn(paymentReconciliationTotal, 'inc');
 
       await sweeperWith().runOnce();
+      expect(refunds).toHaveBeenCalledTimes(1);
+      expect(refunds).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'REFUNDED' }));
+      expect(reconciliations).toHaveBeenCalledWith(
+        expect.objectContaining({ result: 'resolved_refunded' }),
+      );
 
       expect(ask).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -602,11 +695,9 @@ describe('the payment reconciler (real database)', () => {
     it('escalates a refund hold that outlived its marker instead of closing it', async () => {
       const organizationId = `${org.b}-ORPHAN`;
       const made = await unknownButRefunded(organizationId, 310n);
-      await runUnscoped('the suite corrupts the marker', () =>
-        prisma.client.paymentIntent.update({
-          where: { id: made.intentId },
-          data: { failureReason: null },
-        }),
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET failure_reason = NULL WHERE id = $1',
+        made.intentId,
       );
 
       await sweeperWith().runOnce();
@@ -680,6 +771,38 @@ describe('the payment reconciler (real database)', () => {
       expect(retried).toMatchObject({ paymentIntentId: made.intentId, status: 'CAPTURED' });
       expect(await readBalances(prisma, made.walletId)).toMatchObject({ ledger: 800n });
     });
+  });
+
+  it('bounds concurrent claims across many due rows and never leases a task twice', async () => {
+    const other = newPrisma();
+    const made: string[] = [];
+    try {
+      for (let i = 0; i < 20; i++) {
+        const { intentId } = await topUp(i % 2 ? org.a : org.b, 1000n);
+        made.push(intentId);
+        await asActor({ organizationId: i % 2 ? org.a : org.b }, () =>
+          prisma.transaction((tx) =>
+            wiring.paymentReconciliation.open(tx, {
+              organizationId: i % 2 ? org.a : org.b,
+              paymentIntentId: intentId,
+              kind: 'REFUND',
+              due: 'NOW',
+              outcome: 'TEST',
+            }),
+          ),
+        );
+      }
+      const repositories = [wiring.paymentReconciliation, wire(other).paymentReconciliation];
+      const batches = await Promise.all(repositories.map((r) => r.claimDue(1, 600, ulid())));
+      for (const batch of batches) expect(batch).toHaveLength(1);
+      expect(new Set(batches.flat().map((row) => row.paymentIntentId)).size).toBe(2);
+    } finally {
+      await plantPaymentTask([
+        'DELETE FROM payment_reconciliation_task WHERE payment_intent_id = ANY($1::text[])',
+        made,
+      ]);
+      await other.stop();
+    }
   });
 
   describe('concurrency: each resolution happens once', () => {
@@ -766,18 +889,18 @@ describe('the payment reconciler (real database)', () => {
    * writes switched off — exactly what the old build does.
    */
   describe('healing a mixed-version deploy', () => {
-    it('opens a task for a marker a B0 instance left without one, and then resolves it', async () => {
+    it('opens a task for a marker a B0 instance left without one, and resolves it on a recorded answer only', async () => {
       const organizationId = `${org.b}-HEAL-OPEN`;
       const unknown = await topUp(`${organizationId}-U`, 330n);
       const known = await topUp(`${organizationId}-K`, 340n);
-      const b0 = jest.spyOn(wiring.paymentReconciliation, 'open').mockResolvedValue(undefined);
       loseRefundResponse();
       await expect(refundBy(`${organizationId}-U`, unknown.intentId)).rejects.toThrow('lost');
       jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
       await expect(refundBy(`${organizationId}-K`, known.intentId)).rejects.toThrow(
         'connection reset',
       );
-      b0.mockRestore();
+      await b0LeftNoTask(unknown.intentId);
+      await b0LeftNoTask(known.intentId);
       expect(await tasksOf(unknown.intentId)).toEqual([]);
       expect(await tasksOf(known.intentId)).toEqual([]);
 
@@ -792,10 +915,16 @@ describe('the payment reconciler (real database)', () => {
       expect((await tasksOf(unknown.intentId))[0]!.dueIn).toBeGreaterThan(
         env.ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS - 30,
       );
-      // Known: due at once, and claimed in the same cycle.
-      await expectRecordedRefund(known);
+      // Known: due at once and claimed in the same cycle, but a B0 build never recorded the
+      // provider's answer it rests on (#1017 r3), so nothing is reversed on the marker alone:
+      // the hold stays, and the task is tried again, then a person's.
+      expect(await intentOf(known.intentId)).toMatchObject({
+        status: 'CAPTURED',
+        failureReason: 'REFUNDED_NOT_REVERSED',
+      });
+      expect(await reversalsOf(known.intentId)).toBe(0);
       expect(await tasksOf(known.intentId)).toEqual([
-        expect.objectContaining({ status: 'DONE', resolution: 'REFUNDED' }),
+        expect.objectContaining({ status: 'PENDING', lastOutcome: 'APPLY_FAILED' }),
       ]);
 
       await makeDue(unknown.intentId);
@@ -827,10 +956,10 @@ describe('the payment reconciler (real database)', () => {
         ),
       );
       // B0 finishes both refunds and closes nothing.
-      const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
       await refundBy(pending.org, pending.intentId);
       await refundBy(escalated.org, escalated.intentId);
-      b0.mockRestore();
+      await b0ClosedNothing(pending.intentId);
+      await b0ClosedNothing(escalated.intentId, 'ESCALATED');
       expect((await tasksOf(pending.intentId))[0]?.status).toBe('PENDING');
       expect((await tasksOf(escalated.intentId))[0]?.status).toBe('ESCALATED');
       const ask = jest.spyOn(provider, 'getRefundStatus');
@@ -911,9 +1040,8 @@ describe('the payment reconciler (real database)', () => {
       const made = await topUp(organizationId, 370n);
       jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
       await expect(refundBy(organizationId, made.intentId)).rejects.toThrow('connection reset');
-      const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
       await refundBy(organizationId, made.intentId);
-      b0.mockRestore();
+      await b0ClosedNothing(made.intentId);
       await plantRefundHold(`${org.c}-HEAL-FOREIGN`, made.walletId, made.intentId);
       // Pushed out, so only the healing pass can close it: the claim would close it too.
       await runUnscoped('the suite pushes the task out', () =>
@@ -959,10 +1087,9 @@ describe('the payment reconciler (real database)', () => {
       for (const index of [0, 1]) {
         const tenant = `${organizationId}-M${index}`;
         const made = await topUp(tenant, 100n);
-        const b0 = jest.spyOn(wiring.paymentReconciliation, 'open').mockResolvedValue(undefined);
         loseRefundResponse();
         await expect(refundBy(tenant, made.intentId)).rejects.toThrow('lost');
-        b0.mockRestore();
+        await b0LeftNoTask(made.intentId);
         missing.push(made.intentId);
       }
       const start = { createdAt: from, id: '' };
@@ -995,9 +1122,8 @@ describe('the payment reconciler (real database)', () => {
         const made = await topUp(tenant, 100n);
         jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
         await expect(refundBy(tenant, made.intentId)).rejects.toThrow('connection reset');
-        const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
         await refundBy(tenant, made.intentId);
-        b0.mockRestore();
+        await b0ClosedNothing(made.intentId);
         settled.push(made.intentId);
       }
       const start = { createdAt: from, id: '' };
@@ -1019,11 +1145,11 @@ describe('the payment reconciler (real database)', () => {
     it('leaves a task alone whose refund hold outlived its marker: that is for a person', async () => {
       const organizationId = `${org.b}-HEAL-KEEP`;
       const made = await unknownButRefunded(organizationId, 370n);
-      await runUnscoped('the suite corrupts the marker and pushes the task out', async () => {
-        await prisma.client.paymentIntent.update({
-          where: { id: made.intentId },
-          data: { failureReason: null },
-        });
+      await plantPaymentIntent(
+        'UPDATE payment_intent SET failure_reason = NULL WHERE id = $1',
+        made.intentId,
+      );
+      await runUnscoped('the suite pushes the task out', async () => {
         await prisma.client.$executeRawUnsafe(
           eligibilityClockSql`UPDATE payment_reconciliation_task SET next_attempt_at = now() + interval '1 hour'
             WHERE payment_intent_id = $1`,
@@ -1109,9 +1235,8 @@ describe('the payment reconciler (real database)', () => {
       const made = await topUp(organizationId, 440n);
       jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
       await expect(refundBy(organizationId, made.intentId)).rejects.toThrow('connection reset');
-      const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
       await refundBy(organizationId, made.intentId);
-      b0.mockRestore();
+      await b0ClosedNothing(made.intentId);
       jest
         .spyOn(wiring.paymentReconciliation, 'heal')
         .mockResolvedValue({ opened: 0, closed: 0, cursor: { missing: null, stale: null } });

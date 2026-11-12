@@ -68,7 +68,7 @@ describe('source fact uniqueness — concurrency, duplicate and tenant isolation
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('records one obligation when two approvals of one repair race', async () => {

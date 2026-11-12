@@ -128,7 +128,7 @@ describe('document-service shutdown: the scan worker by the outbox deadline (D-0
 
   afterAll(async () => {
     if (wiring) await cleanup(prisma, [org.a], wiring.storage);
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   });
 
   /** Two PENDING documents of this suite, moved to the head of the queue. */

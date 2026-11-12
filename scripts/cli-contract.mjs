@@ -292,6 +292,11 @@ export const CLI_CONTRACT = Object.freeze({
     positionals: [],
     accepts: { '--report': 'path', '--exit-code': 'integer', '--progress': 'path' },
   },
+  'scripts/backup-restore-drill-scope.mjs': {
+    positionals: [],
+    accepts: { '--gate': 'switch' },
+    other: ['--name-only', '--no-renames', '-z'],
+  },
   'scripts/backup-restore-drill-main.mjs': {
     positionals: [],
     accepts: { '--report': 'path', '--cleanup-from': 'path' },
@@ -432,6 +437,8 @@ export const CLI_CONTRACT = Object.freeze({
       '-p',
     ],
   },
+  // FU-335: takes no arguments and refuses any.
+  'scripts/ci-playwright-version.mjs': { positionals: [] },
   // Fixed curl/tar flags; the installer accepts only a mode and reviewed tool name.
   'scripts/ci-tool-download.mjs': {
     positionals: ['enum', 'enum'],
@@ -548,6 +555,9 @@ export const CLI_CONTRACT = Object.freeze({
     positionals: [],
     accepts: { '--all': 'switch', '--service': 'identifier' },
   },
+  'scripts/prisma-generate.mjs': { positionals: [], accepts: { '--schema': 'path' } },
+  // FU-334: options of the pnpm command lines the guard READS; it runs none.
+  'scripts/prisma-lifecycle-suppression-lib.mjs': { other: ['--audit-level', '--prod', '-g'] },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },
   // The name of a DATABASE_URL_* variable, never its value, then the few flags it passes on to psql.

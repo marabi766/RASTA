@@ -189,7 +189,7 @@ describe('a pre-receipt dispute settled by an operator resumes the order (D-083,
   afterAll(async () => {
     await env?.teardown();
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asBuyer = <T>(fn: () => Promise<T>) =>

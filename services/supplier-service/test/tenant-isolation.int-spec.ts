@@ -58,7 +58,7 @@ describe('tenant isolation', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   });
 
   describe('the private record', () => {

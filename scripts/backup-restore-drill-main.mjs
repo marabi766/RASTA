@@ -182,6 +182,10 @@ const env = {
   // node_modules and aborts for lack of a TTY (the GitHub runner sets it, a laptop does not).
   ...(process.env.PNPM_HOME ? { PNPM_HOME: process.env.PNPM_HOME } : {}),
   ...(recoveryId ? { [RECOVERY_ENV]: recoveryId } : {}),
+  // Set here, not inherited: `pnpm exec` and `pnpm run` reinstall stale dependencies first, and
+  // without this that reinstall generates the Prisma client from the @prisma/client hook, outside
+  // scripts/prisma-generate.mjs (FU-329). The seed's generation below is the explicit one.
+  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true',
   DOCKER_CONTEXT: 'default',
   DOCKER_HOST: 'unix:///var/run/docker.sock',
   LANG: 'C.UTF-8',
@@ -735,7 +739,11 @@ try {
     });
     if (pkg.scripts['db:seed']) {
       progress(`generate and demo seed ${service}`);
-      await run('pnpm', ['exec', 'prisma', 'generate'], { cwd, env: dbEnv });
+      // The one generation boundary (#1074): bounded retry of a transient engine download only.
+      await run(process.execPath, [join(ROOT, 'scripts', 'prisma-generate.mjs')], {
+        cwd,
+        env: dbEnv,
+      });
       // Keep migrator credentials out of the runtime seed's environment.
       const seedEnv = Object.fromEntries(
         Object.entries(dbEnv).filter(([key]) => !key.endsWith('_MIGRATOR')),
@@ -759,7 +767,7 @@ try {
     const before = await snapshot(source, service);
     before.reference = await collectReference(source, `rasta_${service}`, before.schemaDump);
     process.stderr.write(
-      `[backup-restore-drill] rasta_${service}: CHECK lines different ${before.reference.checkLinesDifferent}; reference + fixed point ${before.reference.milliseconds} ms\n`,
+      `[backup-restore-drill] rasta_${service}: CHECK lines different ${before.reference.checkLinesDifferent}; objects with a folded AND/OR list ${before.reference.foldedBooleanLists.length}; reference + fixed point ${before.reference.milliseconds} ms\n`,
     );
     const fd = openSync(join(temporary, `${service}.dump`), 'wx', 0o600);
     try {

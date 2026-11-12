@@ -63,12 +63,10 @@ export class AwardStandingCheckRepository {
     return runUnscoped(
       'the standing-check sweeper claims the pending checks of every tenant; each is settled in its own tenant (ADR-067 § 3)',
       () =>
-        this.prisma.client.$queryRawUnsafe<ClaimedCheck[]>(
-          `UPDATE "tender_award_standing_check"
-              SET "lease_until" = clock_timestamp() + ($2::int * interval '1 second'),
-                  "fence" = $3
-            WHERE "id" IN (
-                  SELECT "id" FROM "tender_award_standing_check"
+        this.prisma.transaction((tx) =>
+          tx.$queryRawUnsafe<ClaimedCheck[]>(
+            `WITH picked AS MATERIALIZED (
+                  SELECT "id" AS picked_id FROM "tender_award_standing_check"
                    WHERE "status" = 'PENDING'
                      AND ("lease_until" IS NULL OR "lease_until" <= clock_timestamp())
                      AND ("next_attempt_at" IS NULL OR "next_attempt_at" <= clock_timestamp())
@@ -76,14 +74,20 @@ export class AwardStandingCheckRepository {
                    ORDER BY "created_at", "id"
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
+            UPDATE "tender_award_standing_check"
+              SET "lease_until" = clock_timestamp() + ($2::int * interval '1 second'),
+                  "fence" = $3
+             FROM picked
+            WHERE "tender_award_standing_check"."id" = picked.picked_id
         RETURNING "id", "organization_id" AS "organizationId", "tender_id" AS "tenderId",
                   "project_id" AS "projectId", "bid_id" AS "bidId",
                   "winner_organization_id" AS "winnerOrganizationId", "awarded_by" AS "awardedBy",
                   "awarded_at" AS "awardedAt", "window_start" AS "windowStart", "fence", "attempts"`,
-          limit,
-          leaseSeconds,
-          fence,
-          tenderId ?? null,
+            limit,
+            leaseSeconds,
+            fence,
+            tenderId ?? null,
+          ),
         ),
     );
   }

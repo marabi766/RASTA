@@ -1,8 +1,10 @@
+import { WorkerBoundary, workerOperation } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import {
   RastaError,
   createSystemContext,
   runWithContext,
+  claimWhenReady,
   withinDeadline,
   type OutboxStopOptions,
 } from '@rasta/nest-common';
@@ -26,6 +28,7 @@ export interface SweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the task back. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** Retry delay after the first failure; doubles per attempt up to the maximum. */
   backoffSeconds: number;
   backoffMaxSeconds: number;
@@ -53,7 +56,7 @@ function errorCodeOf(error: unknown): string {
 /**
  * Works the queue `OrganizationMovedConsumer` fills (Q-83, docs/23 D-041).
  *
- * Each sweep claims a bounded batch of due tasks (`FOR UPDATE SKIP LOCKED`
+ * Each sweep claims due tasks one when ready, up to its limit (`FOR UPDATE SKIP LOCKED`
  * plus a lease and a fencing token, so any number of instances may run), asks
  * organization-service whether each policy's union still governs its
  * organization — signed for the writing union, as everywhere — and:
@@ -63,8 +66,8 @@ function errorCodeOf(error: unknown): string {
  *     commit together;
  *   - **within** → DONE, nothing changed — but only if no later move coalesced
  *     into the task since the claim (its `generation`); otherwise the lookup may
- *     predate that move, so the task is released, due at once, and the next sweep
- *     asks again;
+ *     predate that move, so the task is released, due at once, and the next claim
+ *     asks afresh;
  *   - **could not confirm** → the policy is left exactly as it is, the task's
  *     attempts go up and its next attempt moves out by an exponential backoff.
  *     Nothing partial, and nothing skipped: the task stays until an answer comes.
@@ -80,6 +83,7 @@ function errorCodeOf(error: unknown): string {
  */
 export class PolicyReconciliationSweeper {
   private readonly logger = new Logger(PolicyReconciliationSweeper.name);
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
   private stopping?: Promise<void>;
@@ -119,10 +123,9 @@ export class PolicyReconciliationSweeper {
    * after the relay, a sweep kept writing outbox rows while the relay drained,
    * and its wait came on top of the relay's.
    *
-   * Past the deadline the sweep is abandoned with a warning: a suspension, its
-   * event and the task's completion commit together, so an exit rolls back the
-   * one in flight, and the lease lets the next sweep, anywhere, take it and the
-   * rest of the batch again. Without a deadline it waits. One stop per process.
+   * At the deadline the shared worker boundary refuses further database work and drops late
+   * results. Submitted operations remain unconfirmed; leases/fences govern recovery.
+   * Without a deadline it waits. One stop per process.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
@@ -131,33 +134,39 @@ export class PolicyReconciliationSweeper {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
       return;
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
-        'Reconciliation sweep still running at the shutdown deadline; abandoned. The task in ' +
-          'flight rolls back and its lease lets the next sweep take it again',
+        'Sweep abandoned at shutdown deadline; in-flight outcome unconfirmed; lease/fence govern recovery',
       );
     }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
-  async runOnce(): Promise<SweepOutcome> {
-    const token = ulid();
-    const tasks = await this.reconciliations.claimDue(
+  runOnce(): Promise<SweepOutcome> {
+    return this.boundary.run(() => this.sweep());
+  }
+
+  private async sweep(): Promise<SweepOutcome> {
+    const tasks = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      token,
+      () => this.stopped,
+      () => this.reconciliations.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: SweepOutcome = {
-      claimed: tasks.length,
+      claimed: 0,
       suspended: 0,
       confirmed: 0,
       retried: 0,
@@ -165,20 +174,9 @@ export class PolicyReconciliationSweeper {
       notOwned: 0,
     };
 
-    // One question per (union, organization) pair in the batch.
-    const answers = new Map<string, Promise<boolean>>();
-    const ask = (task: ClaimedTask): Promise<boolean> => {
-      const key = `${task.unionId}\u0000${task.organizationId}`;
-      let answer = answers.get(key);
-      if (!answer) {
-        answer = this.directory.isWithin(task.unionId, task.organizationId);
-        answers.set(key, answer);
-      }
-      return answer;
-    };
-
-    for (const task of tasks) {
-      // Stopping: the rest stay claimed until their lease runs out, then any sweep takes them.
+    for await (const task of tasks) {
+      outcome.claimed += 1;
+      // Stopping: only this item holds a claim; later items have not been claimed.
       if (this.stopped) break;
       const context = createSystemContext({
         correlationId: task.correlationId,
@@ -187,7 +185,9 @@ export class PolicyReconciliationSweeper {
       });
       try {
         await runWithContext(context, async () => {
-          const within = await ask(task);
+          const within = await workerOperation(() =>
+            this.directory.isWithin(task.unionId, task.organizationId),
+          );
           if (within) {
             // Nothing about the policy changes: the task alone is finished —
             // unless a later move coalesced into it after the claim, in which
@@ -222,13 +222,14 @@ export class PolicyReconciliationSweeper {
           });
         });
       } catch (error) {
+        if (this.boundary.abandoned) return outcome;
         outcome.retried += 1;
         policyReconciliationTotal.inc({ service: SERVICE_NAME, result: 'retried' });
         await this.retryLater(task, error);
       }
     }
 
-    if (outcome.claimed > 0) {
+    if (outcome.claimed > 0 && !this.boundary.abandoned) {
       const backlog = await this.reconciliations.backlog().catch(() => undefined);
       this.logger.log(
         `Reconciliation sweep: claimed ${outcome.claimed}, suspended ${outcome.suspended}, ` +

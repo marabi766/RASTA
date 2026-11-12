@@ -143,9 +143,14 @@ const idleRepository = {
 } as unknown as AuditRepository;
 
 /** The runtime-role check, passing: the connection is the runtime role. */
+let samplerStops: ((options: { deadlineAt?: number }) => Promise<void>)[] = [];
+async function stopSamplers(): Promise<void> {
+  await Promise.all(samplerStops.splice(0).map((stop) => stop({ deadlineAt: Date.now() + 5000 })));
+}
 const runtimeRole = {
   assertRuntimeRole: async () => undefined,
-  beforeDisconnect: () => undefined,
+  beforeDisconnect: (stop: (options: { deadlineAt?: number }) => Promise<void>) =>
+    samplerStops.push(stop),
 } as unknown as PrismaService;
 
 describe('audit-service composition root', () => {
@@ -153,9 +158,11 @@ describe('audit-service composition root', () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv, ...ENVIRONMENT };
+    samplerStops = [];
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await stopSamplers();
     process.env = originalEnv;
   });
 
@@ -463,7 +470,6 @@ describe('audit-service composition root', () => {
     );
 
     await module.onModuleInit();
-    await module.onApplicationShutdown();
 
     expect(order).toEqual(['projector', 'trail', 'replay', 'evidence', 'rfqEvidence']);
   });
@@ -485,7 +491,6 @@ describe('audit-service composition root', () => {
     );
 
     await expect(module.onModuleInit()).rejects.toThrow(/does not host this topic-partition/);
-    await module.onApplicationShutdown();
 
     expect(order).toEqual(['projector', 'trail']);
   });
@@ -506,7 +511,6 @@ describe('audit-service composition root', () => {
     );
 
     await expect(module.onModuleInit()).rejects.toThrow(/does not host this topic-partition/);
-    await module.onApplicationShutdown();
 
     expect(order).toEqual(['projector', 'trail', 'replay']);
   });
@@ -527,7 +531,6 @@ describe('audit-service composition root', () => {
     );
 
     await expect(module.onModuleInit()).rejects.toThrow(/does not host this topic-partition/);
-    await module.onApplicationShutdown();
 
     expect(order).toEqual(['projector', 'trail', 'replay', 'evidence', 'rfqEvidence']);
   });
@@ -549,7 +552,6 @@ describe('audit-service composition root', () => {
       runtimeRole,
     );
     await module.onModuleInit();
-    await module.onApplicationShutdown();
 
     // Nothing to assert beyond completing without a leaked handle; Jest fails
     // the run if the interval keeps the loop alive.
@@ -577,7 +579,6 @@ describe('audit-service composition root', () => {
       runtimeRole,
     );
     await expect(module.onModuleInit()).resolves.toBeUndefined();
-    await module.onApplicationShutdown();
   });
   describe('expected-producer series, seeded from validated configuration', () => {
     async function exposition(): Promise<string[]> {
@@ -615,7 +616,6 @@ describe('audit-service composition root', () => {
       );
 
       await module.onModuleInit();
-      await module.onApplicationShutdown();
 
       expect(await exposition()).toEqual([]);
     });
@@ -646,7 +646,6 @@ describe('audit-service composition root', () => {
       );
 
       await module.onModuleInit();
-      await module.onApplicationShutdown();
 
       const [projectorStart] = seenAtStart;
       expect(projectorStart?.[0]).toBe('projector');

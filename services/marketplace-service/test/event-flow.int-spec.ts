@@ -128,7 +128,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
     await consumer?.disconnect();
     await publisher?.stop();
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   }, 60_000);
 
   /** Finds this run's own envelope for `eventName` and `orderId`, waiting if needed. */

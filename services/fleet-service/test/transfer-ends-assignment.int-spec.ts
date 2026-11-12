@@ -53,7 +53,7 @@ describe('a transfer ends the assignments still open on the machine', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const event = (

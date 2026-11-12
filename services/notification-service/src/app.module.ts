@@ -48,6 +48,7 @@ import { RECIPIENT_PORT, type RecipientPort } from './recipients/recipient.port'
 import { SUBSCRIBED_TOPICS } from './rules/rules';
 import { withAddressScrubbing, type ScrubbedLogger } from './logging/scrub';
 import { ENV, LOGGER, MAIL_CHANNEL, SCRUBBED_LOGGER } from './tokens';
+import { notificationItemBudgetMs, SMTP_TIMEOUT_PHASES } from './config/operation-budgets';
 import type { MailChannel } from './channels/mail.channel.port';
 import { SmtpMailChannel } from './channels/smtp.mail.channel';
 import { MailWorker } from './channels/mail.worker';
@@ -320,6 +321,9 @@ import {
             pollIntervalMs: env.NOTIFICATION_MAIL_POLL_INTERVAL_MS,
             batchSize: env.NOTIFICATION_MAIL_BATCH_SIZE,
             leaseSeconds: env.NOTIFICATION_MAIL_LEASE_SECONDS,
+            processingBudgetMs: notificationItemBudgetMs(
+              SMTP_TIMEOUT_PHASES * env.NOTIFICATION_SMTP_TIMEOUT_MS,
+            ),
             backoffMaxSeconds: env.NOTIFICATION_MAIL_BACKOFF_MAX_SECONDS,
             owner: `${SERVICE_NAME}@${hostname()}#${process.pid}`,
           },
@@ -343,6 +347,9 @@ import {
             pollIntervalMs: env.NOTIFICATION_RESOLUTION_POLL_INTERVAL_MS,
             batchSize: env.NOTIFICATION_RESOLUTION_BATCH_SIZE,
             leaseSeconds: env.NOTIFICATION_RESOLUTION_LEASE_SECONDS,
+            processingBudgetMs: notificationItemBudgetMs(
+              env.NOTIFICATION_IDENTITY_REQUEST_TIMEOUT_MS,
+            ),
             backoffMaxSeconds: env.NOTIFICATION_RESOLUTION_BACKOFF_MAX_SECONDS,
             maxRecipients: env.NOTIFICATION_MAX_RECIPIENTS_PER_INTENT,
             inAppTtlDays: env.NOTIFICATION_IN_APP_TTL_DAYS,
@@ -387,6 +394,7 @@ import {
         MailWorker,
         DispatcherConsumer,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -396,6 +404,7 @@ import {
         mail: MailWorker,
         dispatcher: DispatcherConsumer,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: NotificationEnv,
       ): OutboxShutdown =>
         new OutboxShutdown({
@@ -404,6 +413,7 @@ import {
           workers: [resolution, mail, dispatcher],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

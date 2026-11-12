@@ -41,7 +41,7 @@ describe('tenant isolation', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('writes each schedule into the organization the caller is acting for', async () => {

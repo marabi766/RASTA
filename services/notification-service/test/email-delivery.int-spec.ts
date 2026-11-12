@@ -79,6 +79,7 @@ const mailOptions = {
   pollIntervalMs: 60_000,
   batchSize: 10,
   leaseSeconds: 60,
+  processingBudgetMs: 1_000,
   backoffMaxSeconds: 600,
   owner: 'notification-service@itest-mail',
 };
@@ -113,7 +114,7 @@ describe('an email that actually leaves the platform', () => {
 
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   }, 120_000);
 
   function mailWorker(port = SMTP_PORT, now?: () => Date): MailWorker {

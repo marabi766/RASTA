@@ -2295,6 +2295,9 @@ export const ECONOMIC_DATA_ROLLBACK = {
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
+        // FU-230: its evidence trigger reads the task table 20260930200000's down drops, and
+        // refuses the marked intents planted below; rolled back first, re-applied with them.
+        '20261109130000_payment_intent_terms_fixed',
         // An index on the resolution table, which 20261001100000's down drops:
         // rolled back with it, or its ledger row stays and the re-apply below
         // never recreates the index — masked while it was the newest
@@ -2442,7 +2445,10 @@ export const ECONOMIC_DATA_ROLLBACK = {
             DELETE FROM "payment_reconciliation_resolution" WHERE organization_id = 'ORG-MIGCHECK';
             ALTER TABLE "payment_reconciliation_resolution" ENABLE TRIGGER "trg_payment_resolution_append_only";
             DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
-            DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
+            -- Never erased either (FU-230): lifted the same way, for the probe's own rows.
+            ALTER TABLE "payment_intent" DISABLE TRIGGER "trg_payment_intent_terms_fixed";
+            DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';
+            ALTER TABLE "payment_intent" ENABLE TRIGGER "trg_payment_intent_terms_fixed";`,
     },
     ...COMMISSION_BUSINESS_LINES_STEPS,
     ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
@@ -2923,6 +2929,9 @@ export const EXPECTED = {
       'payment_reconciliation_resolution',
       'payment_reconciliation_requeue',
       'payment_refund_decline',
+      // What the provider answered, and how each task was decided (#1017 r3).
+      'payment_provider_outcome',
+      'payment_reconciliation_decision',
       // The instant line rules began to price (docs/23 D-057).
       'commission_pricing_cutover',
       // The instant each rule change was decided at, which no session sets (#1016 r1 F1).
@@ -3025,6 +3034,17 @@ export const EXPECTED = {
       'trg_commission_rule_scope_decided',
       'trg_commission_rule_scope_decision_kept',
       'trg_commission_rule_history_kept',
+      // A payment intent's terms never change once written; it is never erased (FU-230).
+      'trg_payment_intent_terms_fixed',
+      'trg_payment_intent_no_truncate',
+      // ...its lifecycle moves only on the service's evidence (#1017 r1 F1), which is kept for good
+      // and finishes a task only through its decision (#1017 r3).
+      'trg_payment_intent_evidenced',
+      'trg_payment_provider_outcome_kept',
+      'trg_payment_provider_outcome_no_truncate',
+      'trg_payment_reconciliation_decision_kept',
+      'trg_payment_reconciliation_decision_no_truncate',
+      'trg_payment_reconciliation_task_decided',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -3088,6 +3108,11 @@ export const EXPECTED = {
       'note_wallet_account_debits',
       'wallet_account_debited_later',
       'commission_rule_scope_decided',
+      'reject_payment_intent_rewrite',
+      'assert_payment_intent_evidenced',
+      'record_payment_provider_outcome',
+      'finish_payment_reconciliation_task',
+      'guard_payment_reconciliation_task',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',
@@ -4495,15 +4520,73 @@ export const EXPECTED = {
     ],
     // Added by 20261005130000_availability_window_one_live (review #225 r1):
     // one live window per machine, a partial index only the migration holds.
-    indexes: ['ux_availability_window_live'],
+    indexes: ['ux_availability_window_live', 'usage_record_asset_id_period_end_id_idx'],
   },
   maintenance: {
     // D-045: the runtime role owns nothing and cannot create the scratch schema
     // or database; the migrator owns rasta_maintenance.
     connectAs: 'migrator',
+    dataRollback: {
+      migration: '20261112070000_usage_ledger',
+      label: 'expanded cumulative meters and schedule anchors',
+      steps: [
+        {
+          label: 'seed the largest expanded meter',
+          sql: `
+          INSERT INTO asset_usage_meter(asset_id, organization_id, hour_meter, odometer, updated_at)
+          VALUES ('AST_METER_MIGCHECK', 'ORG-MIGCHECK', 999999999999999999.99, 0, now());`,
+        },
+        {
+          label: 'down refuses narrowing the hour meter without schema/data changes',
+          runDownScript: true,
+          mustFail: 'usage ledger rollback requires meters and anchors within NUMERIC(12,2)',
+        },
+        {
+          label: 'isolate the odometer boundary',
+          sql: `UPDATE asset_usage_meter
+          SET hour_meter = 0, odometer = 10000000000.99 WHERE asset_id = 'AST_METER_MIGCHECK';`,
+        },
+        {
+          label: 'down refuses narrowing the odometer',
+          runDownScript: true,
+          mustFail: 'usage ledger rollback requires meters and anchors within NUMERIC(12,2)',
+        },
+        {
+          label: 'seed expanded anchors with a small meter',
+          sql: `
+          UPDATE asset_usage_meter SET odometer = 0 WHERE asset_id = 'AST_METER_MIGCHECK';
+          INSERT INTO maintenance_schedule(id, organization_id, asset_id, title, interval_hours,
+            last_serviced_hour_meter, last_serviced_odometer, updated_at, created_by, updated_by)
+          VALUES ('MSC_METER_MIGCHECK', 'ORG-MIGCHECK', 'AST_METER_MIGCHECK', 'Meter', 1,
+            10000000000.99, 0, now(), 'MIGCHECK', 'MIGCHECK');`,
+        },
+        {
+          label: 'down refuses narrowing a copied hour anchor',
+          runDownScript: true,
+          mustFail: 'usage ledger rollback requires meters and anchors within NUMERIC(12,2)',
+        },
+        {
+          label: 'isolate the odometer anchor boundary',
+          sql: `UPDATE maintenance_schedule
+          SET last_serviced_hour_meter = 0, last_serviced_odometer = 10000000000.99 WHERE id = 'MSC_METER_MIGCHECK';`,
+        },
+        {
+          label: 'down refuses narrowing a copied odometer anchor',
+          runDownScript: true,
+          mustFail: 'usage ledger rollback requires meters and anchors within NUMERIC(12,2)',
+        },
+        {
+          label: 'remove probe rows before the full reversible chain',
+          sql: `
+          DELETE FROM maintenance_schedule WHERE id = 'MSC_METER_MIGCHECK';
+          DELETE FROM asset_usage_meter WHERE asset_id = 'AST_METER_MIGCHECK';`,
+        },
+      ],
+    },
     tables: [
       'asset_ref',
       'asset_usage_meter',
+      'asset_usage_entry',
       'labor_entry',
       'maintenance_cost',
       'maintenance_request',
@@ -4515,6 +4598,7 @@ export const EXPECTED = {
       'repair_order',
     ],
     triggers: [],
+    indexes: ['asset_usage_entry_asset_id_period_end_idx', 'asset_usage_entry_organization_id_idx'],
     constraints: [
       'ck_cost_provenance',
       'ck_labor_entry_amounts',
@@ -4531,6 +4615,9 @@ export const EXPECTED = {
       'ck_schedule_has_interval',
       'ck_schedule_intervals_positive',
       'ck_usage_meter_non_negative',
+      'ck_usage_meter_source',
+      'ck_usage_entry_non_negative',
+      'ck_usage_entry_interval',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

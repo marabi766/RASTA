@@ -118,7 +118,7 @@ async function run(input: Input): Promise<void> {
     {
       close: async () => {
         await shared.stop({ deadlineAt: Date.now() + 5_000 });
-        await prisma.onModuleDestroy();
+        await prisma.stop();
       },
     },
     {

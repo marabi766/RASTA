@@ -72,7 +72,7 @@ describe('a refund whose wallet stops being ACTIVE while the provider is asked (
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   type Status = 'ACTIVE' | 'FROZEN' | 'CLOSED';

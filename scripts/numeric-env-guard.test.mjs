@@ -133,8 +133,8 @@ const BAD = [
 const GOOD = [
   `const n = Number('5'); const v = 5; const m = Number(v)`,
   `const schema = z.number().min(1).max(10)`,
-  `import {wholeNumberEnv as whole, wholeBigintEnv, parseWholeNumber} from '@rasta/config';
-    const schema = whole(0, 10); const big = wholeBigintEnv(0n, 100n);
+  `import {wholeNumberEnv as whole, boundedWholeNumberEnv, wholeBigintEnv, parseWholeNumber} from '@rasta/config';
+    const schema = whole(0, 10); const bounded = boundedWholeNumberEnv(0, 10, 5); const big = wholeBigintEnv(0n, 100n);
     const n = parseWholeNumber(process.env.X ?? '', {min:0,max:10})`,
   `const fake = {coerce:{number:()=>5}}; const schema = fake.coerce.number()`,
   `function Number(v: string) { return v }; const text = Number(process.env.X ?? '')`,
@@ -149,12 +149,13 @@ function fixture(snippets) {
     ['packages/config/package.json', '{"name":"@rasta/config"}'],
     [
       'packages/config/src/index.ts',
-      `export {wholeNumberEnv,wholeBigintEnv,parseWholeNumber} from './env'`,
+      `export {wholeNumberEnv,boundedWholeNumberEnv,wholeBigintEnv,parseWholeNumber} from './env'`,
     ],
     [
       'packages/config/src/env.ts',
       `import {z} from 'zod';
       export function wholeNumberEnv(min:number,max:number) { return z.string().transform(Number).pipe(z.number().min(min).max(max)) }
+      export function boundedWholeNumberEnv(min:number,max:number,fallback:number) { return wholeNumberEnv(min,max).prefault(String(fallback)) }
       export function wholeBigintEnv(min:bigint,max:bigint) { return z.string().transform(BigInt).pipe(z.bigint().min(min).max(max)) }
       export function parseWholeNumber(text:string, bounds:unknown) { return Number(text) }`,
     ],

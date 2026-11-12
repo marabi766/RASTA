@@ -96,7 +96,7 @@ describe('asset snapshot (internal)', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('gives the current owner the full snapshot, to either replica', async () => {

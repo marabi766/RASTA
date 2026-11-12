@@ -45,7 +45,8 @@ import { cleanup, databaseUrl, id, newPrisma, producerShaped, tenants } from './
  * Codex r1 on #270: the deadline bounded the wait, not the message — a handler
  * or a dead-letter send that finished after it let `eachMessage` return, and
  * kafkajs committed the offset the stop had said it abandoned. Now neither is
- * committed; the redelivery meets the handler's marker.
+ * committed; closed database admission refuses late work. Redelivery applies
+ * the event, or meets the marker of work committed before the deadline.
  *
  * The settings make the old orders fail by construction: relay grace 6 s, purge
  * batch bound 5.2 s (100 ms wait + 100 ms statement + 5 s margin), budget 7 s,
@@ -422,7 +423,7 @@ describe('fleet-service shutdown: relay, purge and consumer by one deadline (D-0
     expect(calls.handled).toBe(1);
   }, 30_000);
 
-  it('a handler that finishes after the close: its message is not committed, and its redelivery is skipped — applied once', async () => {
+  it('refuses database work after close; a fresh process applies redelivery only once', async () => {
     const org = tenants().a;
     const assetId = id('AST');
     const event = assetCreated(org, assetId);
@@ -451,17 +452,21 @@ describe('fleet-service shutdown: relay, purge and consumer by one deadline (D-0
       expect(exits).toEqual([0]);
       expect(tookMs).toBeGreaterThanOrEqual(BUDGET_MS - 100);
 
-      // It ends now, its effect committed with its marker, after the deadline.
+      // No database work was submitted before close: admission now refuses it.
       release();
       await delivered;
-      expect(outcomes).toEqual([undefined]);
+      expect(outcomes).toHaveLength(0);
       expect(first.committed).toEqual([]);
       expect(first.uncommitted).toEqual(['43']);
-      expect(await processedCount(prisma, event)).toBe(1);
+      expect(await processedCount(prisma, event)).toBe(0);
+      const lateRows = await runUnscoped('test reads the replica after admission closed', () =>
+        prisma.client.assetRef.findMany({ where: { id: assetId } }),
+      );
+      expect(lateRows).toEqual([]);
       jest.restoreAllMocks();
 
-      // The group delivers it again, to the next process: the marker stops it
-      // before any effect.
+      // A fresh process admits the redelivery and atomically records its effect
+      // and marker. Another delivery then meets that marker before any effect.
       booted = await boot({
         handle: async function (this: AssetSyncConsumer, ...args) {
           const outcome = await realHandle.apply(this, args);
@@ -473,9 +478,13 @@ describe('fleet-service shutdown: relay, purge and consumer by one deadline (D-0
       });
       const effects = jest.spyOn(FleetRepository.prototype, 'upsertAssetRef');
       await booted.kafka.deliver('43', event);
-      expect(outcomes).toHaveLength(2);
-      expect(effects).not.toHaveBeenCalled();
+      expect(outcomes).toHaveLength(1);
+      expect(effects).toHaveBeenCalledTimes(1);
       expect(booted.kafka.committed).toEqual(['43']);
+      await booted.kafka.deliver('44', event);
+      expect(outcomes).toHaveLength(2);
+      expect(effects).toHaveBeenCalledTimes(1);
+      expect(booted.kafka.committed).toEqual(['43', '44']);
       expect(await processedCount(prisma, event)).toBe(1);
       const rows = await runUnscoped('test reads the replica across tenants', () =>
         prisma.client.assetRef.findMany({ where: { id: assetId } }),
@@ -483,7 +492,7 @@ describe('fleet-service shutdown: relay, purge and consumer by one deadline (D-0
       expect(rows).toHaveLength(1);
     } finally {
       await cleanup(prisma, [org]);
-      await prisma.onModuleDestroy();
+      await prisma.stop();
     }
   }, 60_000);
 });

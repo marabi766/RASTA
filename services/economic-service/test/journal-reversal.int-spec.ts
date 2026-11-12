@@ -72,7 +72,7 @@ describe('journal reversal refusals (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [payer, payee, unownedOrg]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** A platform administrator acting from the journal's own organization. */

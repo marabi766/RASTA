@@ -36,9 +36,6 @@ import {
   outboxAckFencedTotal,
   outboxClaimAttemptsTotal,
   outboxLeaseReclaimedTotal,
-  outboxLeasesActive,
-  outboxPendingAgeSeconds,
-  outboxPendingTotal,
 } from '@rasta/observability';
 import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
@@ -49,6 +46,7 @@ import { LedgerController } from './ledger/ledger.controller';
 import { JournalReversalService } from './ledger/journal-reversal.service';
 import { WalletRepository } from './wallet/wallet.repository';
 import { WalletService } from './wallet/wallet.service';
+import { EconomicGaugeSampler } from './observability/gauge-sampler';
 import { WalletController } from './wallet/wallet.controller';
 import { LedgerBalanceAudit } from './wallet/balance-audit';
 import { TransactionRepository } from './transaction/transaction.repository';
@@ -77,7 +75,6 @@ import { IdempotencyStore } from './shared/idempotency';
 import { SettlementAuthorityConsumer } from './consumers/settlement-authority.consumer';
 import { StatementSettlementConsumer } from './consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from './consumers/reward-trigger.consumer';
-import { transactionsDisputed, transactionsPendingSettlement } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER, PAYMENT_PROVIDER, SOURCE_FACTS } from './tokens';
 import { SourceFactsClient, type SourceFacts } from './provenance/source-facts.client';
@@ -416,9 +413,10 @@ export function economicLogger(
           ...outboxPurgeSettings(env),
         }),
     },
+    EconomicGaugeSampler,
     {
-      // D-052: the relay, the purge, the payment reconciler, the two consumers
-      // and the balance audit stop together in the destroy phase, by one
+      // D-052: relay, purge, reconciliation, consumers, balance audit and gauge
+      // sampler stop together in the destroy phase, by one
       // deadline inside SHUTDOWN_TIMEOUT_MS. The reconciler too (as #247 r3):
       // stopped later, it kept writing outbox rows while the relay drained. The
       // consumers too (Codex r1 on #277): stopped later, in their own
@@ -434,7 +432,9 @@ export function economicLogger(
         StatementSettlementConsumer,
         RewardTriggerConsumer,
         LedgerBalanceAudit,
+        EconomicGaugeSampler,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -445,15 +445,18 @@ export function economicLogger(
         statements: StatementSettlementConsumer,
         rewards: RewardTriggerConsumer,
         audit: LedgerBalanceAudit,
+        sampler: EconomicGaugeSampler,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: EconomicEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [reconciler, settlements, statements, rewards, audit],
+          workers: [reconciler, settlements, statements, rewards, audit, sampler],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -485,18 +488,13 @@ export function economicLogger(
   ],
 })
 export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
-  private gaugeTimer?: NodeJS.Timeout;
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
     private readonly purge: OutboxPurgeScheduler,
     private readonly outboxShutdown: OutboxShutdown,
-    private readonly store: PrismaOutboxStore,
     private readonly ledger: LedgerService,
-    private readonly wallets: WalletService,
-    private readonly transactions: TransactionRepository,
-    private readonly idempotency: IdempotencyStore,
+    private readonly sampler: EconomicGaugeSampler,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -519,40 +517,12 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     this.relay.start();
     this.purge.start();
 
-    const sample = async () => {
-      try {
-        outboxPendingTotal.set({ service: SERVICE_NAME }, await this.store.pendingCount());
-        outboxLeasesActive.set({ service: SERVICE_NAME }, await this.store.activeLeaseCount());
-        outboxPendingAgeSeconds.set(
-          { service: SERVICE_NAME },
-          await this.store.oldestPendingAgeSeconds(),
-        );
-        // These gauges span tenants by design — they are operational figures
-        // no tenant ever sees, and none of them is a sum of money.
-        transactionsPendingSettlement.set(
-          { service: SERVICE_NAME },
-          await this.transactions.countByStatus('PENDING_SETTLEMENT'),
-        );
-        transactionsDisputed.set(
-          { service: SERVICE_NAME },
-          await this.transactions.countByStatus('DISPUTED'),
-        );
-        await this.wallets.sampleGauges();
-        await this.idempotency.purgeExpired();
-      } catch {
-        // Metrics and upkeep must never take the service down.
-      }
-    };
-
-    this.gaugeTimer = setInterval(() => void sample(), 15_000);
-    this.gaugeTimer.unref?.();
+    this.sampler.start();
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // The relay, the purge, the payment reconciler, the two consumers and the
-    // balance audit already stopped in OutboxShutdown's onModuleDestroy,
+    // The relay, purge and workers already stopped in OutboxShutdown's destroy phase,
     // concurrently and by one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
-    if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
 }

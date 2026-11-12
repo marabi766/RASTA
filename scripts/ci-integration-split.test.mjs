@@ -930,9 +930,20 @@ test('a test step without its time limit, or above it, is refused', () => {
   assert.deepEqual(checkIntegrationSplit(tightened), []);
 });
 
-const limitedSteps = (job) => job.steps.filter((step) => 'timeout-minutes' in step);
+const limitedSteps = (job) => (job.steps ?? []).filter((step) => 'timeout-minutes' in step);
 const stepSum = (job) =>
   limitedSteps(job).reduce((total, step) => total + step['timeout-minutes'], 0);
+
+test('reusable calls delegate deadlines to their runner jobs and cannot hide inline steps', () => {
+  const uses = './.github/workflows/backup-drill-monthly.yml';
+  assert.deepEqual(jobBudgetProblems({ call: { uses } }, [], {}, {}), []);
+  for (const job of [
+    { uses, steps: [] },
+    { uses, 'timeout-minutes': 30 },
+    { uses: 'owner/repo/.github/workflows/unreviewed.yml@main' },
+  ])
+    assert.match(jobBudgetProblems({ call: job }, [], {}, {}).join(' '), /not a local reusable/);
+});
 
 test('every job holds its steps one after the other: step limits plus setup fit the job limit', () => {
   const jobs = Object.entries(PARSED.jobs).filter(([, job]) => limitedSteps(job).length > 0);

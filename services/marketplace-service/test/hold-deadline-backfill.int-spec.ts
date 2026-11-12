@@ -80,7 +80,7 @@ describe('the legacy hold-deadline backfill (PostgreSQL)', () => {
   afterAll(async () => {
     await owner.$disconnect();
     await cleanup(prisma, [org.buyer, org.supplier]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function place() {

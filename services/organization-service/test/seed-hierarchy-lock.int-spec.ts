@@ -156,7 +156,7 @@ describe('the demo seed takes the hierarchy lock', () => {
   });
 
   afterAll(async () => {
-    await prisma?.onModuleDestroy();
+    await prisma?.stop();
   });
 
   it('a suspension of the parent while the seed writes the child waits, then cascades over it', async () => {

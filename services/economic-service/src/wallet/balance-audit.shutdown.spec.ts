@@ -40,6 +40,26 @@ const wallet = (id: string) => ({
 });
 
 describe('LedgerBalanceAudit shutdown (Codex on #277, finding 3)', () => {
+  it('keeps audit-owned errors caught and logged when they reject during stop', async () => {
+    let reject!: (error: Error) => void;
+    const { audit, wallets } = setup([
+      new Promise<unknown[]>((_yes, no) => {
+        reject = no;
+      }),
+    ]);
+    const errors = jest.spyOn(audit['logger'], 'error').mockImplementation();
+    const running = audit.run();
+    await new Promise((resolve) => setImmediate(resolve));
+    const stopped = audit.stop();
+    reject(new Error('audit read failed'));
+    await expect(running).resolves.toEqual([]);
+    await expect(stopped).resolves.toBeUndefined();
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors.mock.calls[0][0]).toBe('Wallet/ledger reconciliation pass failed');
+    expect(wallets.pageForAudit).toHaveBeenCalledTimes(1);
+    errors.mockRestore();
+  });
+
   it('starts no further page once stopped', async () => {
     let releaseFirst!: (rows: unknown[]) => void;
     const first = new Promise<unknown[]>((resolve) => (releaseFirst = resolve));
@@ -97,4 +117,52 @@ describe('LedgerBalanceAudit shutdown (Codex on #277, finding 3)', () => {
     await expect(audit.run()).resolves.toEqual([]);
     expect(wallets.pageForAudit).not.toHaveBeenCalled();
   });
+});
+
+describe('audit abandonment boundary (FU-323 C)', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it.each(['final page', 'full page', 'rejection'])(
+    'drops a late %s after a repeated stop tightens the deadline',
+    async (outcome) => {
+      jest.useFakeTimers();
+      const { walletsOpenTotal, walletLedgerDeviationsTotal } =
+        await import('../observability/metrics');
+      const gauges = [
+        jest.spyOn(walletsOpenTotal, 'set'),
+        jest.spyOn(walletLedgerDeviationsTotal, 'set'),
+      ];
+      let resolve!: (rows: unknown[]) => void;
+      let reject!: (error: Error) => void;
+      const { audit, wallets } = setup([
+        new Promise<unknown[]>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        }),
+      ]);
+      const errors = jest.spyOn(audit['logger'], 'error');
+      const running = audit.run();
+      await jest.advanceTimersByTimeAsync(0);
+      let stopped = false;
+      const first = audit.stop();
+      void first.then(() => {
+        stopped = true;
+      });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(false);
+      expect(audit.stop({ deadlineAt: Date.now() - 1 })).toBe(first);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(true);
+      if (outcome === 'rejection') reject(new Error('late private database detail'));
+      else resolve(outcome === 'full page' ? [wallet('a'), wallet('b')] : [wallet('a')]);
+      await running;
+      expect(gauges.every((gauge) => gauge.mock.calls.length === 0)).toBe(true);
+      expect(errors).not.toHaveBeenCalled();
+      expect(wallets.findEscrowAccount).not.toHaveBeenCalled();
+      expect(wallets.pageForAudit).toHaveBeenCalledTimes(1);
+    },
+  );
 });

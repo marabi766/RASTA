@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { RastaError } from '@rasta/nest-common';
+import { RastaError, assertWorkerActive, workerOperation } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { WalletRepository } from '../wallet/wallet.repository';
@@ -28,6 +28,7 @@ import {
 import {
   backoffSeconds,
   decideReconciliation,
+  established,
   needsProviderAnswer,
   shouldEscalate,
   type ProviderRefundAnswer,
@@ -124,7 +125,8 @@ export class PaymentReconciler {
 
   /** Runs in the task's tenant context (the sweeper sets it). */
   async reconcile(task: ClaimedTask): Promise<ReconcileResult> {
-    const result = await this.attempt(task);
+    const result = await workerOperation(() => this.attempt(task));
+    assertWorkerActive();
     paymentReconciliationTotal.inc({ service: SERVICE_NAME, result });
     return result;
   }
@@ -145,10 +147,11 @@ export class PaymentReconciler {
     const ownership = this.tasks.ownershipOf(task);
     let verdict: Verdict;
     try {
-      verdict = await this.prisma.transaction((tx) =>
-        this.apply(tx, task, ownership, answer, SWEEPER),
+      verdict = await workerOperation(() =>
+        this.prisma.transaction((tx) => this.apply(tx, task, ownership, answer, SWEEPER)),
       );
     } catch (error) {
+      assertWorkerActive();
       if (error instanceof LeaseLost) {
         this.logger.warn(
           `Reconciliation task ${task.id}: lease lost before the write; nothing moved`,
@@ -162,8 +165,20 @@ export class PaymentReconciler {
       return this.retry(task, 'APPLY_FAILED', intent);
     }
 
+    assertWorkerActive();
+    if ('resolution' in verdict) {
+      this.logger.log(
+        `Reconciliation task ${task.id}: payment intent ${task.paymentIntentId} resolved as ${verdict.resolution}`,
+      );
+    }
     switch (verdict.action) {
       case 'RECORD_REFUNDED':
+        paymentIntentsTotal.inc({
+          service: SERVICE_NAME,
+          provider: this.provider.name,
+          simulated: String(this.provider.simulated),
+          outcome: 'REFUNDED',
+        });
         return 'resolved_refunded';
       case 'RETURN_HOLD':
         return verdict.resolution === 'REFUND_DECLINED'
@@ -190,15 +205,16 @@ export class PaymentReconciler {
     }
   }
 
-  /** The provider's record of the exact attempt, or `UNREACHABLE`. Never throws. */
+  /** The provider's record or `UNREACHABLE`; abandonment bypasses ordinary recovery. */
   private async ask(task: ClaimedTask, intent: PaymentIntent): Promise<ProviderRefundAnswer> {
-    const refund = task.kind === 'REFUND';
     try {
-      const said = await this.provider.getRefundStatus({
-        paymentIntentId: intent.id,
-        providerReference: intent.providerReference ?? intent.id,
-        idempotencyKey: `${intent.idempotencyKey}:${refund ? 'refund' : 'uncredited'}`,
-      });
+      const said = await workerOperation(() =>
+        this.provider.getRefundStatus({
+          paymentIntentId: intent.id,
+          providerReference: intent.providerReference ?? intent.id,
+          idempotencyKey: attemptKeyOf(intent, task.kind),
+        }),
+      );
       // "Never received" is evidence only from a provider that declares it
       // can vouch for an absence (Codex on #164, HIGH 2). The mock cannot:
       // its memory is one process's. Its NOT_FOUND is taken as unknown.
@@ -206,6 +222,7 @@ export class PaymentReconciler {
         said.refund === 'NOT_FOUND' && !this.provider.authoritativeAbsence
           ? { ...said, authoritative: false }
           : said;
+      assertWorkerActive();
       paymentProviderRefundStatusTotal.inc({
         service: SERVICE_NAME,
         provider: this.provider.name,
@@ -215,6 +232,7 @@ export class PaymentReconciler {
       });
       return answer;
     } catch (error) {
+      assertWorkerActive();
       paymentProviderRefundStatusTotal.inc({
         service: SERVICE_NAME,
         provider: this.provider.name,
@@ -306,6 +324,20 @@ export class PaymentReconciler {
         return verdict;
     }
 
+    // The provider's answer this effect rests on, kept with it (#1017 r3). An
+    // operator's resolution is not the provider's: it is its own record.
+    const answered = resolver.operator ? null : established(answer);
+    if (answered) {
+      await this.tasks.recordOutcome(tx, {
+        organizationId: row.organizationId,
+        paymentIntentId: row.id,
+        kind: task.kind,
+        attemptKey: attemptKeyOf(row, task.kind),
+        outcome: answered,
+        providerReference: null,
+      });
+    }
+
     if ((await ownership.finish(tx, verdict.resolution, resolver.actor)) !== 1) {
       throw new LeaseLost();
     }
@@ -331,10 +363,6 @@ export class PaymentReconciler {
         ...(resolver.operator ?? {}),
       },
     });
-    this.logger.log(
-      `Reconciliation task ${task.id}: payment intent ${row.id} resolved as ${verdict.resolution}` +
-        (resolver.operator ? ` by an approved operator resolution` : ''),
-    );
     return verdict;
   }
 
@@ -362,6 +390,7 @@ export class PaymentReconciler {
       this.env.ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS,
     );
     const put = await this.tasks.retryLater(task, outcome, delay, true);
+    assertWorkerActive();
     this.logger.warn(
       `Reconciliation task ${task.id} (attempt ${attempts}): ${outcome}; asking again in ${delay}s`,
     );
@@ -388,6 +417,7 @@ export class PaymentReconciler {
       this.env.ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS,
     );
     const put = await this.tasks.retryLater(task, outcome, delay, false);
+    assertWorkerActive();
     return put === 1 ? 'deferred' : 'lost_lease';
   }
 
@@ -434,6 +464,7 @@ export class PaymentReconciler {
       }
       return true;
     });
+    assertWorkerActive();
     if (!escalated) return 'lost_lease';
     this.logger.error(
       `Reconciliation task ${task.id}: payment intent ${task.paymentIntentId} escalated ` +
@@ -450,6 +481,11 @@ const MARKERS = new Set([
   'REFUND_DECLINED_RELEASE_PENDING',
   'CAPTURED_REFUND_UNKNOWN',
 ]);
+
+/** The key a refund attempt is asked with, at the provider and in its recorded answer. */
+function attemptKeyOf(intent: PaymentIntent, kind: AppliedTask['kind']): string {
+  return `${intent.idempotencyKey}:${kind === 'REFUND' ? 'refund' : 'uncredited'}`;
+}
 
 /** The marker as the event's closed set has it, or null. */
 function markerOf(

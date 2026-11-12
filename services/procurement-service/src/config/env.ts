@@ -7,8 +7,11 @@ import {
   RFQ_CANCELLATION_CODE_PATTERN,
 } from '@rasta/contracts';
 import {
+  claimedItemBudgetMs,
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
   authEnvSchema,
   baseEnvSchema,
+  boundedWholeNumberEnv,
   databaseEnvSchema,
   fixedEnvMessages,
   kafkaEnvSchema,
@@ -22,6 +25,9 @@ import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-prov
 
 /** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
 const { fixed, seal } = fixedEnvMessages();
+const SWEEP_LEASE_TOO_SHORT = fixed(
+  'Sweeper lease must exceed the complete claimed-item budget (claim, request, processing, failure recording and margin)',
+);
 
 const KEK_CURRENT_NOT_IN_KEKS = fixed(
   'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
@@ -244,7 +250,7 @@ export const procurementEnvSchema = baseEnvSchema
       .pipe(roleList('PROCUREMENT_DEMAND_ROLES', { min: 1 })),
 
     /** Q-10: seven days. At most a year: a window nobody closes is not a window. */
-    PROCUREMENT_AGGREGATION_WINDOW_HOURS: z.coerce.number().int().min(1).max(8760).prefault(168),
+    PROCUREMENT_AGGREGATION_WINDOW_HOURS: boundedWholeNumberEnv(1, 8760, 168),
 
     /**
      * Q-10: no threshold. A whole quantity of the product's base unit, as a demand's is (Q-105).
@@ -369,12 +375,7 @@ export const procurementEnvSchema = baseEnvSchema
      * but a well-formed 200, refuses the issue (503; 504 past the timeout) and writes nothing.
      */
     SUPPLIER_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3108'),
-    PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(100)
-      .max(60_000)
-      .prefault(5000),
+    PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: boundedWholeNumberEnv(100, 60_000, 5000),
 
     /**
      * The sweeper that closes RFQs at their deadline (ADR-070 § 3, plan PR 6; the shape of the
@@ -383,30 +384,15 @@ export const procurementEnvSchema = baseEnvSchema
      * transaction of its own. A failed one waits `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS ×
      * 2^failures)`. A person of the buyer may close one after its deadline too: the same command.
      */
-    PROCUREMENT_RFQ_CLOSE_SWEEP_INTERVAL_MS: z.coerce
-      .number()
-      .int()
-      .min(500)
-      .max(300_000)
-      .prefault(5000),
-    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_INTERVAL_MS: boundedWholeNumberEnv(500, 300_000, 5000),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: boundedWholeNumberEnv(1, 500, 20),
     PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS: z
       .string()
       .regex(/^[0-9]{1,4}$/)
       .prefault('60')
       .pipe(wholeNumberEnv(10, 3600)),
-    PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(3600)
-      .prefault(10),
-    PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(86_400)
-      .prefault(900),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS: boundedWholeNumberEnv(1, 3600, 10),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS: boundedWholeNumberEnv(1, 86_400, 900),
 
     /**
      * A technical limit, not a business rule (PR-327 r2 F1, PR-338 r1 F1, Q-119 note of
@@ -462,30 +448,15 @@ export const procurementEnvSchema = baseEnvSchema
      * `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^failures)`;
      * `RastaProcurementWindowSweepRetriesHigh` fires past 5 failures.
      */
-    PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS: z.coerce
-      .number()
-      .int()
-      .min(500)
-      .max(300_000)
-      .prefault(5000),
-    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS: boundedWholeNumberEnv(500, 300_000, 5000),
+    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: boundedWholeNumberEnv(1, 500, 20),
     PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z
       .string()
       .regex(/^[0-9]{1,4}$/)
       .prefault('60')
       .pipe(wholeNumberEnv(10, 3600)),
-    PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(3600)
-      .prefault(10),
-    PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(86_400)
-      .prefault(900),
+    PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS: boundedWholeNumberEnv(1, 3600, 10),
+    PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS: boundedWholeNumberEnv(1, 86_400, 900),
 
     /**
      * The batch of a window's end (`MAX_FOLLOW_BATCH_SIZE`): the most live demands one transaction
@@ -504,6 +475,18 @@ export const procurementEnvSchema = baseEnvSchema
       .prefault(2000),
   })
   .superRefine((env, ctx) => {
+    for (const field of [
+      'PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS',
+      'PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS',
+    ] as const) {
+      if (env[field] * 1000 <= claimedItemBudgetMs(PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS))
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: SWEEP_LEASE_TOO_SHORT,
+        });
+    }
+
     // The replay fence refuses a deadline later than claim + TTL − B (shared/idempotency.ts). The
     // portal's window is capped by the same constant (PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS), so the
     // service must accept a window of that size on its slowest legal clock:

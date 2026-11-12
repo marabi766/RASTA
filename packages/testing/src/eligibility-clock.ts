@@ -60,6 +60,7 @@ export async function makeDue(
 // refusal. The row count must equal the number of distinct keys, so a key that
 // matched nothing, or matched more than one row, refuses.
 const fixtures = {
+  windowExpired: `UPDATE demand_aggregation SET sweep_lease_until = now() - interval '1 second' WHERE id = ANY($1::text[])`,
   resolutionDue: `UPDATE notification_intent SET next_resolution_at = now() - interval '1 second' WHERE id = ANY($1::text[])`,
   resolutionParked: `UPDATE notification_intent SET next_resolution_at = now() + interval '24 hours' WHERE id = ANY($1::text[])`,
   policyReleased: `UPDATE policy_reconciliation_task SET lease_until = NULL, lease_token = NULL WHERE id = ANY($1::text[]) AND status = 'PENDING'`,

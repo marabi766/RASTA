@@ -126,7 +126,7 @@ describe('nearby search', () => {
       `DELETE FROM asset WHERE organization_id = ANY($1::text[])`,
       [org.a, org.b],
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('returns every status in range when the flag is omitted', async () => {

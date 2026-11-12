@@ -110,7 +110,7 @@ describe('an order line agrees to a published offer price, in the database (D-15
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
     await owner.$disconnect();
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** Runs `work` as the owner, then rolls everything back. Resolves with what it returned. */

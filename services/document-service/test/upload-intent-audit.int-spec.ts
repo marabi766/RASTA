@@ -37,7 +37,7 @@ describe('upload intent audit (L7-14)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const request = (organizationId: string, userId: string) =>

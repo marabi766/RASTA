@@ -188,7 +188,10 @@ async function boot(broker: StubKafkaBroker, options: { relayRow: boolean }): Pr
       { provide: ENV, useValue: env },
       { provide: LOGGER, useValue: silent },
       { provide: PrismaOutboxStore, useValue: store },
-      { provide: PrismaService, useValue: { isHealthy: async () => true } },
+      {
+        provide: PrismaService,
+        useValue: { isHealthy: async () => true, stop: async () => undefined },
+      },
     ],
   })
   class ProductionShutdownWiring implements OnApplicationShutdown {

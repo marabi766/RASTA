@@ -43,7 +43,7 @@ describe('driver registration needs a live member of the organization (task 095)
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const newUser = () => `USR-ITEST-${id('M').slice(-10)}`;

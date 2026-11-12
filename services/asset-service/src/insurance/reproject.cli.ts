@@ -57,7 +57,9 @@ async function main(): Promise<number> {
     process.stdout.write(`${JSON.stringify(report)}\n`);
     return 0;
   } finally {
-    await prisma.onModuleDestroy();
+    await prisma.stop().then(({ drained }) => {
+      if (!drained) throw new Error('Database close UNCONFIRMED');
+    });
   }
 }
 

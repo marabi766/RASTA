@@ -40,7 +40,7 @@ withKafka('economic committed effects survive a terminal consumer process restar
     await admin?.disconnect();
     if (prisma) {
       await cleanup(prisma, [org.a, org.b, org.c]);
-      await prisma.onModuleDestroy();
+      await prisma.stop();
     }
   });
 

@@ -53,7 +53,7 @@ describe('first rollout of the ownership generation (#240 r15)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const event = (eventName: string, payload: Record<string, unknown>): EventEnvelope => ({

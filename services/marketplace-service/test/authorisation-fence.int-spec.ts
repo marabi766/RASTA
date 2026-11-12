@@ -43,7 +43,7 @@ describe('an authorisation against a concurrent dispute (FU-178, D-138)', () => 
 
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asBuyer = <T>(fn: () => Promise<T>) =>

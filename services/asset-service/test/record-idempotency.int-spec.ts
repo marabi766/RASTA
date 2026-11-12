@@ -239,7 +239,7 @@ describe('recording an insurance policy, an inspection or a document reference u
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const machine = async (organizationId = org.a): Promise<string> => {
@@ -690,7 +690,7 @@ describe('attaching a document: whose it is is asked of document-service first',
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       [org.a, org.b],
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const machine = async (): Promise<string> =>

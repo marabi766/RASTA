@@ -31,7 +31,7 @@ describe('the idempotency store keeps tenants apart (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const store = () => wiring.idempotency;

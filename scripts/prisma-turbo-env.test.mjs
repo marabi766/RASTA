@@ -14,7 +14,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MIGRATION_REFUSALS } from './prisma-lib.mjs';
 import { ROOT, allows, taskPatterns, turbo, workspacePackages } from './turbo-env-lib.mjs';
@@ -121,5 +122,52 @@ test(
     assert.doesNotMatch(output, /not-a-duration/);
     assert.doesNotMatch(output, /P1001/, 'prisma.mjs went on to run Prisma');
     assert.notEqual(run.status, 0);
+  },
+);
+
+// PR #1085 r1 F2: a task's `pnpm run` reinstalls stale dependencies first, and without
+// PRISMA_SKIP_POSTINSTALL_GENERATE that reinstall generates the Prisma client from the
+// @prisma/client hook, outside scripts/prisma-generate.mjs. Asked of turbo itself, with the real
+// turbo.json in a one-package workspace: every task prints the variable its pnpm was handed.
+test(
+  'turbo hands PRISMA_SKIP_POSTINSTALL_GENERATE to the pnpm of every task',
+  { timeout: 180_000 },
+  () => {
+    const tasks = Object.keys(turbo.tasks).filter((task) => !task.includes('#'));
+    assert.ok(tasks.length >= 13, 'every task of turbo.json is run');
+    const print = `node -e "console.log('RECEIVED', process.env.npm_lifecycle_event, process.env.PRISMA_SKIP_POSTINSTALL_GENERATE)"`;
+    const turboBinary = join(ROOT, 'node_modules', '.bin', 'turbo');
+    const directory = mkdtempSync(join(tmpdir(), 'prisma-turbo-env-'));
+    try {
+      const write = (path, value) =>
+        writeFileSync(
+          join(directory, path),
+          typeof value === 'string' ? value : JSON.stringify(value),
+        );
+      const root = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+      mkdirSync(join(directory, 'probe'));
+      write('turbo.json', readFileSync(join(ROOT, 'turbo.json'), 'utf8'));
+      write('package.json', { name: 'root', packageManager: root.packageManager });
+      write('pnpm-workspace.yaml', 'packages:\n  - probe\n');
+      write('probe/package.json', {
+        name: 'probe',
+        scripts: Object.fromEntries(tasks.map((task) => [task, print])),
+      });
+      const run = spawnSync(turboBinary, ['run', ...tasks, '--concurrency=4'], {
+        cwd: directory,
+        env: {
+          ...process.env,
+          PRISMA_SKIP_POSTINSTALL_GENERATE: 'true',
+          TURBO_TELEMETRY_DISABLED: '1',
+        },
+        encoding: 'utf8',
+        timeout: 150_000, // a synchronous call: the test's own timeout cannot end it
+      });
+      assert.equal(run.status, 0, `${run.error ?? ''}\n${run.stdout}\n${run.stderr}`);
+      for (const task of tasks)
+        assert.match(run.stdout, new RegExp(`RECEIVED ${task} true$`, 'm'), task);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   },
 );

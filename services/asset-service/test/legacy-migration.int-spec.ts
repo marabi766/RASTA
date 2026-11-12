@@ -153,7 +153,7 @@ describe('legacy data migration (20260925110000)', () => {
   });
 
   afterAll(async () => {
-    await lockWatcher?.onModuleDestroy();
+    await lockWatcher?.stop();
     const orgs = [org.a, org.b, orgC];
     await prisma.client.$executeRawUnsafe(
       `DELETE FROM outbox_message WHERE organization_id = ANY($1::text[])`,
@@ -178,7 +178,7 @@ describe('legacy data migration (20260925110000)', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('computes the canonical form exactly as the application does', async () => {
@@ -207,7 +207,7 @@ describe('legacy data migration (20260925110000)', () => {
         });
       }
     } finally {
-      await owner.onModuleDestroy();
+      await owner.stop();
     }
   });
 

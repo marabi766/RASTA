@@ -1,5 +1,11 @@
+import { WorkerBoundary, workerOperation } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
-import { RastaError, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import {
+  RastaError,
+  claimWhenReady,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { rfqCloseSweepTotal } from '../observability/metrics';
@@ -13,6 +19,7 @@ export interface RfqCloseSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the RFQ. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A failed RFQ waits `min(max, base × 2^attempts)` seconds before it is claimed again. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -52,7 +59,7 @@ const METRIC_RESULT: Record<RfqCloseResult, string> = {
  * Closes the RFQs whose quotation deadline has passed (ADR-070 § 3, plan PR 6), so an RFQ is CLOSED
  * on time whether or not a person of the buyer closes it — the shape of the aggregation window
  * sweeper (plan PR 2) and of construction's `TenderCloseSweeper` (ADR-065 § 3). Each sweep claims a
- * bounded batch in one statement (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any
+ * bounded number, one when ready, in one statement (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any
  * number of instances may run, and closes each in a transaction of its own, in the RFQ's own
  * tenant, via `RfqCloseService`.
  *
@@ -63,6 +70,7 @@ const METRIC_RESULT: Record<RfqCloseResult, string> = {
  */
 export class RfqCloseSweeper {
   private readonly logger = new Logger(RfqCloseSweeper.name);
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
   private stopping?: Promise<void>;
@@ -103,33 +111,39 @@ export class RfqCloseSweeper {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
       return;
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
-        'RFQ close sweep still running at the shutdown deadline; abandoned. The close in flight ' +
-          'rolls back and its lease lets the next sweep take the RFQ again',
+        'Sweep abandoned at shutdown deadline; in-flight outcome unconfirmed; lease/fence govern recovery',
       );
     }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
-  async runOnce(): Promise<RfqCloseSweepOutcome> {
-    const fence = ulid();
-    const claimed = await this.rfqs.claimDue(
+  runOnce(): Promise<RfqCloseSweepOutcome> {
+    return this.boundary.run(() => this.sweep());
+  }
+
+  private async sweep(): Promise<RfqCloseSweepOutcome> {
+    const claimed = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      fence,
+      () => this.stopped,
+      () => this.rfqs.claimDue(1, this.options.leaseSeconds, ulid()),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: RfqCloseSweepOutcome = {
-      claimed: claimed.length,
+      claimed: 0,
       closed: 0,
       noop: 0,
       notDue: 0,
@@ -137,15 +151,17 @@ export class RfqCloseSweeper {
       failed: 0,
     };
 
-    for (const rfq of claimed) {
+    for await (const rfq of claimed) {
+      outcome.claimed += 1;
       // Stopping: the RFQ keeps its claim until the lease runs out, then any sweep takes it.
       if (this.stopped) break;
       const target = { organizationId: rfq.organizationId, rfqId: rfq.id, fence: rfq.fence };
       try {
-        const result = await this.service.close(target);
+        const result = await workerOperation(() => this.service.close(target));
         outcome[COUNTED[result]] += 1;
         rfqCloseSweepTotal.inc({ service: SERVICE_NAME, result: METRIC_RESULT[result] });
       } catch (error) {
+        if (this.boundary.abandoned) return outcome;
         outcome.failed += 1;
         rfqCloseSweepTotal.inc({ service: SERVICE_NAME, result: 'failed' });
         this.logger.warn(`Closing RFQ ${rfq.id} failed: ${codeOf(error)}; retried after a backoff`);
@@ -163,7 +179,7 @@ export class RfqCloseSweeper {
       }
     }
 
-    if (outcome.claimed > 0) {
+    if (outcome.claimed > 0 && !this.boundary.abandoned) {
       this.logger.log(
         `RFQ close sweep: claimed ${outcome.claimed}, closed ${outcome.closed}, noop ${outcome.noop}, ` +
           `not due ${outcome.notDue}, lost ${outcome.lost}, failed ${outcome.failed}`,

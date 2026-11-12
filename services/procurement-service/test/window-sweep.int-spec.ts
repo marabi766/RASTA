@@ -1,3 +1,4 @@
+import { setEligibilityFixture } from '@rasta/testing';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { registry } from '@rasta/observability';
 import { demandIdsDigest } from '../src/events/events';
@@ -267,6 +268,28 @@ describe('the window sweeper', () => {
   });
 
   describe('safe under concurrency', () => {
+    it('bounds concurrent claims over many due windows without duplicate leases', async () => {
+      const { harness, clock } = await api({ min: 0 });
+      const other = (await api()).harness;
+      for (let i = 0; i < 20; i++) await dueWindow(harness, clock, [1]);
+      const batches = await Promise.all(
+        [harness, other].map((h) =>
+          h.app.get(WindowSweepRepository).claimDue(1, 600, `limit-${h === harness}`),
+        ),
+      );
+      for (const batch of batches) expect(batch).toHaveLength(1);
+      expect(new Set(batches.flat().map((row) => row.id)).size).toBe(2);
+      for (const row of batches.flat()) {
+        await harness.app
+          .get(WindowSweepService)
+          .step(
+            { organizationId: row.organizationId, aggregationId: row.id, fence: row.fence },
+            60,
+          );
+      }
+      await sweepAll(harness.sweeper({ batchSize: 3 }));
+    });
+
     it('two sweepers at once end every window exactly once', async () => {
       const { harness, clock } = await api({ min: 0 });
       const windows = [];
@@ -529,7 +552,7 @@ describe('the window sweeper', () => {
       });
       const service = harness.app.get(WindowSweepService);
       const step = service.step.bind(service);
-      const stopping = harness.sweeper({ leaseSeconds: 1, batchSize: 500 });
+      const stopping = harness.sweeper({ batchSize: 500 });
       const spy = jest.spyOn(service, 'step').mockImplementation(async (target, lease) => {
         const done = await step(target, lease);
         if (target.aggregationId === seeded.aggregationId) void stopping.stop();
@@ -543,7 +566,7 @@ describe('the window sweeper', () => {
       expect(held).toMatchObject({ status: 'LAPSED', demandsToFollow: 80 });
       expect(held.sweepFence).not.toBeNull();
 
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      await setEligibilityFixture({ client: db }, 'windowExpired', [seeded.aggregationId]);
       await sweepAll(harness.sweeper());
       expect(await row(organizationId, seeded.aggregationId)).toMatchObject({
         demandsToFollow: 0,

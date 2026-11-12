@@ -98,6 +98,6 @@ it('tenant reassignment refusal rolls back ledger, parent, outbox and consumed k
       expect(await prisma.client.idempotencyKey.count({ where: { key } })).toBe(0);
     });
   } finally {
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   }
 });

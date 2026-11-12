@@ -739,6 +739,9 @@ export async function cleanup(
         for (const [table, trigger] of [
           ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
           ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
+          // The payment evidence (#1017 r3): append-only, and it holds tasks and intents.
+          ['payment_provider_outcome', 'trg_payment_provider_outcome_kept'],
+          ['payment_reconciliation_decision', 'trg_payment_reconciliation_decision_kept'],
         ]) {
           // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
           await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
@@ -760,7 +763,6 @@ export async function cleanup(
       // Children first: each foreign key here is ON DELETE RESTRICT.
       'payment_reconciliation_task',
       'payment_refund_decline',
-      'payment_intent',
       'idempotency_key',
     ]) {
       await client.$executeRawUnsafe(
@@ -779,6 +781,8 @@ export async function cleanup(
             'wallet_hold DISABLE TRIGGER trg_wallet_hold_reference_bound',
             '"transaction" DISABLE TRIGGER trg_transaction_statement_obligation_fixed',
             '"transaction" DISABLE TRIGGER trg_transaction_terms_fixed',
+            // A payment intent is never erased either (FU-230); its children are gone above.
+            'payment_intent DISABLE TRIGGER trg_payment_intent_terms_fixed',
           ];
           for (const guard of guards) {
             // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
@@ -786,6 +790,10 @@ export async function cleanup(
           }
           await tx.$executeRawUnsafe(
             `DELETE FROM wallet_hold WHERE organization_id LIKE ANY($1::text[])`,
+            orgs,
+          );
+          await tx.$executeRawUnsafe(
+            `DELETE FROM payment_intent WHERE organization_id LIKE ANY($1::text[])`,
             orgs,
           );
           await tx.$executeRawUnsafe(
@@ -972,6 +980,68 @@ export async function coverByHand(accountId: string, amountMinor: bigint): Promi
         organizationId,
         currency,
       );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+/**
+ * Writes a payment-intent state the database now refuses: a row from before a column existed, or
+ * one forged to prove a reader refuses it (FU-230). As the owner, with
+ * `trg_payment_intent_terms_fixed` and `trg_payment_intent_evidenced` lifted for this one write,
+ * in one transaction that restores them.
+ */
+export async function plantPaymentIntent(sql: string, ...params: unknown[]): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE payment_intent DISABLE TRIGGER trg_payment_intent_terms_fixed',
+      );
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE payment_intent DISABLE TRIGGER trg_payment_intent_evidenced',
+      );
+      await tx.$executeRawUnsafe(sql, ...params);
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE payment_intent ENABLE TRIGGER trg_payment_intent_evidenced',
+      );
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE payment_intent ENABLE TRIGGER trg_payment_intent_terms_fixed',
+      );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+/**
+ * Rewrites a reconciliation task's history the way a build without task writes (B0) left it
+ * (#1017 r3): the runtime role may no longer finish, reopen or remove a decided task. As the
+ * owner, with the append-only evidence triggers lifted for these statements only, in one
+ * transaction that restores them. Each statement is `[sql, ...params]`.
+ */
+export async function plantPaymentTask(...statements: [string, ...unknown[]][]): Promise<void> {
+  const lifted = [
+    ['payment_reconciliation_decision', 'trg_payment_reconciliation_decision_kept'],
+    ['payment_provider_outcome', 'trg_payment_provider_outcome_kept'],
+  ];
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      for (const [table, trigger] of lifted) {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+        await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+      }
+      for (const [sql, ...params] of statements) await tx.$executeRawUnsafe(sql, ...params);
+      for (const [table, trigger] of lifted) {
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
+      }
     });
   } finally {
     await owner.$disconnect();

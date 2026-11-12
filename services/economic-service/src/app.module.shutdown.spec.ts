@@ -1,3 +1,4 @@
+import { PrismaService } from './prisma/prisma.service';
 import 'reflect-metadata';
 import {
   OutboxPurgeScheduler,
@@ -7,6 +8,7 @@ import {
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { AppModule } from './app.module';
+import { EconomicGaugeSampler } from './observability/gauge-sampler';
 import { RewardTriggerConsumer } from './consumers/reward-trigger.consumer';
 import { SettlementAuthorityConsumer } from './consumers/settlement-authority.consumer';
 import { StatementSettlementConsumer } from './consumers/statement-settlement.consumer';
@@ -92,9 +94,11 @@ describe('AppModule shutdown wiring (D-052)', () => {
       StatementSettlementConsumer,
       RewardTriggerConsumer,
       LedgerBalanceAudit,
+      EconomicGaugeSampler,
       // Closed last, after the drain, by the same deadline (D-052 phase 4b):
       // app.module.publisher-close.spec.ts.
       KafkaEventPublisher,
+      PrismaService,
     ];
     expect(new Set(inject)).toEqual(new Set([...expected, ENV]));
     expect(inject).toHaveLength(expected.length + 1);
@@ -157,9 +161,9 @@ describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
       await consumer.stop({ deadlineAt: 1234 });
       await consumer.onApplicationShutdown();
 
-      // The second call carries no deadline of its own; `EventConsumer.stop`
-      // returns the stop already in progress (nest-common's lifecycle spec).
-      expect(consumerStop.mock.calls).toEqual([[{ deadlineAt: 1234 }], [undefined]]);
+      const calls = [[{ deadlineAt: 1234 }]];
+      expect(consumerStop.mock.calls).toHaveLength(calls.length);
+      expect(consumerStop.mock.calls).toEqual(calls);
     },
   );
 });

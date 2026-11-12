@@ -52,7 +52,7 @@ describe('maintenance state (internal)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function repair(assetId: string): Promise<string> {

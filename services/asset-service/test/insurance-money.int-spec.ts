@@ -113,7 +113,7 @@ describe('insurance money is never negative', () => {
         org.a,
       );
     }
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   describe('written directly as the runtime role', () => {

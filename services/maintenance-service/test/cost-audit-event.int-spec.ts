@@ -42,7 +42,7 @@ describe('cost-line audit events (L7-14)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function liveRepair(): Promise<{ assetId: string; requestId: string; orderId: string }> {

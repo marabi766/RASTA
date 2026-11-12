@@ -70,8 +70,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
   });
 
   afterAll(async () => {
-    await a.onModuleDestroy();
-    await b.onModuleDestroy();
+    await a.stop();
+    await b.stop();
     await dropProtocolSchema();
   });
 

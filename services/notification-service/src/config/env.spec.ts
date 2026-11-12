@@ -10,7 +10,11 @@ import {
   SERVICE_NAME,
 } from './env';
 import { withUtcSession, envEnumProbes } from '@rasta/config';
-import { notificationOperationBudgets } from './operation-budgets';
+import {
+  notificationItemBudgetMs,
+  SMTP_TIMEOUT_PHASES,
+  notificationOperationBudgets,
+} from './operation-budgets';
 
 /** The minimum a running service needs; every test builds on it. */
 const REQUIRED = {
@@ -101,7 +105,7 @@ describe('notification-service configuration', () => {
     expect(env.NOTIFICATION_RECIPIENT_CACHE_TTL_SECONDS).toBe(60);
     expect(env.NOTIFICATION_DEDUPE_RETENTION_DAYS).toBe(45);
     expect(env.NOTIFICATION_IDENTITY_REQUEST_TIMEOUT_MS).toBe(5_000);
-    expect(env.NOTIFICATION_RESOLUTION_LEASE_SECONDS).toBe(60);
+    expect(env.NOTIFICATION_RESOLUTION_LEASE_SECONDS).toBe(180);
     expect(env.NOTIFICATION_RESOLUTION_BACKOFF_MAX_SECONDS).toBe(600);
   });
 
@@ -283,3 +287,58 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
     );
   });
 });
+
+// FU-304: an explicitly empty value must not silently replace the default with zero.
+describe('strict whole-number optional-zero settings', () => {
+  const name = 'NOTIFICATION_RECIPIENT_CACHE_TTL_SECONDS';
+  const loadSetting = (value?: string) => loadNotificationEnv({ ...REQUIRED, [name]: value })[name];
+
+  it('preserves the unset default and both inclusive bounds', () => {
+    expect(loadSetting()).toBe(60);
+    expect(loadSetting('0')).toBe(0);
+    expect(loadSetting('3600')).toBe(3600);
+  });
+
+  it.each([
+    '',
+    ' ',
+    '\t',
+    ' 60 ',
+    '+60',
+    '-1',
+    '60.0',
+    '60e0',
+    '0x3c',
+    '۰',
+    '٠',
+    '60\n',
+    '3601',
+    '0'.repeat(4) + '60',
+  ])('refuses malformed or out-of-range input %j', (value) => {
+    expect(() => loadSetting(value)).toThrow(name);
+  });
+});
+
+// The batch controls work per tick; it never multiplies an outstanding lease.
+it.each([
+  ['NOTIFICATION_RESOLUTION_LEASE_SECONDS', 'NOTIFICATION_IDENTITY_REQUEST_TIMEOUT_MS', 1],
+  ['NOTIFICATION_MAIL_LEASE_SECONDS', 'NOTIFICATION_SMTP_TIMEOUT_MS', SMTP_TIMEOUT_PHASES],
+] as const)('refuses infeasible %s without clamping', (lease, request, phases) => {
+  const source = {
+    ...REQUIRED,
+    [request]: '1000',
+    NOTIFICATION_RESOLUTION_BATCH_SIZE: '500',
+    NOTIFICATION_MAIL_BATCH_SIZE: '100',
+  };
+  const seconds = notificationItemBudgetMs(phases * 1000) / 1000;
+  expect(() => loadNotificationEnv({ ...source, [lease]: String(seconds) })).toThrow(lease);
+  expect(loadNotificationEnv({ ...source, [lease]: String(seconds + 1) })[lease]).toBe(seconds + 1);
+});
+
+it.each(['NOTIFICATION_RESOLUTION_LEASE_SECONDS', 'NOTIFICATION_MAIL_LEASE_SECONDS'] as const)(
+  '%s refuses malformed lease inputs',
+  (field) => {
+    for (const value of ['', ' ', '+180', '180.0', '1.8e2', '0xb4', '۱۸۰', '0'.repeat(4) + '180'])
+      expect(() => loadNotificationEnv({ ...REQUIRED, [field]: value })).toThrow(field);
+  },
+);

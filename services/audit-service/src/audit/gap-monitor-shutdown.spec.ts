@@ -1,7 +1,8 @@
+import { createSafePrismaClient } from '@rasta/nest-common';
 import { Test } from '@nestjs/testing';
 import { ENV } from '../tokens';
 import { AppModule } from '../app.module';
-import type { AuditRepository } from './audit.repository';
+import { AuditRepository } from './audit.repository';
 import { ReconciliationEvidenceMonitor } from './reconciliation-evidence-monitor';
 import {
   auditIngestionFailuresTotal,
@@ -15,9 +16,10 @@ import {
   auditTenderPendingOldestAgeSeconds,
 } from '../observability/metrics';
 import { PrismaService } from '../prisma/prisma.service';
+import { PrismaClient } from '../generated/prisma';
 import { RfqEvidenceRepository } from './rfq-evidence.repository';
 import { RfqGapMonitor } from './rfq-gap-monitor';
-import { SamplingLoop } from './sampling-loop';
+import { SamplingLoop, type SamplingSignal } from './sampling-loop';
 import { TenderEvidenceRepository } from './tender-evidence.repository';
 import { TenderGapMonitor } from './tender-gap-monitor';
 
@@ -38,6 +40,7 @@ function slowDatabase(heldQuery = 1) {
   });
   const state = { queries: 0, queriesAfterDisconnect: 0, disconnected: false };
   const client = {
+    $extends: (_extension: unknown): object => client,
     $connect: async () => undefined,
     $disconnect: async () => {
       state.disconnected = true;
@@ -102,8 +105,10 @@ describe.each([
     const sets = writes.map((metric) =>
       jest.spyOn(metric as { set?: () => void; inc: () => void }, 'set' in metric ? 'set' : 'inc'),
     );
-    const prisma = new PrismaService('postgresql://nobody:nothing@127.0.0.1:1/none');
-    Object.defineProperty(prisma, 'client', { value: client });
+    const prisma = new PrismaService('postgresql://nobody:nothing@127.0.0.1:1/none', 7000);
+    Object.defineProperty(prisma, 'client', {
+      value: createSafePrismaClient(() => client, 'DATABASE_URL_AUDIT'),
+    });
     const moduleRef = await Test.createTestingModule({
       providers: [
         { provide: PrismaService, useValue: prisma },
@@ -130,8 +135,10 @@ describe.each([
 
   it('finishes the sample in flight before the database disconnects: no query after $disconnect', async () => {
     const { client, state, release } = slowDatabase();
-    const prisma = new PrismaService('postgresql://nobody:nothing@127.0.0.1:1/none');
-    Object.defineProperty(prisma, 'client', { value: client });
+    const prisma = new PrismaService('postgresql://nobody:nothing@127.0.0.1:1/none', 7000);
+    Object.defineProperty(prisma, 'client', {
+      value: createSafePrismaClient(() => client, 'DATABASE_URL_AUDIT'),
+    });
     const moduleRef = await Test.createTestingModule({
       providers: [
         { provide: PrismaService, useValue: prisma },
@@ -172,6 +179,35 @@ describe.each([
 });
 
 describe('SamplingLoop', () => {
+  it.each([100, 10_000, NaN])(
+    'joins repeated stops at the earliest deadline (%s)',
+    async (next) => {
+      fakeClock();
+      try {
+        let signal!: SamplingSignal;
+        const loop = new SamplingLoop(async (current) => {
+          signal = current;
+          await new Promise<void>(() => undefined);
+        });
+        loop.start();
+        const first = loop.stop({ deadlineAt: Date.now() + 6000 });
+        const second = loop.stop({ deadlineAt: Date.now() + next });
+        expect(second).toBe(first);
+        const bound = Number.isFinite(next) ? Math.min(6000, next) : 0;
+        if (bound) {
+          await jest.advanceTimersByTimeAsync(bound - 1);
+          expect(signal.abandoned).toBe(false);
+          await jest.advanceTimersByTimeAsync(1);
+        }
+        await first;
+        expect(signal.abandoned).toBe(true);
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    },
+  );
+
   it('stops scheduling: no sample starts once stopped', async () => {
     jest.useFakeTimers();
     try {
@@ -270,6 +306,7 @@ describe('the other samplers at the shutdown deadline', () => {
         }),
     );
     const noop = { isRunning: () => true, start: async () => undefined } as never;
+    const hooks: (() => Promise<void>)[] = [];
     const module = new AppModule(
       noop,
       noop,
@@ -280,19 +317,109 @@ describe('the other samplers at the shutdown deadline', () => {
       {
         AUDIT_EXPECTED_ACTIVE_PRODUCERS: [],
       } as never,
-      { assertRuntimeRole: async () => undefined, beforeDisconnect: () => undefined } as never,
+      {
+        assertRuntimeRole: async () => undefined,
+        beforeDisconnect: (stop: () => Promise<void>) => hooks.push(stop),
+      } as never,
     );
     const set = jest.spyOn(auditPartitionRows, 'set');
     await module.onModuleInit();
     await settle();
     expect(partitionRowCounts).toHaveBeenCalledTimes(1);
 
-    const stopping = module.onApplicationShutdown();
+    const stopping = hooks[0]!();
     await jest.advanceTimersByTimeAsync(5_000);
     await stopping;
     release([{ partition: 'audit_event_default', rows: 9 }]);
     await settle();
 
     expect(set).not.toHaveBeenCalled();
+  });
+
+  it('all four real samplers share the configured Nest shutdown deadline before disconnect', async () => {
+    fakeClock();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reading = jest.fn(() => held);
+    const signals: SamplingSignal[] = [];
+    const prisma = new PrismaService('postgresql://test:test@127.0.0.1:1/test', 3000);
+    let abandonedAtDisconnect = false;
+    const disconnect = jest
+      .spyOn(PrismaClient.prototype, '$disconnect')
+      .mockImplementation(async () => {
+        abandonedAtDisconnect = signals.every((signal) => signal.abandoned);
+      });
+    jest.spyOn(PrismaClient.prototype, '$connect').mockResolvedValue();
+    const repository = {
+      countMissingReconciliationEvidence: async () => {
+        await reading();
+        return 7;
+      },
+      partitionRowCounts: async () => {
+        await reading();
+        return [{ partition: 'audit_event_default', rows: 9 }];
+      },
+    } as unknown as AuditRepository;
+    const gaps = {
+      pendingSummary: async (_age: number, signal: SamplingSignal) => {
+        signals.push(signal);
+        await reading();
+        return { held: 7, oldestAgeSeconds: 9, overdueCount: 1, newlyOverdue: ['held'] };
+      },
+    };
+    const env = {
+      AUDIT_EXPECTED_ACTIVE_PRODUCERS: [],
+      AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24,
+    } as never;
+    const noop = { start: async () => undefined } as never;
+    jest.spyOn(prisma, 'assertRuntimeRole').mockResolvedValue();
+    const capacity = new AppModule(noop, noop, noop, noop, noop, repository, env, prisma);
+    const sets = [
+      ...RFQ_WRITES,
+      ...TENDER_WRITES,
+      auditReconciliationEvidenceMissing,
+      auditPartitionRows,
+    ]
+      .filter((metric, i, all) => all.indexOf(metric) === i)
+      .map((metric) =>
+        jest.spyOn(
+          metric as { set?: () => void; inc: () => void },
+          'set' in metric ? 'set' : 'inc',
+        ),
+      );
+    const module = await Test.createTestingModule({
+      providers: [
+        { provide: PrismaService, useValue: prisma },
+        { provide: ENV, useValue: env },
+        { provide: AuditRepository, useValue: repository },
+        { provide: RfqEvidenceRepository, useValue: gaps },
+        { provide: TenderEvidenceRepository, useValue: gaps },
+        RfqGapMonitor,
+        TenderGapMonitor,
+        ReconciliationEvidenceMonitor,
+        { provide: AppModule, useValue: capacity },
+      ],
+    }).compile();
+    await module.init();
+    expect(reading).toHaveBeenCalledTimes(4);
+    expect(signals).toHaveLength(2);
+    let finished = false;
+    const closing = module.close().then(() => {
+      finished = true;
+    });
+    await jest.advanceTimersByTimeAsync(999);
+    expect(finished).toBe(false);
+    expect(disconnect).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1); // 3000ms configured minus 2000ms process reserve
+    expect(finished).toBe(true); // includes every Nest destroy/application hook
+    await closing;
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(abandonedAtDisconnect).toBe(true);
+    release();
+    await settle();
+    for (const set of sets) expect(set).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
   });
 });

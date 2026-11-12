@@ -99,8 +99,8 @@ describe('performance-event store (ADR-052 step 3)', () => {
   });
 
   afterAll(async () => {
-    await prisma.onModuleDestroy();
-    await owner.onModuleDestroy();
+    await prisma.stop();
+    await owner.stop();
   });
 
   function exec(sql: string): Promise<number> {

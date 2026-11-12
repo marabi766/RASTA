@@ -8,7 +8,12 @@
  * the list cannot fall behind it. A leaf module: nothing here imports the code
  * that uses it.
  */
-import { PRISMA_DEFAULT_TRANSACTION_BUDGET, type OperationBudget } from '@rasta/config';
+import {
+  claimedItemBudgetMs,
+  CLAIM_TRANSACTION_MAX_WAIT_MS,
+  PRISMA_DEFAULT_TRANSACTION_BUDGET,
+  type OperationBudget,
+} from '@rasta/config';
 import { outboxRenewalOperationBudget } from '@rasta/nest-common';
 import type { NotificationEnv } from './env';
 
@@ -19,6 +24,19 @@ import type { NotificationEnv } from './env';
  */
 export const INGEST_TRANSACTION_TIMEOUT_MS = 30_000;
 export const DISPATCH_TRANSACTION_TIMEOUT_MS = 30_000;
+export const DISPATCH_TRANSACTION_MAX_WAIT_MS = 15_000;
+/** Connection, greeting and socket allowances; SMTP timeouts are idle, not total deadlines. */
+export const SMTP_TIMEOUT_PHASES = 3;
+
+/** Admission arithmetic only; unresolved acknowledgements/commits are not cancelled. */
+export function notificationItemBudgetMs(requestMs: number): number {
+  return claimedItemBudgetMs(
+    DISPATCH_TRANSACTION_TIMEOUT_MS +
+      DISPATCH_TRANSACTION_MAX_WAIT_MS -
+      CLAIM_TRANSACTION_MAX_WAIT_MS,
+    requestMs,
+  );
+}
 
 export function notificationOperationBudgets(env: NotificationEnv): readonly OperationBudget[] {
   return [

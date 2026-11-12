@@ -339,8 +339,8 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await owner.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await owner.stop();
+    await prisma.stop();
   });
 
   it('A → B → C: each reference AND its timeline entry go back to the document’s owner (A’s to A, B’s to B)', async () => {
@@ -664,8 +664,8 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     );
 
     // Alone: close every other connection of this suite, keep one connection as the operator's session.
-    await prisma.onModuleDestroy();
-    await owner.onModuleDestroy();
+    await prisma.stop();
+    await owner.stop();
     const url = new URL(ownerDatabaseUrl());
     url.searchParams.set('connection_limit', '1');
     const operator = new PrismaService(url.toString());
@@ -673,7 +673,7 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     try {
       await expect(operator.client.$executeRawUnsafe(block('preflight'))).resolves.toBeDefined();
     } finally {
-      await operator.onModuleDestroy();
+      await operator.stop();
       // afterAll cleans up through these two.
       prisma = newPrisma();
       await prisma.onModuleInit();

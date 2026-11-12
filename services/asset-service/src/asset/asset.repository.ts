@@ -312,16 +312,17 @@ export class AssetRepository {
         valid_to: Date;
       }[]
     >`
-      UPDATE insurance_policy
-         SET status = 'EXPIRED', updated_at = ${now}
-       WHERE id IN (
-         SELECT id FROM insurance_policy
+      WITH picked AS MATERIALIZED (
+         SELECT id AS picked_id FROM insurance_policy
           WHERE status = 'ACTIVE' AND valid_to < ${now} AND deleted_at IS NULL
             AND ${KEEPABLE_AMOUNTS}
           ORDER BY valid_to, id
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
        )
+      UPDATE insurance_policy
+         SET status = 'EXPIRED', updated_at = ${now}
+        FROM picked WHERE insurance_policy.id = picked.picked_id
       RETURNING id, asset_id, organization_id, coverage::text AS coverage, valid_to
     `;
     return rows.map((row) => ({

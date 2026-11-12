@@ -48,7 +48,7 @@ describe('reward correctness F4–F7 (PostgreSQL)', () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
   });
   afterAll(async () => {
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   function rule(extra: Partial<CreateRewardRuleDto> = {}) {

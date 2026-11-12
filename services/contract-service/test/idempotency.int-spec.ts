@@ -102,7 +102,7 @@ describe('the idempotency store', () => {
 
   afterAll(async () => {
     await cleanup(organizations);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   describe('the key itself', () => {

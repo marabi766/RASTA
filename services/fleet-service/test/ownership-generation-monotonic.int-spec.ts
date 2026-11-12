@@ -101,7 +101,7 @@ describe('the ownership generation only rises (#240 r12)', () => {
       ALL,
     );
     await cleanup(prisma, ALL);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const event = (
@@ -313,7 +313,7 @@ describe('the ownership generation only rises (#240 r12)', () => {
           release();
           await holder;
         },
-        close: () => tiny.onModuleDestroy(),
+        close: () => tiny.stop(),
       };
     }
 

@@ -47,7 +47,7 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, other.buyer, other.supplier]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('returns what a reader needs of an open call, across tenants, until it is confirmed', async () => {

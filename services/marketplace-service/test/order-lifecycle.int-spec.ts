@@ -35,7 +35,7 @@ describe('order lifecycle (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asBuyer = <T>(fn: () => Promise<T>, organizationId = org.buyer) =>

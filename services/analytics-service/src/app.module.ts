@@ -4,6 +4,7 @@ import {
   type MiddlewareConsumer,
   type NestModule,
   type OnModuleDestroy,
+  type OnApplicationShutdown,
   type OnModuleInit,
 } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
@@ -155,7 +156,8 @@ import { loadAnalyticsEnv, SERVICE_NAME, type AnalyticsEnv } from './config/env'
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })
-export class AppModule implements NestModule, OnModuleInit, OnModuleDestroy {
+export class AppModule implements NestModule, OnModuleInit, OnModuleDestroy, OnApplicationShutdown {
+  private shutdownDeadlineAt?: number;
   constructor(
     private readonly prisma: PrismaService,
     private readonly projection: MaintenanceFactsConsumer,
@@ -182,7 +184,7 @@ export class AppModule implements NestModule, OnModuleInit, OnModuleDestroy {
    * The projection stops here, in the destroy phase, by one deadline inside
    * SHUTDOWN_TIMEOUT_MS (`outboxShutdownBudgetMs`: the timeout less the reserve for the rest of
    * the close — the D-052 budget every service's drain is held to). The database disconnects
-   * only afterwards, in `PrismaService.onApplicationShutdown` (#337 r1, Medium): Nest runs a
+   * only afterwards, in `AppModule.onApplicationShutdown` (#337 r1, Medium): Nest runs a
    * module's providers' destroy hooks before the module's own, so a disconnect in the destroy
    * phase came first and a handler still in flight lost its database under it.
    *
@@ -192,6 +194,12 @@ export class AppModule implements NestModule, OnModuleInit, OnModuleDestroy {
    * its marker keeps a second effect out.
    */
   async onModuleDestroy(): Promise<void> {
-    await this.projection.stop({ deadlineAt: Date.now() + outboxShutdownBudgetMs(this.env) });
+    this.shutdownDeadlineAt ??= Date.now() + outboxShutdownBudgetMs(this.env);
+    await this.projection.stop({ deadlineAt: this.shutdownDeadlineAt });
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    this.shutdownDeadlineAt ??= Date.now() + outboxShutdownBudgetMs(this.env);
+    await this.prisma.disconnect({ deadlineAt: this.shutdownDeadlineAt });
   }
 }

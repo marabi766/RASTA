@@ -111,7 +111,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
   afterAll(async () => {
     await http?.close();
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** A referred repair order, left OPEN unless `start` — an OPEN order already takes cost. */

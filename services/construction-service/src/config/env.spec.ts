@@ -1,3 +1,4 @@
+import { claimedItemBudgetMs } from '@rasta/config';
 import { envEnumProbes } from '@rasta/config';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -98,7 +99,12 @@ describe('the transaction timeout', () => {
   it('accepts a value from 5 s to a minute', () => {
     for (const value of ['5000', '30000', '60000']) {
       expect(
-        load({ CONSTRUCTION_TRANSACTION_TIMEOUT_MS: value }).CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+        load({
+          CONSTRUCTION_TRANSACTION_TIMEOUT_MS: value,
+          CONSTRUCTION_RECONCILE_LEASE_SECONDS: '300',
+          CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '300',
+          CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '300',
+        }).CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
       ).toBe(Number(value));
     }
   });
@@ -739,6 +745,9 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
   it('moves with the transaction timeout, above the opening', () => {
     const slowTransactions = {
       CONSTRUCTION_TRANSACTION_TIMEOUT_MS: '60000',
+      CONSTRUCTION_RECONCILE_LEASE_SECONDS: '300',
+      CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '300',
+      CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '300',
       CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: '30000',
     };
     expect(() => load({ ...slowTransactions, DATABASE_STATEMENT_TIMEOUT_MS: '30001' })).toThrow(
@@ -787,6 +796,28 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
 // FU-299: strict syntax applies to every replay/lease/retention budget in this service.
 describe('strict whole-number timing budgets', () => {
   it.each([
+    ['CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS', 100, 60_000, 5000],
+    ['CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS', 100, 60_000, 5000],
+    ['CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS', 100, 60_000, 5000],
+    ['CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS', 100, 600_000, 15_000],
+    ['CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS', 100, 30_000, 3000],
+    ['CONSTRUCTION_RECONCILE_INTERVAL_MS', 500, 300_000, 5000],
+    ['CONSTRUCTION_RECONCILE_BATCH_SIZE', 1, 500, 20],
+    ['CONSTRUCTION_RECONCILE_BACKOFF_SECONDS', 1, 3600, 30],
+    ['CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS', 1, 86_400, 900],
+    ['CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS', 500, 300_000, 5000],
+    ['CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE', 1, 500, 20],
+    ['CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS', 1, 3600, 10],
+    ['CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS', 1, 86_400, 900],
+    ['CONSTRUCTION_AWARD_CHECK_INTERVAL_MS', 500, 300_000, 10_000],
+    ['CONSTRUCTION_AWARD_CHECK_BATCH_SIZE', 1, 100, 10],
+    ['CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS', 1, 3600, 10],
+    ['CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS', 1, 86_400, 900],
+    ['CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS', 10, 604_800, 600],
+    ['CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS', 0, 31_536_000, 0],
+    ['CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS', 5_000, 120_000, 30_000],
+    ['CONSTRUCTION_TRANSACTION_TIMEOUT_MS', 5_000, 60_000, 15_000],
+    ['CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS', 0, 1000, 1],
     ['CONSTRUCTION_RECONCILE_LEASE_SECONDS', 10, 3600, 120],
     ['CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS', 10, 3600, 60],
     ['CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS', 10, 3600, 120],
@@ -796,8 +827,8 @@ describe('strict whole-number timing budgets', () => {
     '%s preserves its default and bounds, and refuses malformed text',
     (name, min, max, fallback) => {
       expect(load({ [name]: undefined })[name]).toBe(fallback);
-      for (const value of [min, max]) {
-        expect(load({ [name]: String(value) })[name]).toBe(value);
+      for (const value of [min, max, fallback]) {
+        expect(constructionEnvSchema.shape[name].parse(String(value))).toBe(value);
       }
       for (const value of [
         '',
@@ -818,10 +849,34 @@ describe('strict whole-number timing budgets', () => {
         `0x${min.toString(16)}`,
         String(min - 1),
         String(max + 1),
-        '0'.repeat(String(max).length + 1),
+        '0'.repeat(String(max).length + 1 - String(min).length) + String(min),
       ]) {
         expect(() => load({ [name]: value })).toThrow(name);
       }
     },
   );
+});
+
+describe('FU-320 complete claimed-item lease budget', () => {
+  it.each([
+    'CONSTRUCTION_RECONCILE_LEASE_SECONDS',
+    'CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS',
+    'CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS',
+  ])('%s refuses an infeasible lease and accepts the defaults', (field) => {
+    expect(() => load()).not.toThrow();
+    expect(() => load({ [field]: '10' })).toThrow(field);
+    const requestMs = field.includes('RECONCILE') ? 3000 : field.includes('AWARD') ? 5000 : 0;
+    const bound = claimedItemBudgetMs(15_000, requestMs);
+    expect(() => load({ [field]: String(bound / 1000) })).toThrow(field);
+    expect(() => load({ [field]: String(bound / 1000 + 1) })).not.toThrow();
+  });
+  it('refuses the 10-second lease / 60-second supplier trigger; an adequate lease accepts it', () => {
+    const trigger = {
+      CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '10',
+      CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: '60000',
+      CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: '1',
+    };
+    expect(() => load(trigger)).toThrow('CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS');
+    expect(() => load({ ...trigger, CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: '120' })).not.toThrow();
+  });
 });

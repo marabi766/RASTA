@@ -415,3 +415,16 @@ export {
   NOT_CANONICAL_TEXT,
 } from './text/canonical-unique-text';
 export type { CanonicalUniqueTextOptions } from './text/canonical-unique-text';
+
+export { claimWhenReady, hasClaimBudget } from './claim-when-ready';
+
+export {
+  WorkerBoundary,
+  WorkerAbandonedError,
+  assertWorkerActive,
+  workerOperation,
+} from './worker-boundary';
+
+export { DatabaseTeardown, type DatabaseCloseReport } from './database/database-teardown';
+
+export { WorkerDrain } from './worker-drain';

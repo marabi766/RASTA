@@ -1,5 +1,8 @@
 import { Injectable, type OnApplicationShutdown } from '@nestjs/common';
 import {
+  WorkerBoundary,
+  workerOperation,
+  claimWhenReady,
   createSystemContext,
   runWithContext,
   withinDeadline,
@@ -34,6 +37,7 @@ export interface ResolutionWorkerOptions {
   readonly pollIntervalMs: number;
   readonly batchSize: number;
   readonly leaseSeconds: number;
+  readonly processingBudgetMs: number;
   readonly backoffMaxSeconds: number;
   readonly maxRecipients: number;
   readonly inAppTtlDays: number;
@@ -69,11 +73,13 @@ const GAUGE_INTERVAL_MS = 15_000;
  */
 @Injectable()
 export class ResolutionWorker implements OnApplicationShutdown {
+  // Inherited by safe Prisma queries/callbacks, including late success and rejection.
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private gaugeTimer?: NodeJS.Timeout;
   private inFlight?: Promise<void>;
   private stopped = false;
-  /** The one stop in progress or done since the last `start()`; later calls join it. */
+  /** The one stop per process; later calls join it. */
   private stopping?: Promise<void>;
 
   constructor(
@@ -84,13 +90,11 @@ export class ResolutionWorker implements OnApplicationShutdown {
   ) {}
 
   start(): void {
-    if (this.timer) return;
-    this.stopped = false;
-    this.stopping = undefined;
+    if (this.timer || this.stopped) return;
     this.timer = setInterval(() => void this.tickGuarded(), this.options.pollIntervalMs);
     this.timer.unref?.();
 
-    const sample = (): Promise<void> => this.sampleGauges();
+    const sample = (): Promise<void> => this.boundary.run(() => this.sampleGauges());
     void sample();
     this.gaugeTimer = setInterval(() => void sample(), GAUGE_INTERVAL_MS);
     this.gaugeTimer.unref?.();
@@ -103,7 +107,7 @@ export class ResolutionWorker implements OnApplicationShutdown {
   /**
    * Stops polling at once and waits for the batch in flight — until
    * `deadlineAt` when the shutdown passes one (`OutboxShutdown`), else
-   * for as long as it takes. One stop per `start()`: a later call joins it.
+   * for as long as it takes. One stop per process: a later call joins it.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
@@ -112,13 +116,14 @@ export class ResolutionWorker implements OnApplicationShutdown {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
     this.timer = undefined;
     this.gaugeTimer = undefined;
     // A batch that is mid-flight finishes; a lease abandoned half-written
     // would only be picked up again after it expired.
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
@@ -127,6 +132,7 @@ export class ResolutionWorker implements OnApplicationShutdown {
     // Past the shutdown's deadline it is abandoned all the same — the forced
     // exit would cut it off a moment later — and says so.
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
         'Resolution batch still running at the shutdown deadline; abandoned. Its intents ' +
           `return to the queue when their lease (${this.options.leaseSeconds} s) expires`,
@@ -160,14 +166,21 @@ export class ResolutionWorker implements OnApplicationShutdown {
    * Exposed so the integration suites can drive the worker deterministically
    * instead of waiting on the timer.
    */
-  async tick(): Promise<number> {
-    const claimed = await this.repository.claimPending(
-      this.options.owner,
-      this.options.batchSize,
-      this.options.leaseSeconds,
-    );
+  tick(): Promise<number> {
+    return this.boundary.run(() => this.runTick());
+  }
 
-    for (const intent of claimed) {
+  private async runTick(): Promise<number> {
+    let processed = 0;
+    const claimed = claimWhenReady(
+      this.options.batchSize,
+      () => this.stopped,
+      () => this.repository.claimPending(this.options.owner, 1, this.options.leaseSeconds),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
+    );
+    for await (const intent of claimed) {
+      if (this.stopped) break;
       await runWithContext(
         createSystemContext({
           correlationId: intent.correlationId,
@@ -178,12 +191,18 @@ export class ResolutionWorker implements OnApplicationShutdown {
         // lazy Prisma promises inside actually run (PROJECT_MEMORY § 30).
         async () => this.processIntent(intent),
       );
+      processed += 1;
     }
 
-    return claimed.length;
+    return processed;
   }
 
-  async processIntent(intent: NotificationIntent): Promise<void> {
+  processIntent(intent: NotificationIntent): Promise<void> {
+    return this.boundary.run(() => this.processOne(intent));
+  }
+
+  private async processOne(intent: NotificationIntent): Promise<void> {
+    this.boundary.assertActive();
     const rule = ruleForKey(intent.ruleKey);
     if (!rule) {
       // A rule removed from the catalogue after its intent was written. Nothing
@@ -195,13 +214,16 @@ export class ResolutionWorker implements OnApplicationShutdown {
 
     let resolved;
     try {
-      resolved = await this.recipients.resolve({
-        organizationId: intent.organizationId,
-        roles: rule.recipientRoles,
-        limit: this.options.maxRecipients,
-        correlationId: intent.correlationId,
-      });
+      resolved = await workerOperation(() =>
+        this.recipients.resolve({
+          organizationId: intent.organizationId,
+          roles: rule.recipientRoles,
+          limit: this.options.maxRecipients,
+          correlationId: intent.correlationId,
+        }),
+      );
     } catch (error) {
+      this.boundary.assertActive();
       await this.defer(intent, error);
       return;
     }
@@ -283,6 +305,7 @@ export class ResolutionWorker implements OnApplicationShutdown {
           `${written.emailSuppressed} email suppressed`,
       );
     } catch (error) {
+      this.boundary.assertActive();
       if (error instanceof LeaseLostError) {
         notificationResolutionFailuresTotal.inc({ reason: RESOLUTION_FAILURE_REASONS.LEASE_LOST });
         this.logger.warn(
@@ -301,6 +324,7 @@ export class ResolutionWorker implements OnApplicationShutdown {
     try {
       return renderInApp(rule.template, intent.contextData as ContextData);
     } catch (error) {
+      this.boundary.assertActive();
       const detail =
         error instanceof RenderError ? `missing ${error.missing.join(', ')}` : describe(error);
       this.logger.error(

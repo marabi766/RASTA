@@ -24,7 +24,7 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
   afterAll(async () => {
     await owner.$disconnect();
     await cleanup(prisma, [org.buyer, org.supplier]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   async function place() {

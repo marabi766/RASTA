@@ -24,7 +24,11 @@ import {
   kafkaConnection,
   StrictQueryParserInstaller,
 } from '@rasta/nest-common';
-import { outboxShutdownBudgetMs } from '@rasta/config';
+import {
+  claimedItemBudgetMs,
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+  outboxShutdownBudgetMs,
+} from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -167,6 +171,7 @@ import {
           intervalMs: env.PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS,
           batchSize: env.PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE,
           leaseSeconds: env.PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS,
+          processingBudgetMs: claimedItemBudgetMs(PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS),
           retryBackoffBaseSeconds: env.PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS,
           retryBackoffMaxSeconds: env.PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS,
         }),
@@ -197,6 +202,7 @@ import {
           intervalMs: env.PROCUREMENT_RFQ_CLOSE_SWEEP_INTERVAL_MS,
           batchSize: env.PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE,
           leaseSeconds: env.PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS,
+          processingBudgetMs: claimedItemBudgetMs(PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS),
           retryBackoffBaseSeconds: env.PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS,
           retryBackoffMaxSeconds: env.PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS,
         }),
@@ -278,6 +284,7 @@ import {
         AggregationWindowSweeper,
         RfqCloseSweeper,
         KafkaEventPublisher,
+        PrismaService,
         ENV,
       ],
       useFactory: (
@@ -286,6 +293,7 @@ import {
         sweeper: AggregationWindowSweeper,
         rfqSweeper: RfqCloseSweeper,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
         env: ProcurementEnv,
       ) =>
         new OutboxShutdown({
@@ -293,6 +301,7 @@ import {
           purge,
           workers: [sweeper, rfqSweeper],
           publishers: [publisher],
+          databases: [prisma],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

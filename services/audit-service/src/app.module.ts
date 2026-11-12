@@ -3,7 +3,6 @@ import {
   Module,
   type MiddlewareConsumer,
   type NestModule,
-  type OnApplicationShutdown,
   type OnModuleInit,
 } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
@@ -185,7 +184,8 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     {
       provide: PrismaService,
       inject: [ENV],
-      useFactory: (env: AuditEnv): PrismaService => new PrismaService(env.DATABASE_URL),
+      useFactory: (env: AuditEnv): PrismaService =>
+        new PrismaService(env.DATABASE_URL, env.SHUTDOWN_TIMEOUT_MS),
     },
 
     AuditRepository,
@@ -419,7 +419,7 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })
-export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
+export class AppModule implements NestModule, OnModuleInit {
   /** The capacity sampler: tracked, and stopped before the client disconnects (`beforeDisconnect`). */
   private readonly gauges = new SamplingLoop(async (signal) => {
     try {
@@ -473,11 +473,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // Sampled from the catalogue, never maintained by inc/dec: an arithmetic
     // gauge drifts on every restart, and a drifting capacity number is worse
     // than no capacity number.
-    this.prisma.beforeDisconnect(() => this.gauges.stop());
+    this.prisma.beforeDisconnect((options) => this.gauges.stop(options));
     this.gauges.start();
-  }
-
-  async onApplicationShutdown(): Promise<void> {
-    await this.gauges.stop();
   }
 }

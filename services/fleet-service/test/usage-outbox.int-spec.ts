@@ -58,7 +58,7 @@ describe('usage recording', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   // A fresh, non-overlapping 8-hour window per call, one calendar day apart —

@@ -577,7 +577,7 @@ describe('a rule ended while a settlement is made, failing closed (docs/24 Q-29)
 
   afterAll(async () => {
     await cleanup(prisma, [payer]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asPayer = <T>(fn: () => Promise<T>) =>

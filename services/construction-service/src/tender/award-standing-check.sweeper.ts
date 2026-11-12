@@ -1,5 +1,6 @@
+import { WorkerBoundary, workerOperation } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
-import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import { claimWhenReady, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { awardStandingChecksTotal } from '../observability/metrics';
@@ -18,6 +19,7 @@ export interface AwardStandingCheckSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the check back. */
   leaseSeconds: number;
+  processingBudgetMs: number;
   /** A check supplier-service could not answer waits `min(max, base × 2^attempts)` seconds. */
   retryBackoffBaseSeconds: number;
   retryBackoffMaxSeconds: number;
@@ -35,7 +37,7 @@ export interface AwardStandingCheckOutcome {
 
 /**
  * Makes the standing check after every award (ADR-067 § 3, residual), the same shape as
- * `TenderCloseSweeper`: each sweep claims a bounded batch of PENDING checks in one statement
+ * `TenderCloseSweeper`: each sweep claims up to a bounded batch, one item when ready, of PENDING checks in one statement
  * (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any number of instances may run, then
  * asks supplier-service about each winner outside any transaction and settles each in its own short
  * one, in the award's own tenant, via `AwardStandingCheckService`.
@@ -47,6 +49,7 @@ export interface AwardStandingCheckOutcome {
  */
 export class AwardStandingCheckSweeper {
   private readonly logger = new Logger(AwardStandingCheckSweeper.name);
+  private readonly boundary = new WorkerBoundary((message) => this.logger.warn(message));
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
   private stopping?: Promise<void>;
@@ -83,10 +86,9 @@ export class AwardStandingCheckSweeper {
    * `onApplicationShutdown`, after the relay, a sweep kept writing outbox rows while the relay
    * drained, and its wait came on top of the relay's.
    *
-   * Past the deadline the sweep is abandoned with a warning: a check is settled with its event in
-   * one transaction, so an exit rolls back the one in flight, and the lease lets the next sweep,
-   * anywhere, take it and the rest of the batch again. Without a deadline it waits. One stop per
-   * process.
+   * At the deadline the shared worker boundary refuses further database work and drops late
+   * results. Submitted operations remain unconfirmed; leases/fences govern recovery.
+   * Without a deadline it waits. One stop per process.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
@@ -95,33 +97,39 @@ export class AwardStandingCheckSweeper {
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.boundary.stopAt(deadlineAt);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const current = this.inFlight;
+    const current = this.boundary.current;
     if (!current) return;
     if (deadlineAt === undefined) {
       await current;
       return;
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.boundary.abandon();
       this.logger.warn(
-        'Award standing-check sweep still running at the shutdown deadline; abandoned. The check ' +
-          'in flight rolls back and its lease lets the next sweep take it again',
+        'Sweep abandoned at shutdown deadline; in-flight outcome unconfirmed; lease/fence govern recovery',
       );
     }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
-  async runOnce(tenderId?: string): Promise<AwardStandingCheckOutcome> {
-    const claimed = await this.checks.claimDue(
+  runOnce(tenderId?: string): Promise<AwardStandingCheckOutcome> {
+    return this.boundary.run(() => this.sweep(tenderId));
+  }
+
+  private async sweep(tenderId?: string): Promise<AwardStandingCheckOutcome> {
+    const claimed = claimWhenReady(
       this.options.batchSize,
-      this.options.leaseSeconds,
-      ulid(),
-      tenderId,
+      () => this.stopped,
+      () => this.checks.claimDue(1, this.options.leaseSeconds, ulid(), tenderId),
+      this.options,
+      () => this.logger.warn('Claim acknowledgement left insufficient lease; waiting for expiry'),
     );
     const outcome: AwardStandingCheckOutcome = {
-      claimed: claimed.length,
+      claimed: 0,
       clear: 0,
       conflict: 0,
       retry: 0,
@@ -138,12 +146,14 @@ export class AwardStandingCheckSweeper {
       maxSeconds: this.options.retryBackoffMaxSeconds,
     };
 
-    for (const claim of claimed) {
-      // Stopping: the rest stay claimed until their lease runs out, then any sweep takes them.
+    for await (const claim of claimed) {
+      outcome.claimed += 1;
+      // Stopping: only this item holds a claim; later items have not been claimed.
       if (this.stopped) break;
       try {
-        outcome[COUNTED[await this.service.process(claim, backoff)]] += 1;
+        outcome[COUNTED[await workerOperation(() => this.service.process(claim, backoff))]] += 1;
       } catch (error) {
+        if (this.boundary.abandoned) return outcome;
         // Settling failed (the database, or the event): the row is untouched, so it is retried.
         outcome.retry += 1;
         awardStandingChecksTotal.inc({ service: SERVICE_NAME, outcome: 'unavailable' });
@@ -154,7 +164,7 @@ export class AwardStandingCheckSweeper {
       }
     }
 
-    if (outcome.claimed > 0) {
+    if (outcome.claimed > 0 && !this.boundary.abandoned) {
       this.logger.log(
         `Award standing-check sweep: claimed ${outcome.claimed}, clear ${outcome.clear}, ` +
           `conflict ${outcome.conflict}, retry ${outcome.retry}, lost ${outcome.lost}`,

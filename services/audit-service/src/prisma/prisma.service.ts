@@ -1,4 +1,11 @@
-import { createSafePrismaClient } from '@rasta/nest-common';
+import { DEFAULT_SHUTDOWN_TIMEOUT_MS, outboxShutdownBudgetMs } from '@rasta/config';
+import {
+  DatabaseTeardown,
+  withinDeadline,
+  type DatabaseCloseReport,
+  type OutboxStopOptions,
+  createSafePrismaClient,
+} from '@rasta/nest-common';
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { assertRuntimeRole as assertConnectedRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -42,6 +49,8 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
 
   readonly client: PrismaClient;
+  private teardown?: DatabaseTeardown;
+  private stopping?: Promise<void>;
 
   /**
    * Work that must be finished before the client is disconnected (a sampler's in-flight
@@ -49,9 +58,12 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * `onModuleDestroy` cannot be ordered before this one: instead the provider registers its
    * stop here, and `onModuleDestroy` below awaits every one of them, then disconnects.
    */
-  private readonly beforeDisconnectHooks: (() => Promise<void>)[] = [];
+  private readonly beforeDisconnectHooks: ((options: OutboxStopOptions) => Promise<void>)[] = [];
 
-  constructor(databaseUrl: string) {
+  constructor(
+    databaseUrl: string,
+    private readonly shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  ) {
     this.client = createSafePrismaClient(
       () => new PrismaClient({ datasources: { db: { url: databaseUrl } } }),
       'DATABASE_URL_AUDIT',
@@ -91,17 +103,26 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Registers a stop that completes (boundedly) before `$disconnect`; see the field above. */
-  beforeDisconnect(stop: () => Promise<void>): void {
+  beforeDisconnect(stop: (options: OutboxStopOptions) => Promise<void>): void {
     this.beforeDisconnectHooks.push(stop);
   }
 
-  async onModuleDestroy(): Promise<void> {
-    try {
-      // A hook that fails must not keep the connection open: all settle, then disconnect.
-      await Promise.allSettled(this.beforeDisconnectHooks.map((stop) => stop()));
-    } finally {
-      await this.client.$disconnect();
-    }
+  onModuleDestroy(): Promise<void> {
+    return (this.stopping ??= this.drain());
+  }
+
+  private async drain(): Promise<void> {
+    const deadlineAt =
+      Date.now() + outboxShutdownBudgetMs({ SHUTDOWN_TIMEOUT_MS: this.shutdownTimeoutMs });
+    const hooks = Promise.allSettled(
+      this.beforeDisconnectHooks.map(async (stop) => stop({ deadlineAt })),
+    );
+    await withinDeadline(hooks, deadlineAt - Date.now());
+    await this.stop({ deadlineAt });
+  }
+
+  stop(options: OutboxStopOptions = {}): Promise<DatabaseCloseReport> {
+    return (this.teardown ??= new DatabaseTeardown(this.client, this.logger)).stop(options);
   }
 
   /**

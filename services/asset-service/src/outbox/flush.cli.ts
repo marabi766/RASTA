@@ -102,7 +102,9 @@ async function main(): Promise<number> {
   } finally {
     await relay.stop();
     await publisher.stop();
-    await prisma.onModuleDestroy();
+    await prisma.stop().then(({ drained }) => {
+      if (!drained) throw new Error('Database close UNCONFIRMED');
+    });
   }
 }
 

@@ -36,7 +36,7 @@ describe('payment_reconciliation_task deadlines in any session zone (real databa
   });
   afterAll(async () => {
     await cleanup(prisma, [org.a]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const intent = async (): Promise<string> => {
@@ -56,7 +56,7 @@ describe('payment_reconciliation_task deadlines in any session zone (real databa
         rows.filter((row) => row.paymentIntentId === paymentIntentId);
       // ISOLATION-ALLOW-UNBOUNDED: inside a transaction that inSessionZone always rolls back.
       await runUnscoped('the suite clears its own transaction of other tasks', () =>
-        tx.$executeRawUnsafe('DELETE FROM payment_reconciliation_task'),
+        tx.$executeRawUnsafe("DELETE FROM payment_reconciliation_task WHERE status <> 'DONE'"),
       );
 
       await zone(first);
@@ -132,7 +132,7 @@ describe('payment_reconciliation_task deadlines in any session zone (real databa
       const row = task;
       // ISOLATION-ALLOW-UNBOUNDED: inside a transaction that inSessionZone always rolls back.
       await runUnscoped('the suite clears its own transaction of other tasks', () =>
-        tx.$executeRawUnsafe('DELETE FROM payment_reconciliation_task'),
+        tx.$executeRawUnsafe("DELETE FROM payment_reconciliation_task WHERE status <> 'DONE'"),
       );
       await zone(first);
       await Promise.all([open(fenced), open(escalated), open(operated)]);
@@ -220,7 +220,7 @@ describe('payment_reconciliation_task deadlines in any session zone (real databa
           expect(Math.abs(at)).toBeLessThan(0.002);
         });
       } finally {
-        await owner.onModuleDestroy();
+        await owner.stop();
       }
     },
   );

@@ -1,7 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
-import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
+import {
+  RastaError,
+  getContext,
+  getOrganizationId,
+  runUnscoped,
+  WorkerAbandonedError,
+  workerOperation,
+} from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -22,6 +29,7 @@ import { rewardsGrantedTotal, rewardsSkippedTotal } from '../observability/metri
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { Prisma } from '../generated/prisma';
+import { reportAfterCommit } from '../prisma/commit-reporting';
 import { lockRewardConfiguration } from './configuration-lock';
 import type { CreateRewardRuleDto, UpdateRewardRuleDto } from './dto';
 
@@ -95,7 +103,8 @@ export class RewardService {
      */
     onlyRuleIds?: readonly string[];
   }): Promise<GrantOutcome[]> {
-    if (!input.userId) {
+    const userId = input.userId;
+    if (!userId) {
       rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_actor' });
       return [];
     }
@@ -123,8 +132,9 @@ export class RewardService {
     const failures: RewardGrantFailure[] = [];
     for (const rule of applicable) {
       try {
-        outcomes.push(await this.grantOne({ ...input, userId: input.userId, rule }));
+        outcomes.push(await workerOperation(() => this.grantOne({ ...input, userId, rule })));
       } catch (error) {
+        if (error instanceof WorkerAbandonedError) throw error;
         failures.push({ ruleId: rule.id, error });
       }
     }
@@ -304,11 +314,13 @@ export class RewardService {
           },
         });
 
-        rewardsGrantedTotal.inc({
-          service: SERVICE_NAME,
-          trigger: input.triggerEvent,
-          monetised: String(decision.monetised),
-        });
+        reportAfterCommit(tx, () =>
+          rewardsGrantedTotal.inc({
+            service: SERVICE_NAME,
+            trigger: input.triggerEvent,
+            monetised: String(decision.monetised),
+          }),
+        );
 
         return {
           kind: 'GRANTED',

@@ -62,22 +62,65 @@ SOURCE dump with the same pinned `pg_dump` and flags. Restore it into a fresh
 scratch database, then dump that database to obtain REF. Do not modify SOURCE.
 Compare the real archive's restored schema with REF using strict byte equality;
 strip only the two generated version header lines at their exact header position.
-No SQL, whitespace or expression normalization is allowed.
+No SQL, whitespace or expression normalization is allowed in that comparison.
 
 Between SOURCE and REF only, equal line counts and an identical multiset of CHECK
-identities (database, schema, table, constraint name) are required. Every differing
-line must be a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE
-SQL context. Function bodies, comments and COMMENT strings never qualify. A
-non-CHECK difference, dropped/extra object or renamed constraint refuses. Report
+identities (database, schema, table, constraint name) are required. A line may then
+differ in exactly two ways, and anything else refuses:
+
+1. It is a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE SQL
+   context, owned by the same constraint on both sides. A CHECK-looking line in a
+   function body, comment or COMMENT string never qualifies. Every line in the CHECK
+   span must be equal after the D-171 fold below and the exact cast-placement rule
+   below, applied to both complete dumps; whole-line differences are not allowed.
+2. It is any other line (a SQL-standard routine body, view, trigger condition, index
+   predicate, policy, default, generated column) and it is equal after the one fold
+   defined below. This fold is the only exception to byte equality outside CHECK
+   lines. Both complete dumps are folded and every line
+   is compared after its permitted rules, including a line whose original bytes matched: a fold
+   removes two parentheses, often on two lines, so two different groupings of a
+   multi-line expression can come out equal on every line whose bytes differed and
+   unequal only on a line whose bytes matched.
+
+Any line not equal after its permitted rules, a CHECK span mismatch, a dropped/extra
+object or a renamed constraint refuses. Refusals identify only the dump object, never SQL. Report
 the observed number of differing CHECK lines and their constraint names (with schema
 and table) per database in `checkConstraints`; do not hard-code exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
 ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
 
-PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
-`= ANY ((ARRAY['USER'::character varying, ...])::"text"[])` can return as
-`= ANY (ARRAY[('USER'::character varying)::"text", ...])`.
+The fold, one rule for every object alike (FU-327), applied to both dumps before
+SOURCE and REF are compared: a parenthesised list of parenthesised
+operands joined by one connective (`AND` or `OR`) loses its own parentheses when it
+is the first operand of the group around it and that same connective follows it.
+This is what PostgreSQL's grammar does on reading SQL (gram.y `makeAndExpr` /
+`makeOrExpr`): a tree that analysis nested (`BETWEEN`, a row comparison) is printed
+from SOURCE as `((a) AND (b)) AND (c)` and read back into REF as the single list
+`(a) AND (b) AND (c)`, the same boolean by associativity. It covers every stored
+expression tree (SQL-standard routine bodies, views, trigger conditions, index
+predicates, policies, defaults) with no object list. Nothing else is folded: another connective
+(`((a) OR (b)) AND (c)`), a trailing list, bare operands, a subquery, strings, `$$`
+bodies and comments keep their bytes. Objects with a line whose bytes differed and
+that is equal after the fold are listed (dump identity, no SQL) in
+`before.reference.foldedBooleanLists`.
+RESTORED against REF and REF against its fixed point stay raw byte equality.
 
-REF equality proves the backup under test restores to exactly what PostgreSQL itself produces from the source schema. The SOURCE-vs-REF allowance TRUSTS PostgreSQL's own schema dump/restore for CHECK text: it does not prove semantic equivalence of those lines (a same-name CHECK with a different bound would also pass that structural guard — e.g. economic init migration :648-649). The fixed point proves stability for one more round trip only.
+The CHECK-only cast-placement rule (FU-331), derived from the six differing CHECK
+lines in the pinned-image FU-327 SOURCE/REF dumps, rewrites exactly
+`ANY ((ARRAY['x'::character varying, ...])::"text"[])` to
+`ANY (ARRAY[('x'::character varying)::"text", ...])`. The array must be nonempty;
+every element must be an ordinary single-quoted string literal cast to
+`character varying`, with exactly the dump's spelling and separators. Only the
+outer `"text"[]` cast becomes the same `"text"` cast on each element. Both dumps
+receive this rule, so either direction compares equally. Literal bytes, element
+order/count, both cast types, the comparison operator and every other operand
+stay intact. No other cast or expression is normalized; strings, quoted
+identifiers, dollar bodies and comments are opaque. A different bound, column,
+operator, element, cast type or operand refuses, including within a CASE span.
+
+REF equality proves the backup under test restores to exactly what PostgreSQL itself
+produces from the source schema. SOURCE/REF additionally proves equality under only
+the two specified deparse rules; it does not establish general SQL equivalence.
+The fixed point proves stability for one more round trip only.
 
 Restore REF into a second fresh scratch database and dump it: these bytes must
 also equal REF. Private WeakMap provenance, issued only by schema dump collection,
@@ -344,22 +387,47 @@ backup، انتقال و نگهداری خارج از میزبان، Kafka و of
 سرویس‌های در حال نوشتن و بازیابی سامانه کامل در دامنه این تمرین نیستند. منبع هیچ
 نویسنده فعال ندارد؛ dumpهای جدا تضمین snapshot توزیع‌شده production نیستند.
 
-خودکارسازی ماهانه: approved 2026-10-24 (owner), scheduled monthly by
-`backup-drill-monthly.yml` (بخش «Monthly scheduled drill» پایین). تست‌های مقایسه و SQL
-منفی در CI اجرا می‌شوند؛ job مستقل `integration-backup-drill` با سقف ۱۰ دقیقه عضو گیت
-`Integration and security tests` است و فقط این تست‌ها را اجرا می‌کند، نه فرمان کامل
-۱۶ پایگاه. سقف گام آزمون PostgreSQL پنج دقیقه است و افزایش نیافته؛ زمان این job در CI و
-زمان کامل فرمان ۱۶ پایگاه باید جدا گزارش شوند. جمع `before.schemaDump.milliseconds` و
-`after.schemaDump.milliseconds` هزینه جمع‌آوری schema را نشان می‌دهد.
+## CI and scheduled full drill
 
-## Monthly scheduled drill
+**When.** `ci.yml` calls `.github/workflows/backup-drill-monthly.yml` as part of the
+same CI run the PM merge train judges. The full 16-database drill starts beside
+the existing jobs, with only its own path selector as a prerequisite. It runs on
+**every `mq/train-*` pull request**, regardless of changed paths, and every push
+to `main`. A missing or unclassifiable branch, failed diff, or missing selection
+runs it too. The always-running verdict rejects a skipped, cancelled or failed
+drill on a train; a successful separate workflow cannot satisfy this CI gate.
 
-**When.** `.github/workflows/backup-drill-monthly.yml` runs at 03:17 UTC on the 1st of every
-month (`17 3 1 * *`), on demand (Actions → "Backup restore drill (monthly)" → Run workflow,
-or `gh workflow run backup-drill-monthly.yml`), and on a pull request that changes that file
-or `scripts/backup-restore-drill*` (so the change itself proves the job still runs).
-Runs of one ref do not overlap and a running drill is never cancelled (GitHub keeps one pending
-run per group, so a newer pending run replaces an older pending one).
+Ordinary PRs run it when paths match `DRILL_PATHS` or install inputs derived from
+workspace globs and configured patch references in
+`scripts/backup-restore-drill-scope.mjs`: any Prisma schema or migration, service
+Prisma directories (including seeds), Compose YAML and PostgreSQL bootstrap,
+the drill scripts/workflows, Prisma wrappers, published env and database-URL
+wiring, service package/TypeScript configuration, workspace/package-manager/build
+inputs, shared seed dependencies, and the organization/economic code the seeds
+import. Only classified documentation paths outside those inputs may skip it;
+unclassified paths or unsupported install configuration run it. The guard independently
+computes install coverage using the workspace configuration and tracked package-manager files;
+renames are treated as a deletion plus addition and the complete Git diff has no
+GitHub paths-filter/API truncation limit.
+
+The same workflow runs nightly on `main` at **03:17 UTC** (`17 3 * * *`), including
+the original monthly date (the 1st), to catch drift outside that list within a day.
+Dispatch remains available through Actions → "Backup restore drill" → Run workflow,
+or `gh workflow run backup-drill-monthly.yml`. There is one drill step list for
+all entry points. Each invocation is isolated. Superseded PR runs retain CI
+cancellation. The `always()` recovery step attempts teardown after cancellation;
+the hosted runner VM is discarded even if cancellation interrupts recovery.
+The full job has a 30-minute timeout: checkout, pnpm setup and Node setup get
+one minute each, install three, drill twenty, summary one and recovery two.
+The combined 29-minute budget reserves one minute for runner overhead.
+
+The library and negative PostgreSQL comparison tests still run separately in
+`integration-backup-drill` (10-minute job / 5-minute test step); these are not the
+full drill. Report their wall time separately from the full command.
+`before.schemaDump.milliseconds` and `after.schemaDump.milliseconds` measure schema
+collection cost only. Synthetic data, pinned PostgreSQL, no secrets, read-only
+repository permission, private output, allowlisted summary and mandatory recovery
+cleanup apply to all full-drill entry points.
 
 **Directories must be private (the trust boundary).** Everything the drill writes next to the
 report (the report, its journal, lock claims and atomic siblings) lives in the report's directory,

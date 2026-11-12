@@ -64,7 +64,7 @@ describe('the refund outcome events (real database)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const sweeperWith = (withProvider: MockPaymentProvider = provider) =>

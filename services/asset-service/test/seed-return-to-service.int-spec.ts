@@ -97,7 +97,7 @@ describe('a seeded commissioned asset returns to service (#234 round 3)', () => 
       `DELETE FROM insurance_policy WHERE policy_number LIKE $1`,
       `${POLICY_PREFIX}%`,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('every commissioned seeded asset is commissioned for its own organization; the uncommissioned one is for nobody', async () => {

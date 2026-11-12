@@ -114,7 +114,7 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
   afterAll(async () => {
     await contract.stop();
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** An approved statement as contract-service stores it, and the event that announces it. */

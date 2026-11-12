@@ -42,7 +42,7 @@ describe('economic internals', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   // -------------------------------------------------------------------------

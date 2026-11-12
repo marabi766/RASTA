@@ -2,6 +2,7 @@ import {
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
   authEnvSchema,
   baseEnvSchema,
+  boundedWholeNumberEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   kafkaPasswordVariable,
@@ -1134,4 +1135,24 @@ describe('shared numeric environment fields', () => {
         expect(field.safeParse(value).success).toBe(false);
     },
   );
+});
+
+describe('boundedWholeNumberEnv', () => {
+  it('caps digits before conversion and refuses non-string inputs', () => {
+    const schema = boundedWholeNumberEnv(1, 100, 10);
+    expect(schema.parse(undefined)).toBe(10);
+    for (const value of ['0001', 1, null]) expect(schema.safeParse(value).success).toBe(false);
+    expect(boundedWholeNumberEnv(0, 9, 0).parse(undefined)).toBe(0);
+  });
+  it.each([
+    [-1, 10, 1],
+    [2, 1, 1],
+    [0, Infinity, 1],
+    [0, 10, 11],
+    [0, 10, 1.5],
+    [0.5, 10, 1],
+    [0, Number.MAX_SAFE_INTEGER + 1, 1],
+  ])('refuses an invalid declaration (%s, %s, %s)', (min, max, fallback) => {
+    expect(() => boundedWholeNumberEnv(min, max, fallback)).toThrow(RangeError);
+  });
 });

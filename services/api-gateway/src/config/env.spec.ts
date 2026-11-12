@@ -149,7 +149,7 @@ describe('GATEWAY_TENDER_OPEN_TIMEOUT_MS (Codex r2 on #250, G1)', () => {
       asNumber(new RegExp(`export const ${name} = ([\\d_]+);`).exec(constructionEnv)?.[1]);
     const zodDefault = (name: string): number =>
       asNumber(
-        new RegExp(`${name}: z\\.coerce[^;]*?\\.prefault\\(([\\d_]+)\\)`).exec(
+        new RegExp(`${name}: boundedWholeNumberEnv\\([\\d_]+, [\\d_]+, ([\\d_]+)\\)`).exec(
           constructionEnv,
         )?.[1],
       );

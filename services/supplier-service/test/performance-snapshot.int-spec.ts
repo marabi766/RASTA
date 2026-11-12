@@ -66,8 +66,8 @@ describe('score snapshots (ADR-052 step 4)', () => {
   });
 
   afterAll(async () => {
-    await prisma.onModuleDestroy();
-    await owner.onModuleDestroy();
+    await prisma.stop();
+    await owner.stop();
   });
 
   function exec(sql: string): Promise<number> {

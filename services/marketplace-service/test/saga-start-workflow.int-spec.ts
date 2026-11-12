@@ -94,7 +94,7 @@ it('a cancelled order recovered after missed start completes once without creati
   } finally {
     await client.onModuleDestroy();
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
     connect.mockRestore();
     await temporal.teardown();
   }

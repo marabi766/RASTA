@@ -152,7 +152,7 @@ describeWithKafka('event flow over Kafka', () => {
     await dispatcher?.stop();
     await Promise.all([...producers.values()].map((producer) => producer.disconnect()));
     await cleanup(w.prisma, organizations);
-    await w.prisma.onModuleDestroy();
+    await w.prisma.stop();
   }, 120_000);
 
   it('MAINTENANCE_DUE → intent → resolution → in-app row, with the correlation id carried through', async () => {

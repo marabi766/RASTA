@@ -47,7 +47,7 @@ describe('durable saga start delivery (PostgreSQL)', () => {
     deliver.mockRestore();
     await starter.stop();
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await Promise.all([prisma.onModuleDestroy(), replica.onModuleDestroy()]);
+    await Promise.all([prisma.stop(), replica.stop()]);
   });
 
   it('commits intent with placement; a crash before fast start is recovered once', async () => {

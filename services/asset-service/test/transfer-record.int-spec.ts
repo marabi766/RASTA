@@ -119,7 +119,7 @@ describe('transfer record (internal)', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('answers RECORDED for the calling organization’s own transfer, to either owner of work', async () => {

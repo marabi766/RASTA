@@ -419,7 +419,9 @@ export function wire(env: ContractEnv = testEnv()): Wiring {
     hierarchy,
     awards,
     consumer,
-    close: () => prisma.onModuleDestroy(),
+    close: async () => {
+      await prisma.stop();
+    },
   };
 }
 

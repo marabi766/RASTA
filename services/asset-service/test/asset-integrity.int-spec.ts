@@ -202,7 +202,7 @@ describe('asset integrity', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   // ---------------------------------------------------------------------------
@@ -1053,7 +1053,7 @@ describe('asset integrity', () => {
         expect(Date.now() - started).toBeLessThan(2500);
         expect((await statusOf(assetId)).status).toBe('IN_MAINTENANCE');
       } finally {
-        await tiny.onModuleDestroy();
+        await tiny.stop();
       }
     }, 30_000);
 
@@ -1182,6 +1182,22 @@ describe('asset integrity', () => {
 
     const expiredEvents = async (policyId: string) =>
       (await outboxFor(policyId)).filter((e) => e.eventName === INSURANCE_EVENTS.INSURANCE_EXPIRED);
+
+    it('bounds concurrent expiry claims over many due policies without duplicates', async () => {
+      const other = newPrisma();
+      try {
+        for (let i = 0; i < 20; i++) await lapsedPolicy();
+        const batches = await Promise.all(
+          [repository, new AssetRepository(other)].map((r) =>
+            r.transaction((tx) => r.claimLapsedPolicies(tx, 1)),
+          ),
+        );
+        for (const batch of batches) expect(batch).toHaveLength(1);
+        expect(new Set(batches.flat().map((row) => row.id)).size).toBe(2);
+      } finally {
+        await other.stop();
+      }
+    });
 
     it('rolls the expiry back with its event, so the next sweep still announces it', async () => {
       const policyId = await lapsedPolicy();

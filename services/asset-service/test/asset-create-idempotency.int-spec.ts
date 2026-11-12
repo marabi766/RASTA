@@ -138,7 +138,7 @@ describe('asset registration under an Idempotency-Key', () => {
       `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
       orgs,
     );
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** A registration with neither tag nor serial: only the key can tell a retry apart. */

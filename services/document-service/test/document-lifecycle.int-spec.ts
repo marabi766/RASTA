@@ -47,7 +47,7 @@ describe('document lifecycle (real database and object storage)', () => {
 
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.platform], wiring.storage);
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   const asOrgA = <T>(fn: () => Promise<T>, roles = ['ORGANIZATION_ADMIN']) =>
