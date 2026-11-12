@@ -1,6 +1,14 @@
 import { parseDocument } from 'yaml';
 import { dockerInstructions } from './check-dockerfile-pins-lib.mjs';
-import { effectiveShell, plain, readOptions, readShell } from './ci-shell-policy-lib.mjs';
+import {
+  dockerRun,
+  effectiveShell,
+  oneWord,
+  plain,
+  readOptions,
+  readShell,
+} from './ci-shell-policy-lib.mjs';
+import { SHELL_WORD } from './ci-shell-text-lib.mjs';
 
 /**
  * No dependency lifecycle hook generates the Prisma client (FU-329).
@@ -21,18 +29,19 @@ import { effectiveShell, plain, readOptions, readShell } from './ci-shell-policy
  *    covers), so it may not name the variable at all.
  *
  * Everywhere the variable may be named only by that one setting. Shell text (a RUN, a step's
- * `run`) is read by the shared default-deny reader (ci-shell-policy-lib.mjs) under `HOST`: a
- * command word is a literal of its `programs` or a file of this repository, or it is refused, so
+ * `run`) is read by the shared default-deny reader (ci-shell-policy-lib.mjs) under `hostPolicy`:
+ * a command word is a literal of its `programs` or a file of the inventory, or it is refused, so
  * `env`, `exec`, `sudo`, `xargs`, `npx`, a quoted or computed command word are refused without
  * being named here (PR #1085 r1). A program that can run what it is given has a closed grammar
  * there (PR #1085 r2 F1, FU-334): `pnpm`/`npm` by their option tables, so an option that is not
- * listed (`-c`, `--shell-mode`, `--config.*`) is refused, and `bash` by its `-c` body, read by
- * the same reader. What an image starts is `node` itself and nothing else, an `env` is a mapping
- * written in the file, and a build names a file the rule below reads as a Dockerfile.
- * Not proven: what a listed program (`node x.mjs`, a repository script, an action, an image's
- * own entry point, a `package.json` script) does with the environment and the operands it was
- * given, and what a program reads from a variable other than the package managers'
- * `*_config_*` names.
+ * listed (`-c`, `--shell-mode`, `--config.*`) is refused; `bash` and a container's shell by
+ * their `-c` body, read by the same reader; `docker` by reviewed options, mounts and container
+ * programs. Every file is a member of `files`, the inventory the caller read: a script run by
+ * its path, an action a step uses, a Dockerfile a step builds.
+ * Not proven: what a listed program (`node x.mjs`, a repository script, a reviewed action, an
+ * image's own entry point, a `package.json` script) does with the environment and the operands
+ * it was given; what a program reads from a variable other than the package managers'
+ * `*_config_*` names; and a file a step wrote before it is run or read as configuration.
  *
  * Pure: text in, problems and the lifecycle commands found out.
  */
@@ -53,6 +62,7 @@ const DOCKER_STARTS = new Set(['CMD', 'ENTRYPOINT', 'HEALTHCHECK']);
 const INERT_RUN = /^(?:addgroup|adduser|rm|mkdir|chown|chmod)(?: [\w@%+=:,./-]+)+$/;
 /** All a container may start: `node` itself, on a plain path or on inline text that quotes nothing. */
 const STARTS_NODE = /^(?:\["node"(?:, "[\w./-]+")+\]|node -e "[^"\\$`]*")$/;
+const list = (text) => new Set(text.split(' '));
 /**
  * What the tokenizer does not model but still reads as commands: nothing hides behind these.
  * A backslash inside `$( )` is read as bash reads it; inside backticks it is not (bash removes it
@@ -121,45 +131,131 @@ const packageManager = (table, before) => (args) => {
   return table[args[at].value](args.slice(at + 1));
 };
 
-/** The one script a container is started on, read by hand: it only starts Keycloak's launcher. */
-const KEYCLOAK_GATE = '/opt/keycloak/data/import/dev-realm-gate.sh';
-/** A container gets none of the step's environment: its words may name nothing that installs. */
-const INSTALLS = new RegExp(`${PACKAGE_MANAGER.source}|\\bnode\\b|\\.(?:sh|[cm]?js)\\b`, 'i');
-
-/** Everything a step, a RUN or a `bash -c` body may run. */
-const HOST = {
+/**
+ * A container gets none of the step's environment, so it may start only these: the first word
+ * it is started on (`--entrypoint`, else the first word after the image) or a command of a `-c`
+ * body. `server` and `-C` are the arguments MinIO's and mc's own entry points are given.
+ */
+const CONTAINER = {
+  programs: verbs('clamd clamdscan freshclam promtool temporal semgrep chmod ls server -C', true),
   tolerated: READ_PAST,
-  unlisted: UNLISTED,
-  name: unassignable,
-  file: (path) => (REPO_FILE.test(path) ? null : 'is not a file of this repository'),
+  unlisted: 'a program no container is started on here',
 };
-HOST.programs = {
-  ...verbs(
-    'if then elif else fi for while until do done break ! [ { } true test set cd exit echo cat tail tee ' +
-      'grep seq sleep mkdir chmod rm mktemp command eval node go git curl psql openssl gitleaks mc',
-    true,
-  ),
-  export: (args) => {
-    for (const word of args) {
-      const name = /^[A-Za-z_]\w*(?=\+?=)/.exec(
-        word.dynamic ? word.value.slice(0, word.cut) : word.value,
-      )?.[0];
-      if (!name && !isName(word)) return 'a word is not a written-out name';
-      if (unassignable(name ?? word.value)) return unassignable(name ?? word.value);
-    }
-    return null;
-  },
-  unset: (args) => (args.every(isName) ? null : 'a word is not a written-out name'),
-  bash: (args, context) => context.shell(args, 'bash', HOST),
-  docker: ([verb, ...args]) =>
-    /^(?:logs|tag)$/.test(verb?.value) ||
-    (/^(?:run|exec)$/.test(verb?.value) &&
-      !args.some((word) => INSTALLS.test(word.value) && word.value !== KEYCLOAK_GATE))
+/** The options of `docker run` this check has read: none names a command or a file to run. */
+const RUN_OPTIONS = list('--rm -d --name --network --tmpfs -e -v -w -p --user --entrypoint');
+/**
+ * Every bind mount, by its exact text: none puts a file where a container program is found.
+ * `$PWD` is the checkout only while the text has neither changed directory nor assigned it.
+ */
+export const MOUNTS = list(
+  '"$PWD:/src" /tmp/clamav-socket:/run/clamav ' +
+    '"$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" ' +
+    '"$PWD/infrastructure/docker/clamav/freshclam.conf:/etc/clamav/freshclam.conf:ro" ' +
+    '"$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" ' +
+    '"$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro"',
+);
+/**
+ * The scripts a container's shell is started on, read by hand: the path in the container, the
+ * mount that puts the repository file there, and the sha256 of the text that was read (the test
+ * holds the file to it). dev-realm-gate.sh only starts Keycloak's launcher.
+ */
+export const CONTAINER_SCRIPTS = new Map([
+  [
+    '/opt/keycloak/data/import/dev-realm-gate.sh',
+    {
+      mount: '"$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro"',
+      file: 'infrastructure/docker/keycloak/dev-realm-gate.sh',
+      sha256: 'sha256:84546a1cf8569c4693cdd96b651f5c745bd9e847ec8e394aa87a15d630c2dfb6',
+    },
+  ],
+]);
+/** `${{ env.NAME }}` as the reader sees it: one computed word (see `scriptProblems`). */
+const PASTED = '__workflow_env_expression';
+
+/** Everything a step, a RUN or a `bash -c` body may run, for the inventory `files`. */
+function hostPolicy(files, cwd) {
+  /** Why what a container is started on (`words`) is not read, or null. */
+  const container = (words, mounts, context) => {
+    const [first, ...rest] = words;
+    if (!first) return null; // the image's own entry point
+    if (!plain(first)) return 'what the container starts is computed';
+    if (!SHELL_WORD.test(first.value))
+      return Object.hasOwn(CONTAINER.programs, first.value)
+        ? null
+        : `\`${first.value}\` is ${CONTAINER.unlisted}`;
+    const file = (path) => {
+      const script = CONTAINER_SCRIPTS.get(path);
+      return script && mounts.includes(script.mount) && files.has(script.file)
+        ? null
+        : 'is not a reviewed script of the inventory, mounted from the checkout';
+    };
+    return context.shell(rest, first.value, { ...CONTAINER, file });
+  };
+  const docker = ([verb, ...args], context) => {
+    if (plain(verb) && /^(?:logs|tag)$/.test(verb.value)) return null;
+    if (plain(verb) && verb.value === 'exec')
+      return args.length > 1 && oneWord(args[0]) && /^[\w"$]/.test(args[0].source)
+        ? container(args.slice(1), [], context)
+        : 'exec names no container and command this check reads';
+    if (!plain(verb) || verb.value !== 'run') return 'only run, exec, logs and tag are read';
+    const run = dockerRun(args);
+    if (run.problem) return run.problem;
+    const unread = run.options.find(({ name }) => !RUN_OPTIONS.has(name));
+    if (unread) return `option ${unread.name} is not one this check has reviewed`;
+    const valuesOf = (option) =>
+      run.options.filter(({ name }) => name === option).map(({ value }) => value);
+    const mounts = valuesOf('-v').map(({ source }) => source);
+    const { cwd: started, moved, assigned } = context.state;
+    if (!mounts.every((mount) => MOUNTS.has(mount)))
+      return 'a mount is not one this check has reviewed (MOUNTS)';
+    if (mounts.some((mount) => mount.includes('$')) && (started || moved || assigned.has('PWD')))
+      return 'a mount of $PWD after the directory changed is not the checkout';
+    if (run.image.dynamic && run.image.source !== `"$${PASTED}"`)
+      return 'the image is neither written out nor a value of the workflow env';
+    const entry = valuesOf('--entrypoint');
+    return entry.length > 1
+      ? 'more than one --entrypoint'
+      : container([...entry, ...run.command], mounts, context);
+  };
+  const file = (path, state) =>
+    REPO_FILE.test(path) && !state.moved && files.has(`${state.cwd && `${state.cwd}/`}${path}`)
       ? null
-      : 'its words name a package manager, node or a script',
-  pnpm: packageManager(PNPM, { values: '--filter -F' }),
-  npm: packageManager(NPM, {}),
-};
+      : 'is not a file of the inventory, run from the directory the text starts in';
+  const policy = { tolerated: READ_PAST, unlisted: UNLISTED, name: unassignable, cwd, file };
+  policy.programs = {
+    ...verbs(
+      'if then elif else fi for while until do done break ! [ { } true test set exit echo cat tail tee ' +
+        'grep seq sleep mkdir chmod rm mktemp command eval node go git curl psql openssl gitleaks mc',
+      true,
+    ),
+    export: (args, { state }) => {
+      for (const word of args) {
+        const name = /^[A-Za-z_]\w*(?=\+?=)/.exec(
+          word.dynamic ? word.value.slice(0, word.cut) : word.value,
+        )?.[0];
+        if (!name && !isName(word)) return 'a word is not a written-out name';
+        state.assigned.add(name ?? word.value);
+        if (unassignable(name ?? word.value)) return unassignable(name ?? word.value);
+      }
+      return null;
+    },
+    unset: (args) => (args.every(isName) ? null : 'a word is not a written-out name'),
+    // Below the directory the text is in: a relative file is then the checkout's or built from it.
+    cd: (args, context) => {
+      context.leave();
+      return args.length === 1 &&
+        plain(args[0]) &&
+        /^(?![/-])(?!.*\.\.)[\w./-]+$/.test(args[0].value)
+        ? null
+        : 'only a written-out directory below the current one is followed';
+    },
+    bash: (args, context) => context.shell(args, 'bash', policy),
+    docker,
+    pnpm: packageManager(PNPM, { values: '--filter -F' }),
+    npm: packageManager(NPM, {}),
+  };
+  return policy;
+}
 /** `eval` runs only what the Kafka credentials script printed into the variable it names. */
 const EVAL = /\beval "\$\{(\w+_credentials)\}"/g;
 const credentials = (name) =>
@@ -182,16 +278,18 @@ const lifecycle = (text) => [...text.matchAll(LIFECYCLE)].map((found) => `${foun
 
 /**
  * Why this shell text is not proven to run every program under the environment it was given:
- * the ONE place a RUN, a step's `run` and an action's `run` are read (PR #1085 r1 F1).
+ * the ONE place a RUN, a step's `run` and an action's `run` are read (PR #1085 r1 F1). `files`
+ * is the inventory of repository paths the caller read; `cwd` the directory the text starts in.
  */
-export function scriptProblems(script) {
+export function scriptProblems(script, files = new Set(), cwd = '') {
   const problems = [];
   // A duplicated descriptor (`2>&1`) is dropped only as a word of its own: inside one it is not.
   const text = script
-    .replace(EXPRESSION, '$_')
+    .replace(EXPRESSION, `$${PASTED}`)
     .replace(/(?<![^\s;(&|])\d*>&\d+(?=[\s;)&|]|$)/g, '');
-  const read = readShell(text, HOST);
+  const read = readShell(text, hostPolicy(files, cwd));
   if (text.includes('${{')) problems.push('an expression other than `${{ env.NAME }}` is not read');
+  if (script.includes(PASTED)) problems.push(`the name ${PASTED} is this check's own`);
   if (text.replace(/^\s*#.*$/gm, '').includes('`'))
     problems.push('a backtick command substitution is not read');
   problems.push(...read.problems);
@@ -231,7 +329,7 @@ export function lifecycleFileKind(path) {
  * @param {string} text
  * @returns {{ errors: string[], commands: string[] }}
  */
-export function dockerfileLifecycle(name, text) {
+export function dockerfileLifecycle(name, text, _workflows, files = new Set()) {
   const instructions = dockerInstructions(text);
   if (instructions.problem)
     return { errors: [`${name}: cannot be read: ${instructions.problem}`], commands: [] };
@@ -260,7 +358,7 @@ export function dockerfileLifecycle(name, text) {
       refuse(`${keyword} ${clip(rest)} sets a package manager option this check does not read`);
     } else if (keyword === 'RUN') {
       if (suppressed) {
-        for (const problem of scriptProblems(rest.replace(/^(?:--[a-z]+=\S+\s+)+/, '')))
+        for (const problem of scriptProblems(rest.replace(/^(?:--[a-z]+=\S+\s+)+/, ''), files))
           refuse(`RUN ${problem}`);
         commands.push(...lifecycle(rest));
       } else if (replaced || !rest.split(' && ').every((command) => INERT_RUN.test(command)))
@@ -321,21 +419,100 @@ const readsEnv = (where, owner, errors) => {
   return true;
 };
 
+/** The actions a step may use besides the repository's own: none builds from a file it is given. */
+const ACTIONS = list(
+  'actions/cache actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact ' +
+    'aquasecurity/setup-trivy aquasecurity/trivy-action docker/setup-buildx-action pnpm/action-setup',
+);
+/** The one action that builds an image, and every input it is given here. */
+const BUILD_ACTION = 'docker/build-push-action';
+const BUILD_INPUTS = list('context file tags push load cache-from cache-to');
+/**
+ * A matrix value this check cannot list, by the exact expression that computes it and why every
+ * value is a path segment of an inventoried Dockerfile. Not a proof: a reviewed source.
+ */
+const MATRIX_SOURCES = new Map([
+  [
+    '${{ fromJSON(needs.container-scope.outputs.services) }}',
+    'scripts/container-scope.mjs prints the names of services/<name> directories that hold a Dockerfile',
+  ],
+]);
+
+/**
+ * The repository files a build's `file` input names, or none when that cannot be told: a literal
+ * path, or one `${{ matrix.NAME }}` whose values are a list written in the job (each is tried) or
+ * a reviewed source (every inventory file of that shape). Any other expression resolves nothing.
+ */
+function buildFiles(file, matrix, files) {
+  if (typeof file !== 'string') return [];
+  const [expression, ...more] = new Set(file.match(/\$\{\{.*?\}\}/g));
+  if (expression === undefined) return [file];
+  const name = /^\$\{\{ matrix\.([\w-]+) \}\}$/.exec(expression)?.[1];
+  if (!name || more.length > 0 || !record(matrix) || Object.hasOwn(matrix, 'include')) return [];
+  const values = matrix[name];
+  if (Array.isArray(values) && values.every((value) => typeof value === 'string'))
+    return values.map((value) => file.replaceAll(expression, value));
+  if (!MATRIX_SOURCES.has(values)) return [];
+  const [before, after] = file.split(expression);
+  if (file.split(expression).length !== 2) return [];
+  return [...files].filter(
+    (path) =>
+      path.startsWith(before) &&
+      path.endsWith(after) &&
+      /^[^/]+$/.test(path.slice(before.length, path.length - after.length)),
+  );
+}
+
+/** Why a step's `uses` and `with` are not read: an unreviewed action, or a build input outside the inventory. */
+function usesProblems(step, matrix, files) {
+  const uses = String(step.uses);
+  const local = /^\.\/(\.github\/actions\/[\w-]+)$/.exec(uses)?.[1];
+  const action = /^([\w.-]+\/[\w.-]+)@[\w.-]+$/.exec(uses)?.[1];
+  const problems = [];
+  if (
+    local
+      ? !files.has(`${local}/action.yml`) && !files.has(`${local}/action.yaml`)
+      : action !== BUILD_ACTION && !ACTIONS.has(action)
+  )
+    problems.push(`uses ${clip(uses)}, an action this check has neither read nor reviewed`);
+  if (step.with !== undefined && !record(step.with))
+    problems.push(`builds ${clip(String(step.with))}, a file this check does not read`);
+  if (action !== BUILD_ACTION || !record(step.with ?? {})) return problems;
+  const inputs = step.with ?? {};
+  for (const key of Object.keys(inputs))
+    if (!BUILD_INPUTS.has(key))
+      problems.push(`build input ${clip(key)} is not one this check reads`);
+  if (inputs.context !== undefined && inputs.context !== '.')
+    problems.push(`builds from ${clip(String(inputs.context))}, not from the checkout`);
+  const file = inputs.file ?? 'Dockerfile';
+  const built = buildFiles(file, matrix, files);
+  if (
+    built.length === 0 ||
+    !built.every((path) => files.has(path) && lifecycleFileKind(path) === 'dockerfile')
+  )
+    problems.push(`builds ${clip(String(file))}, a file this check does not read`);
+  return problems;
+}
+
 /**
  * Problems of the steps themselves: an unknown shell, an opaque `env`, a script that is not
- * proven, a build of a file the name rule above does not read (`file: Containerfile`).
+ * proven, an action nobody reviewed, a build of a file outside the inventory `files`
+ * (`file: Containerfile`, `/tmp/Dockerfile`, `${{ env.ROOT }}/Dockerfile`). `matrix` is the job's.
  */
-function stepProblems(where, step, errors, commands, composite = false) {
+function stepProblems(where, step, errors, commands, files, matrix, composite = false) {
   if (!record(step)) return void errors.push(`${where} is not a mapping`);
+  const refuse = (problem) => errors.push(`${where}: ${problem}`);
   readsEnv(where, step, errors);
   const { problem } = effectiveShell({ step, composite: composite && step.run !== undefined });
-  if (problem) errors.push(`${where}: ${problem}`);
-  const built = record(step.with ?? {}) ? step.with?.file : step.with;
-  if (built !== undefined && lifecycleFileKind(String(built)) !== 'dockerfile')
-    errors.push(`${where}: builds ${clip(String(built))}, a file this check does not read`);
+  if (problem) refuse(problem);
+  if (step.uses !== undefined) usesProblems(step, matrix, files).forEach(refuse);
+  else if (step.with !== undefined) refuse('with is given to no action');
   if (step.run === undefined) return;
-  if (typeof step.run !== 'string') return void errors.push(`${where}: run is not text`);
-  for (const problem of scriptProblems(step.run)) errors.push(`${where}: ${problem}`);
+  if (typeof step.run !== 'string') return void refuse('run is not text');
+  const cwd = step['working-directory'] ?? '';
+  if (typeof cwd !== 'string' || !/^(?![/-])(?!.*\.\.)[\w./-]*$/.test(cwd))
+    return void refuse('working-directory is not a written-out directory of the checkout');
+  scriptProblems(step.run, files, cwd).forEach(refuse);
   commands.push(...lifecycle(step.run));
 }
 
@@ -343,10 +520,11 @@ function stepProblems(where, step, errors, commands, composite = false) {
  * @param {string} name
  * @param {string} text
  * @param {Record<string, string>} workflows Independently inventoried repository workflow texts.
+ * @param {Set<string>} files Every repository path of the inventory the caller read.
  * @param {string[]} ancestors Calls already being checked; no environment is inherited.
  * @returns {{ errors: string[], commands: string[] }}
  */
-export function workflowLifecycle(name, text, workflows = {}, ancestors = []) {
+export function workflowLifecycle(name, text, workflows = {}, files = new Set(), ancestors = []) {
   if (ancestors.includes(name)) return { errors: [`${name}: cyclic workflow call`], commands: [] };
   const read = readYaml(name, text);
   if (read.problem) return { errors: [read.problem], commands: [] };
@@ -385,7 +563,7 @@ export function workflowLifecycle(name, text, workflows = {}, ancestors = []) {
           `${where}: called workflow is unreadable or not a local call without runner settings`,
         );
       else {
-        const called = workflowLifecycle(target, workflows[target], workflows, [
+        const called = workflowLifecycle(target, workflows[target], workflows, files, [
           ...ancestors,
           name,
         ]);
@@ -403,7 +581,7 @@ export function workflowLifecycle(name, text, workflows = {}, ancestors = []) {
     const inJob = sets(where, job);
     for (const [index, step] of job.steps.entries()) {
       const at = `${where} step ${index + 1}`;
-      stepProblems(at, step, errors, commands);
+      stepProblems(at, step, errors, commands, files, job.strategy?.matrix);
       const inStep = record(step) && sets(at, step, true);
       if (!everywhere && !inJob && !inStep)
         errors.push(
@@ -422,7 +600,7 @@ export function workflowLifecycle(name, text, workflows = {}, ancestors = []) {
  * @param {string} text
  * @returns {{ errors: string[], commands: string[] }}
  */
-export function actionLifecycle(name, text) {
+export function actionLifecycle(name, text, _workflows, files = new Set()) {
   const read = readYaml(name, text);
   if (read.problem) return { errors: [read.problem], commands: [] };
   const errors = [];
@@ -431,7 +609,7 @@ export function actionLifecycle(name, text) {
   if (!record(runs) || runs.using !== 'composite' || !Array.isArray(runs.steps))
     return { errors: [`${name}: not a composite action this check reads`], commands };
   for (const [index, step] of runs.steps.entries())
-    stepProblems(`${name}: step ${index + 1}`, step, errors, commands, true);
+    stepProblems(`${name}: step ${index + 1}`, step, errors, commands, files, null, true);
   if (read.named !== 0)
     errors.push(`${name}: an action inherits ${VARIABLE} from its caller and may not name it`);
   return { errors, commands };

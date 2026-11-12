@@ -163,6 +163,89 @@ export function readShell(
   return { problems, commands };
 }
 
+// `docker run|create|pull` options: those that take a value, and those that do not. The image-pin
+// check and every guard that reads a container's command find the image by this ONE table.
+export const DOCKER_RUN_VALUES = new Set([
+  '-e',
+  '--env',
+  '--env-file',
+  '-v',
+  '--volume',
+  '--mount',
+  '--tmpfs',
+  '--name',
+  '--network',
+  '--net',
+  '-w',
+  '--workdir',
+  '-u',
+  '--user',
+  '--entrypoint',
+  '-h',
+  '--hostname',
+  '-p',
+  '--publish',
+  '--platform',
+  '-l',
+  '--label',
+  '--add-host',
+  '--cap-add',
+  '--cap-drop',
+  '-m',
+  '--memory',
+  '--cpus',
+  '--shm-size',
+  '--ulimit',
+  '--restart',
+  '--pull',
+  '--security-opt',
+  '--device',
+  '--health-cmd',
+]);
+export const DOCKER_RUN_FLAGS = new Set([
+  '--rm',
+  '-d',
+  '--detach',
+  '-i',
+  '--interactive',
+  '-t',
+  '--tty',
+  '-it',
+  '--init',
+  '--read-only',
+  '-q',
+  '--quiet',
+  '-a',
+  '--all-tags',
+]);
+
+/**
+ * `docker run [options] IMAGE [command…]`, the words after `run`: `{ options, image, command }`
+ * with each option as `{ name, value }` (the value word, or null), or `{ problem }`. An option
+ * outside the table, a computed option name and a word that may be several words before the
+ * command (it would move the image) are problems. A guard then admits the options it has reviewed.
+ */
+export function dockerRun(args) {
+  const options = [];
+  for (let at = 0; at < args.length; at++) {
+    const word = args[at];
+    if (!oneWord(word)) return { problem: `\`${clip(word.source)}\` may be several words` };
+    const written = word.dynamic ? word.value.slice(0, word.cut) : word.value;
+    if (!written.startsWith('-')) {
+      if (word.dynamic && written !== '') return { problem: 'the image is partly computed' };
+      return { options, image: word, command: args.slice(at + 1) };
+    }
+    const [name] = written.split('=');
+    if (written.includes('=') && DOCKER_RUN_VALUES.has(name))
+      options.push({ name, value: { ...word, value: word.value.slice(name.length + 1) } });
+    else if (plain(word) && DOCKER_RUN_FLAGS.has(name)) options.push({ name, value: null });
+    else if (plain(word) && DOCKER_RUN_VALUES.has(name) && args[at + 1] && oneWord(args[at + 1]))
+      options.push({ name, value: args[++at] });
+    else return { problem: `docker option \`${clip(word.value)}\` is not one this check reads` };
+  }
+  return { problem: 'names no image' };
+}
+
 /**
  * The shell that reads a step's `run` text: the step's `shell`, else the job's, else the
  * workflow's `defaults.run.shell`, else the runner's default (bash; a composite step has none).
