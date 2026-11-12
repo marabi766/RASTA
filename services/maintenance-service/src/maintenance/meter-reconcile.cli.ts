@@ -8,7 +8,7 @@ import { MeterReconcile, MeterUsageClient } from './meter-reconcile';
 import { parseMeterReconcileArgs } from './meter-reconcile.args';
 
 async function main(): Promise<number> {
-  const { organizationId } = parseMeterReconcileArgs(process.argv.slice(2));
+  const { organizationId, apply } = parseMeterReconcileArgs(process.argv.slice(2));
   assertNoMigratorCredentials(process.env);
   const env = loadMaintenanceEnv();
   // Existing service URL validation; never repeat a bad environment value.
@@ -30,9 +30,13 @@ async function main(): Promise<number> {
         env.INTERNAL_TOKEN_TTL_SECONDS,
       ),
     });
-    const report = await new MeterReconcile(prisma, source).report(organizationId);
+    const report = await new MeterReconcile(prisma, source).report(
+      organizationId,
+      new Date(),
+      apply,
+    );
     process.stdout.write(`${JSON.stringify(report)}\n`);
-    // A preview is not a successful cutover; even zero candidates prove no inventory completeness.
+    // Per-asset apply does not prove a complete global inventory or activate its marker.
     return 1;
   } finally {
     await prisma.stop().then(({ drained }) => {
