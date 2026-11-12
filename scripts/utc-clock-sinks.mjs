@@ -21,6 +21,8 @@ const nameOf = (n) => ts.isIdentifier(n) ? n.text :
       ? n.argumentExpression.text : null;
 // FU-325: SQL text a reader does not have (an operand that is not a constant), unlike a bound value.
 export const UNKNOWN_SQL = PLACEHOLDER('text');
+/** Unknown text where a word starts or stands, named (FU-337: `text:<digest of its source>`) or not. */
+export const UNKNOWN_WORD = /\uE000text[:\uE001]/;
 /** A word naming a program that executes SQL text; only psql's arguments are read. */
 export const SQL_CLI = /(?:^|\/)(?:(psql)|pgbench)$/;
 const PSQL_VALUES = ['dbname', 'host', 'port', 'username', 'variable', 'set', 'output', 'log-file',
@@ -38,7 +40,7 @@ export function psqlSql(words) {
     const w = words[i];
     if (w === '--') break;
     const long = /^--([^=]+)(?:=([\s\S]*))?$/.exec(w);
-    if (w.startsWith(UNKNOWN_SQL) || long?.[1].includes(UNKNOWN_SQL)) return null;
+    if (w.search(UNKNOWN_WORD) === 0 || UNKNOWN_WORD.test(long?.[1] ?? '')) return null;
     if (long) {
       const is = (option) => option.startsWith(long[1]);
       const at = long[2] === undefined ? i + 1 : i;

@@ -2225,6 +2225,9 @@ for (const [name, path, wrap] of [
     assert.match(found.filter((p) => p.includes(path)).join(), /FU-324/);
   });
 
+// FU-337 refuses SQL built at run time at its site (tests below); these read what FU-324 makes of the pieces.
+const fu324 = (...read) => claimSubqueryProblems(...read).filter((problem) => !problem.startsWith('FU-337'));
+
 test('FU-325 SQL is composed and decoded before it is classified, in every quoting', () => {
   for (const sql of [
     `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $body$${CLAIM}$body$`,
@@ -2252,7 +2255,7 @@ test('FU-325 SQL is composed and decoded before it is classified, in every quoti
     `DO $$BEGIN EXECUTE 'WITH picked AS MATERIALIZED (SELECT id FROM ' || quote_ident(t) || ' LIMIT 1 FOR UPDATE) DELETE FROM task USING picked'; END$$`,
     `WITH picked AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id`,
   ])
-    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+    assert.deepEqual(fu324(sql), [], sql);
 });
 
 test('FU-324 cannot be waived by a matching reviewed DO block', () => {
@@ -2372,7 +2375,7 @@ test('PR #1082 r1 F2: a text is composed through the syntax that leaves it the t
     `SELECT concat('see (the list', x), '(for update)', upper('a (b')::bpchar || 'c)', u & 'x' FROM t WHERE id IN ('a') AND b = ANY (('{a}')::text[])`,
     `DO ${doBody(`'WITH picked AS MATERIALIZED (SELECT id FROM ' || quote_ident(t) || (' LIMIT 1 FOR UPDATE)')::text || ' DELETE FROM task USING picked'`)}`,
   ])
-    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+    assert.deepEqual(fu324(sql), [], sql);
 });
 
 test('PR #1082 r1 F3: a text with more readings than the budget is refused, never read as empty', () => {
@@ -2382,7 +2385,7 @@ test('PR #1082 r1 F3: a text with more readings than the budget is refused, neve
   // Whatever it holds, and through every composition: nothing proves what was not read.
   for (const sql of [`SELECT ${chain(8)}`, `SELECT ${quoted(`a note: ${chain(8)}`)}`, `SELECT CAST((${chain(8)})::text AS text) COLLATE "C" || 'x'`, `DO ${doBody(`a || (${chain(8)})`)}`])
     assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
-  assert.deepEqual(claimSubqueryProblems(`DO ${doBody(`${chain(5)} || x`)}`), []);
+  assert.deepEqual(fu324(`DO ${doBody(`${chain(5)} || x`)}`), []);
 });
 
 // PR #1082 r2 N1: a name's spelling does not prove its binding. PostgreSQL 16 runs each UNPROVEN
@@ -2631,4 +2634,171 @@ test('FU-333 a CTE column list is read as PostgreSQL reads it: the picker passes
   const found = claimScan(Object.fromEntries(heads.map((head, i) =>
     [`ops/head${i}.mjs`, `export const sql = ${JSON.stringify(`${head} AS (SELECT 1) SELECT (1`)};`])));
   assert.deepEqual(found.map((p) => p.split(':')[0]), ['ops/head0.mjs', 'ops/head1.mjs', 'ops/head2.mjs']);
+});
+
+// FU-337, the execution boundary: SQL that a text builds and runs is one complete text of literals
+// and proven constants, or its site is refused unless the inventory lists it (file + digest + reason).
+const PIECES = ['EXPLAIN DELETE FROM task WHERE id = (SEL', 'ECT id FROM task LIMIT 1 F', 'OR UPDATE SKIP LOCKED) AND 1 = 1'];
+const sqlString = (text) => `'${text.replaceAll("'", "''")}'`;
+const dynamicSite = (problems) => problems.filter((p) => /^FU-337: .* \[EXECUTE:sha256:[0-9a-f]{64}\]$/s.test(p));
+const runs = (expression, declare = '') => `DO $do$${declare}BEGIN EXECUTE ${expression}; END$do$;`;
+const boundaryScan = (files, migrations = 'CREATE TABLE task (id text);') =>
+  scanOf('x-service', migrations, '', files).filter((p) => /FU-3(?:24|37)/.test(p));
+
+test('FU-337 PR #1082 r2 N2: the three pieces joined through a form the reader does not follow are refused at the site', () => {
+  const [a, b, c] = PIECES.map(sqlString);
+  const constants = (init) => `DECLARE a CONSTANT text ${init} ${a}; b CONSTANT text ${init} ${b}; c CONSTANT text ${init} ${c}; `;
+  const refused = {
+    concat: runs(`concat(${a}, ${b}, ${c})`),
+    format: runs(`format('%s%s%s', ${a}, ${b}, ${c})`),
+    'format, a piece in the format': runs(`format(${a} || '%s' || ${c}, ${b})`),
+    "typed text '…'": runs(`text ${a} || text ${b} || text ${c}`),
+    'text(…)': runs(`text(${a}) || text(${b}) || text(${c})`),
+    '::varchar(1000)': runs(`${a}::varchar(1000) || ${b}::varchar(1000) || ${c}::varchar(1000)`),
+    '::"text"': runs(`${a}::"text" || ${b}::"text" || ${c}::"text"`),
+    'constants, DEFAULT': runs('a || b || c', constants('DEFAULT')),
+    'constants, =': runs('a || b || c', constants('=')),
+    'two constants, DEFAULT': runs('a || b', `DECLARE a CONSTANT text DEFAULT ${sqlString(PIECES[0] + PIECES[1])}; b CONSTANT text DEFAULT ${c}; `),
+    variables: runs('a || b || c', `DECLARE a text := ${a}; b text := ${b}; c text := ${c}; `),
+    'a parameter': `CREATE FUNCTION f(p text) RETURNS void LANGUAGE plpgsql AS $$BEGIN EXECUTE ${a} || p; END$$;`,
+    'a constant of a nested block': `DO $$BEGIN DECLARE a CONSTANT text := ${a}; BEGIN EXECUTE a || ${b} || ${c}; END; END$$;`,
+    concat_ws: runs(`concat_ws('', ${a}, ${b}, ${c})`),
+    array_to_string: runs(`array_to_string(ARRAY[${a}, ${b}, ${c}], '')`),
+    'a subquery': runs(`(SELECT string_agg(x, '') FROM unnest(ARRAY[${a}, ${b}, ${c}]) x)`),
+    replace: runs(`replace(${a} || 'X' || ${c}, 'X', ${b})`),
+    CASE: runs(`${a} || CASE WHEN true THEN ${b} END || ${c}`),
+    quote_literal: runs(`${a} || quote_literal(x) || ${c}`),
+    quote_ident: runs(`'ALTER ROLE ' || quote_ident(x) || ' NOLOGIN'`),
+    '::bpchar': runs(`${a}::bpchar || ${b} || ${c}`),
+    'a call of the whole': runs(`lower(${a} || ${b} || ${c})`),
+    'a text after the expression': runs(`${a} || ${b} ${c}.x`),
+    'nothing after EXECUTE': runs(''),
+  };
+  for (const [name, sql] of Object.entries(refused)) assert.equal(dynamicSite(claimSubqueryProblems(sql)).length, 1, name);
+  // The expression ends where the statement does, not at a word inside its parentheses.
+  const joined = (tail) => dynamicSite(claimSubqueryProblems(runs(`format('%s%s', (SELECT string_agg(x, '') FROM a JOIN b USING (id)), ${tail})`)));
+  assert.notDeepEqual(joined(a), joined(b));
+  // What the reader composes is one text, read as executed: the picker in it is the FU-324 refusal.
+  for (const sql of [runs(`${a} || ${b} || ${c}`), runs('a || b || c', constants(':=')), runs(`CAST((${a})::text || ${b} AS text) || (${c} COLLATE "C")`)])
+    assert.deepEqual(claimSubqueryProblems(sql).map((p) => p.slice(0, 6)), ['FU-324'], sql);
+  // A text that is only executed as a whole is strict there, whatever its head: `(1` is unclosed.
+  assert.deepEqual(claimSubqueryProblems(runs(`'SET x = ' || '(1'`)).map((p) => p.slice(0, 6)), ['FU-324']);
+  const picked = `WITH picked AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id`;
+  const accepted = [
+    runs(sqlString('ALTER TABLE task DISABLE TRIGGER t')), runs(`'ALTER TABLE task ' || 'DISABLE' || ' TRIGGER t'`),
+    runs(`CAST(('ALTER TABLE task ')::text || U&'DISABLE' AS text) || (' TRIGGER t' COLLATE "C")`),
+    runs(`${sqlString(picked.slice(0, 40))} || ${sqlString(picked.slice(40))}`), runs(`E'SELECT \\'x\\''`), runs('$q$SELECT 1$q$ INTO n'),
+    runs(`'SELECT count(*) FROM (' || pending || ') p' INTO n`, `DECLARE pending CONSTANT text := 'SELECT 1'; n int; `),
+    // A proven constant that starts the expression is an operand too (it follows EXECUTE).
+    runs(`pending || ' LIMIT 1' INTO n; EXECUTE pending`, `DECLARE pending CONSTANT text := 'SELECT 1'; n int; `),
+    runs(`'DELETE FROM task WHERE id = $1' USING some.id`),
+  ];
+  for (const sql of accepted) assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+});
+
+test('FU-337 EXECUTE is a site wherever PL/pgSQL runs it, and nowhere else', () => {
+  const built = `concat('SELECT ', '1')`;
+  const sites = [
+    `DO $$BEGIN EXECUTE ${built}; END$$;`, `do $$begin execute /* c */ ${built}; end$$;`, `DO $$BEGIN NULL; EXECUTE ${built}; END$$;`,
+    `DO $$BEGIN IF true THEN EXECUTE ${built}; ELSE NULL; END IF; END$$;`, `DO $$BEGIN IF true THEN NULL; ELSE EXECUTE ${built}; END IF; END$$;`,
+    `DO $$BEGIN LOOP EXECUTE ${built}; END LOOP; END$$;`,
+    `DO $$BEGIN <<l>> EXECUTE ${built}; END$$;`, `DO $$BEGIN NULL; EXCEPTION WHEN others THEN EXECUTE ${built}; END$$;`,
+    `CREATE FUNCTION f() RETURNS SETOF int LANGUAGE plpgsql AS $$BEGIN RETURN QUERY EXECUTE ${built}; END$$;`,
+    `DO $$DECLARE r record; BEGIN FOR r IN EXECUTE ${built} LOOP NULL; END LOOP; END$$;`,
+    `DO $$DECLARE k refcursor; BEGIN OPEN k FOR EXECUTE ${built}; END$$;`,
+    `DO $$BEGIN EXECUTE ${built} USING 1; END$$;`, `DO $$DECLARE n int; BEGIN EXECUTE ${built} INTO n; END$$;`,
+    `DO 'BEGIN EXECUTE concat(''SELECT '', ''1''); END';`, `DO $a$BEGIN EXECUTE $b$DO $c$BEGIN EXECUTE ${built}; END$c$$b$; END$a$;`,
+    // A piece: the statement may start where the text does, or after a part that is not in it.
+    `EXECUTE ${built}`, `EXECUTE ${built} INTO n; END`, `\uE0000\uE001 EXECUTE ${built};`,
+    // A prepared statement is run by name, and these functions execute their argument.
+    `PREPARE p AS SELECT 1; EXECUTE p;`, `SELECT query_to_xml(${built}, true, false, '');`, `SELECT ts_stat('SELECT 1');`,
+    `SELECT "query_to_xmlschema"('SELECT 1', true, false, '');`,
+  ];
+  for (const sql of sites) assert.ok(dynamicSite(claimSubqueryProblems(sql)).length >= 1, sql);
+  for (const sql of sites.slice(0, 13)) assert.deepEqual(claimSubqueryProblems(sql.replaceAll(built, `'SELECT ' || '1'`)), [], sql);
+  const none = [
+    'GRANT EXECUTE ON FUNCTION f() TO r; REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION f() FROM r;',
+    'ALTER DEFAULT PRIVILEGES FOR ROLE m REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;',
+    'CREATE TRIGGER t BEFORE INSERT ON task FOR EACH ROW EXECUTE FUNCTION f(); CREATE TRIGGER u AFTER UPDATE ON task FOR EACH ROW WHEN (true) EXECUTE PROCEDURE f();',
+    `SELECT has_function_privilege('r', 'f()', 'EXECUTE'), privilege_type = 'EXECUTE', ARRAY['SELECT', 'execute'] FROM x;`,
+    'SELECT id, execute FROM job; SELECT j.execute FROM job j;',
+    `SELECT 'they must execute the plan first', 'we execute (a, b) later';`,
+    `SELECT concat('SELECT ', '1');`,
+  ];
+  for (const sql of none) assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+});
+
+test('FU-337 the boundary holds in every file that runs SQL; the inventory lists a site by file and digest; a migration is outside', () => {
+  const body = (expression) => `DO $$BEGIN EXECUTE ${expression}; END$$;`;
+  const built = body(`format('ALTER ROLE %I NOLOGIN', r)`);
+  const files = {
+    'ops/built.sql': built,
+    'ops/heredoc.sh': `psql -X <<'SQL'\n${built}\nSQL`,
+    'ops/expanded.sh': `psql -X <<SQL\n${body("'ALTER ROLE $ROLE NOLOGIN'").replaceAll('$$', '\\$\\$')}\nSQL`,
+    'ops/word.sh': `run_sql "$db" "${built.replaceAll('$$', '\\$\\$')}"`,
+    // An expansion is a part that is not in the text: in a word, in a here-document written to a file.
+    'ops/word-expansion.sh': `run_sql "$db" "${body("'ALTER ROLE $ROLE NOLOGIN'").replaceAll('$$', '\\$\\$')}"`,
+    'ops/written.sh': `cat > /tmp/roles.sql <<SQL\n${body("'ALTER ROLE $ROLE NOLOGIN'").replaceAll('$$', '\\$\\$')}\nSQL`,
+    'ops/option-expansion.sh': `psql -X -c "${body("'ALTER ROLE $ROLE NOLOGIN'").replaceAll('$$', '\\$do\\$')}"`,
+    'ops/option.sh': `psql -X -c ${JSON.stringify(built.replaceAll('$$', '$do$')).replaceAll('$', '\\$')}`,
+    '.github/workflows/ci.yml': `jobs:\n  a:\n    steps:\n      - run: |\n          psql -X <<'SQL'\n          ${built}\n          SQL\n`,
+    'ops/literal.mjs': `export const sql = ${JSON.stringify(built)};`,
+    'ops/template.mjs': `export const toggle = (action) => \`${body("'ALTER TABLE task ${action} TRIGGER t'")}\`;`,
+    'services/x-service/prisma/seed.ts': `db.$executeRawUnsafe(${JSON.stringify(built)});`,
+    'scripts/run.mjs': `db.$executeRawUnsafe(${JSON.stringify(built)});`,
+    // Only the call has the whole text: no literal of the file holds the word.
+    'scripts/split.mjs': `const a = 'SET x = 1; EXEC', b = "UTE format('ALTER ROLE %I NOLOGIN', r)";\ndb.$executeRawUnsafe(a + b);`,
+  };
+  const found = boundaryScan(files, [['1_init', 'CREATE TABLE task (id text);'], ['2_roles', built]]);
+  const key = (problem) => /\[(.*:EXECUTE:sha256:[0-9a-f]{64})\]$/.exec(problem)?.[1];
+  for (const path of Object.keys(files)) assert.ok(found.some((p) => p.startsWith(`${path}:`) && key(p)?.startsWith(`${path}:EXECUTE:`)), `${path}\n${found.join('\n')}`);
+  // Every problem is one of these sites; the migration's DO block is its own review, not this rule's.
+  assert.deepEqual(found.filter((p) => !key(p)), []);
+  assert.ok(!found.some((p) => p.includes('prisma/migrations')));
+  // Listed with a reason: nothing is left. The key is the file and the digest of the expression.
+  const inventory = (entries) => ({ 'scripts/opaque-sql-sinks.json': JSON.stringify(entries) });
+  const reasons = Object.fromEntries([...new Set(found.map(key))].map((k) => [k, 'role names from the catalogue, sqlString by %I']));
+  assert.deepEqual(boundaryScan({ ...files, ...inventory(reasons) }), []);
+  const one = { 'ops/built.sql': built };
+  const listed = key(boundaryScan(one)[0]);
+  assert.deepEqual(boundaryScan({ ...one, ...inventory({ [listed]: 'reviewed' }) }), []);
+  // The same expression elsewhere in the file, on other lines, spaced differently, is the same site.
+  assert.deepEqual(boundaryScan({ 'ops/built.sql': `SELECT 1;\n\n${built.replace("format('", "format\n  ( '")}\n${built}`, ...inventory({ [listed]: 'reviewed' }) }), []);
+  const stale = /stale or invalid opaque SQL inventory entry/;
+  for (const [what, text] of Object.entries({
+    'another expression': built.replace('NOLOGIN', 'LOGIN'), 'another argument': built.replace(', r)', ', s)'),
+    'the same expression in another file': null, 'a reason of spaces': built,
+  })) {
+    const scan = boundaryScan({ [text === null ? 'ops/other.sql' : 'ops/built.sql']: text ?? built, ...inventory({ [listed]: what === 'a reason of spaces' ? ' ' : 'reviewed' }) });
+    assert.equal(scan.filter(key).length, 1, what);
+    assert.ok(scan.some((p) => stale.test(p)), what);
+  }
+  // Composed now, or gone: the entry is stale. A listed site waives nothing that is readable.
+  assert.match(boundaryScan({ 'ops/built.sql': body("'ALTER ROLE r NOLOGIN'"), ...inventory({ [listed]: 'reviewed' }) }).join(), stale);
+  const beside = boundaryScan({ 'ops/built.sql': `${built}\n${CLAIM};`, ...inventory({ [listed]: 'reviewed' }) });
+  assert.deepEqual(beside.map((p) => p.split(': ')[1]), ['FU-324']);
+  // A part that is not in the text keeps its identity: another hole is another expression.
+  const hole = (name) => boundaryScan({ 'ops/template.mjs': files['ops/template.mjs'].replaceAll('action', name) }).map(key);
+  assert.notDeepEqual(hole('action'), hole('other'));
+  const expansion = (name) => boundaryScan({ 'ops/expanded.sh': files['ops/expanded.sh'].replace('$ROLE', name) }).map(key);
+  assert.notDeepEqual(expansion('$ROLE'), expansion('$OTHER'));
+  // Read as the shell's text and as psql's (a here-document, a -c word): one site, one key.
+  assert.equal(new Set(expansion('$ROLE')).size, 1);
+  assert.equal(new Set(found.filter((p) => p.startsWith('ops/option-expansion.sh:')).map(key)).size, 1);
+});
+
+test('FU-337 no cut of a picker passes through a join the reader does not follow', () => {
+  const picker = PIECES.join('');
+  const forms = [
+    (a, b, c) => `concat(${a}, ${b}, ${c})`, (a, b, c) => `format('%s%s%s', ${a}, ${b}, ${c})`,
+    (a, b, c) => `text ${a} || text ${b} || text ${c}`, (a, b, c) => `${a}::varchar(1000) || ${b} || ${c}::"text"`,
+    (a, b, c) => `${a} || v || ${b} || ${c}`,
+  ];
+  let passed = 0, total = 0;
+  for (let i = 1; i < picker.length; i += 3) for (let j = i + 1; j < picker.length; j += 3) for (const form of forms) {
+    total += 1;
+    if (claimSubqueryProblems(runs(form(...[picker.slice(0, i), picker.slice(i, j), picker.slice(j)].map(sqlString)))).length === 0) passed += 1;
+  }
+  assert.ok(total > 2000);
+  assert.equal(passed, 0);
 });
