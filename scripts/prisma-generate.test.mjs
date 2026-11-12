@@ -5,14 +5,24 @@ import { relative, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { generate, schemaArgs } from './prisma-generate.mjs';
-import { effectiveShell, readOptions, readShell } from './ci-shell-policy-lib.mjs';
+import { createHash } from 'node:crypto';
+import { dockerRun, effectiveShell, readOptions, readShell } from './ci-shell-policy-lib.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
-import {
-  actionLifecycle,
-  dockerfileLifecycle,
-  lifecycleFileKind,
-  workflowLifecycle,
-} from './prisma-lifecycle-suppression-lib.mjs';
+import * as lifecycleLib from './prisma-lifecycle-suppression-lib.mjs';
+
+const { CONTAINER_SCRIPTS, MATRIX, MOUNTS, lifecycleFileKind } = lifecycleLib;
+// FU-334: every file a step runs, uses or builds is a member of this inventory, read once.
+const ROOT = fileURLToPath(new URL('../', import.meta.url));
+const FILES = new Set(
+  [...authoredFiles(ROOT)].map((file) => relative(ROOT, file).replaceAll('\\', '/')),
+);
+const inInventory =
+  (check) =>
+  (name, text, workflows, files = FILES) =>
+    check(name, text, workflows, files);
+const dockerfileLifecycle = inInventory(lifecycleLib.dockerfileLifecycle);
+const workflowLifecycle = inInventory(lifecycleLib.workflowLifecycle);
+const actionLifecycle = inInventory(lifecycleLib.actionLifecycle);
 
 async function probe(results) {
   let calls = 0;
@@ -469,8 +479,11 @@ const runs = {
 const everywhere = (script, pattern, accepted = false) => {
   for (const [where, run] of Object.entries(runs)) {
     const { errors } = run(script);
-    if (accepted) assert.deepEqual(errors, [], `${where}: ${script}`);
-    else assert.match(errors.join('\n'), pattern, `${where}: ${script}`);
+    // PR #1100 r1 F2: a RUN starts in the image: a control that needs the checkout is refused there.
+    const image =
+      where === 'dockerfile' && /(?:scripts|infrastructure|services)\/|git |psql /.test(script);
+    if (accepted && !image) assert.deepEqual(errors, [], `${where}: ${script}`);
+    else assert.match(errors.join('\n'), pattern ?? /is not a f|is followed|only the l/, script);
   }
 };
 const form = (name) => new RegExp(`is not a form of \`${name}\` this check reads`);
@@ -530,7 +543,7 @@ test('shell text that could drop the suppression is refused wherever it runs', (
     'x_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"\neval "${x_credentials}"',
     'echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"',
     'if ! command -v gitleaks >/dev/null 2>&1; then pnpm exec turbo run build | tee out.log; fi',
-    'docker run --rm --entrypoint sh image@sha256:0 -c "promtool test rules /etc/x.yml"',
+    "docker run --rm --entrypoint sh image@sha256:0 -c 'clamd --version; ls -l /var/lib/clamav/'",
   ])
     everywhere(script, null, true);
 });
@@ -602,10 +615,6 @@ test('what an image or a step starts outside the suppression is refused', () => 
   assert.equal(lifecycleFileKind('Containerfile'), null);
   for (const mutant of [file('Containerfile'), build(' ${{ fromJSON(inputs.build) }}')])
     refused(workflowLifecycle, 'new.yml', mutant, /builds .*, a file this check does not read/);
-  assert.deepEqual(
-    workflowLifecycle('new.yml', file('services/${{ matrix.service }}/Dockerfile')).errors,
-    [],
-  );
 });
 
 // PR #1085 r2 F1 (FU-334): the three forms the reviewer ran and found accepted at ac94f313's
@@ -661,18 +670,26 @@ test('an option, a nested shell or a wrapper that runs unread text is refused (F
     ['pnp>m deploy /out', UNPROVEN],
     ['nod<e scripts/prisma-generate.mjs', UNPROVEN],
     ['n2>&1pm install', UNPROVEN],
-    // `bash` runs a file of this repository, or text that was read.
+    // `bash` runs a file of the inventory, or text that was read.
     ['bash -c "env -i pnpm deploy /out"', form('bash')],
     ['bash -lc "pnpm install"', form('bash')],
     ['bash /tmp/install.sh', form('bash')],
+    ['bash scripts/not-in-the-inventory.sh', form('bash')],
+    ['scripts/not-in-the-inventory.sh', UNPROVEN],
+    // After a change of directory a relative path is another file.
+    ['cd services/api-gateway\nbash scripts/ci-install-browser.sh', form('bash')],
+    ['cd services/api-gateway\nscripts/ci-install-browser.sh', UNPROVEN],
+    ['cd /tmp\nnode dist/main.js', form('cd')],
+    ['cd "$elsewhere"', form('cd')],
   ])
     everywhere(script, pattern);
-  // Controls: the read forms.
+  // Controls: the read forms, and a `cd` that stays inside its subshell.
   for (const script of [
     'pnpm --filter @rasta/web exec playwright test -c playwright.config.ts',
     'pnpm run test:integration --shard=economic -- --verbose',
     'npm install -g pnpm@11.22.0\npnpm config set store-dir /pnpm/store',
     'bash -c "pnpm install --frozen-lockfile"',
+    '( cd services/api-gateway && node dist/main.js )\nbash scripts/ci-install-browser.sh',
   ])
     everywhere(script, null, true);
 });
@@ -767,7 +784,7 @@ test('r1 probes: redirections, npm options, bound names and unreviewed lines are
   // Controls: the forms the real files use.
   for (const script of [
     'set -euo pipefail\ngit rev-list --count "$SCAN_BASE..$SCAN_HEAD" >/dev/null 2>&1',
-    'PORT=3000 node dist/main.js > /tmp/gateway.log 2>&1 &',
+    '( cd services/api-gateway && PORT=3000 node dist/main.js > /tmp/gateway.log 2>&1 & )',
     'node scripts/prisma-generate.mjs --schema "${dir}/schema.prisma" < /dev/null',
     'for attempt in $(seq 1 60); do psql -U rasta -d postgres -c "SELECT 1" >/dev/null && break; done',
   ])
@@ -816,6 +833,278 @@ test('the shell that reads a step and the variables it is given are read at ever
       ),
       option,
     );
+  // Where a step's text starts: a relative path is the checkout's only below the checkout.
+  for (const directory of ['/tmp', '../elsewhere', '${{ inputs.directory }}', '-x'])
+    assert.match(
+      errors(job(run(`        working-directory: ${directory}\n`))),
+      /working-directory is not/,
+      directory,
+    );
+  assert.match(errors(job(run('        working-directory: services\n'))), form('bash'));
+});
+
+// Two of ci.yml's lines: refused below by where they run or what their image is, not as unread.
+const semgrep =
+  'docker run --rm -v "$PWD:/src" -w /src image semgrep scan --error --metrics=off --config p/typescript --config p/nodejs --config p/owasp-top-ten --config p/secrets';
+const clamd = (image) =>
+  `docker run --rm --entrypoint sh ${image} -c 'clamd --version; ls -l /var/lib/clamav/'`;
+const changed = /a mount of \$PWD after the directory changed is not the checkout/;
+test('a container runs only a reviewed program, body or script (FU-334)', () => {
+  const dropped = 'env -i n\\"pm\\" rebuild';
+  for (const [script, pattern] of [
+    // 2. The reviewer's probes: Docker's second shell, by `run` and by `exec`.
+    [`docker run --rm image sh -c "${dropped}"`, form('docker')],
+    [`docker exec container sh -c "${dropped}"`, form('docker')],
+    ['docker run --rm image bash /install.bash', form('docker')],
+    ['docker exec container bash /install.bash', form('docker')],
+    // The same class: every other way a container is handed a shell, a script or a program.
+    ['docker run --rm --entrypoint sh image -c "npm rebuild"', form('docker')],
+    ['docker run --rm --entrypoint=/bin/sh image -c "corepack pnpm install"', form('docker')],
+    ['docker run --rm --entrypoint sh image -c "$body"', form('docker')],
+    ['docker run --rm --entrypoint sh image -s', form('docker')],
+    ['docker run --rm --entrypoint sh image', form('docker')],
+    ['docker run --rm --entrypoint /install.sh image', form('docker')],
+    [
+      'docker run --rm --entrypoint promtool --entrypoint sh image -c "npm rebuild"',
+      form('docker'),
+    ],
+    ['docker run --rm --health-cmd "npm rebuild" image', form('docker')],
+    ['docker run --rm --env-file /tmp/env image', form('docker')],
+    ['docker run --rm $options image', form('docker')],
+    ['docker run "$@"', form('docker')],
+    [clamd('"$IMAGE"'), /the image is neither written out nor a value of the workflow env/],
+    ['docker run --rm image node /app/install.js', form('docker')],
+    ['docker run --rm image unknown-tool', form('docker')],
+    ['docker exec -u root container clamdscan --version', form('docker')],
+    ['docker exec -u ls container npm rebuild', form('docker')],
+    ['docker --config /tmp/plugins run --rm image', form('docker')],
+    ['docker compose run --rm tool', form('docker')],
+    ['docker build .', form('docker')],
+    ['docker start stopped-container', form('docker')],
+    ['docker buildx build -f /tmp/Dockerfile .', form('docker')],
+    // A mount that puts a file where a container program is found, or is not the checkout.
+    ['docker run --rm -v /tmp/tool:/usr/bin/promtool --entrypoint promtool image', form('docker')],
+    ['docker run --rm --mount type=bind,src=/tmp,dst=/usr/bin image', form('docker')],
+    [`cd services/api-gateway\n${semgrep}`, changed],
+    [`PWD=/tmp ${semgrep}`, changed],
+    // PR #1100 r1 F2, closed by the reader of #1099 (every binding form marks the name): `unset`.
+    [`unset PWD\n${semgrep}`, changed],
+  ])
+    everywhere(script, pattern);
+  // The Keycloak gate is the checkout's reviewed script only through the reviewed mount.
+  const ci = repoText('.github/workflows/ci.yml');
+  const mount = '-v "$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro"';
+  assert.ok(ci.includes(mount));
+  for (const other of [
+    '-v "/tmp/replacement:/opt/keycloak/data/import:ro"',
+    '-v "$OTHER/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro"',
+    '-e UNMOUNTED=1',
+  ])
+    refused(workflowLifecycle, 'ci.yml', ci.replaceAll(mount, other), form('docker'));
+  const gate = [...CONTAINER_SCRIPTS.values()];
+  for (const { mount: reviewed, file, sha256 } of gate) {
+    assert.ok(MOUNTS.has(reviewed) && FILES.has(file), file);
+    assert.equal(`sha256:${createHash('sha256').update(repoText(file)).digest('hex')}`, sha256);
+  }
+  // No reviewed mount is stale: each is written in ci.yml.
+  for (const reviewed of MOUNTS) assert.ok(ci.includes(` ${reviewed} `), reviewed);
+  // Controls: the forms ci.yml uses.
+  for (const script of [
+    'docker run -d --name rasta-e2e-temporal --network host --entrypoint temporal image@sha256:0 server start-dev --ip 0.0.0.0 --port 7233 --headless',
+    'docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" --entrypoint promtool "${{ env.IMAGE }}" check config /etc/prometheus/prometheus.yml',
+    'docker exec rasta-ci-clamav clamdscan --ping 1\ndocker logs --tail 100 rasta-ci-clamav',
+    semgrep,
+    clamd('"${{ env.IMAGE }}"'),
+  ])
+    for (const where of ['workflow', 'action'])
+      assert.deepEqual(runs[where](script).errors, [], `${where}: ${script}`);
+});
+
+// PR #1100 r1 F1, F2 and PR #1101 r1 F5: every probe the reviewer ran and its class, one a line.
+test('r1 probes: containers, services and directories are read only as reviewed (D-173)', () => {
+  const each = (text) => text.trim().split(/\n\s*/);
+  const lines = /only the lines reviewed in DOCKER_EXEC and REVIEWED_DIGESTS are read/;
+  // F1: Docker reads its options before the container and the command, so no word is guessed.
+  for (const script of each(`
+    docker exec "--env" ls container sh -c "npm rebuild"
+    docker exec "-u" root rasta-ci-clamav clamdscan --version
+    docker exec "$OPTIONS" rasta-ci-clamav clamdscan --version
+    docker exec rasta-ci-clamav clamdscan --ping 2
+    docker exec rasta-ci-clamav sh
+    docker run --rm -e "$ENV_ENTRY" --entrypoint bash image -c "ls"
+    docker run --rm -e BASH_ENV=/src/install.bash image ls
+    docker run --rm -e PATH --user 0 image ls
+    docker run --rm --entrypoint sh image -c "ls"`))
+    everywhere(script, lines);
+  const mounted = 'docker run -e "$ENV_ENTRY" -v "$PWD:/src" --entrypoint bash image -c "ls"';
+  assert.match(runs.workflow(mounted).errors.join(), lines);
+  // F2, #1101 F5: a reviewed line is read where it was reviewed, after at most the one `cd`.
+  for (const script of each(`
+    node dist/main.js
+    go vet ./...
+    ( cd services/api-gateway && go vet ./... )
+    ( cd services/api-gateway && git rev-list --count "$SCAN_BASE..$SCAN_HEAD" )`))
+    everywhere(script, /only the lines reviewed in REVIEWED are read/);
+  for (const script of each(`
+    ( cd arbitrary && node dist/main.js )
+    ( cd services && node dist/main.js )
+    ( cd services/api-gateway/ && node dist/main.js )
+    ( cd services/api-gateway x && node dist/main.js )
+    ( cd services/api-gateway && cd dist && node main.js )
+    cd services/api-gateway; ( cd services/economic-service && node dist/main.js )`))
+    everywhere(script, form('cd'));
+  for (const script of each(`
+    CDPATH=/tmp cd services/api-gateway
+    export CDPATH=/tmp; bash -c 'echo'
+    NODE_OPTIONS=--require=/tmp/x.js node scripts/prisma-generate.mjs
+    export NODE_PATH=/tmp
+    for NODE_OPTIONS in -r; do echo; done`))
+    everywhere(script, /the search path|what node loads/);
+  // The reviewer's Dockerfile probe: no COPY origin is proven for a path in a RUN.
+  assert.match(runs.dockerfile('bash scripts/ci-install-browser.sh').errors.join(), form('bash'));
+  // What a job starts outside its steps, and the directory its steps start in.
+  const env = "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n";
+  const job = (extra, top = '', step = 'run: echo') =>
+    workflowLifecycle(
+      'new.yml',
+      `on: push\n${env}${top}jobs:\n  a:\n    runs-on: x\n${extra}    steps:\n      - ${step}\n`,
+    ).errors.join('\n');
+  const health = (command) =>
+    `'--health-cmd "${command}" --health-interval 10s --health-timeout 5s --health-retries 10'`;
+  const db = (keys) => `    services: { db: { image: postgres, ${keys} } }\n`;
+  const run = (keys) => `    defaults: { run: { ${keys} } }\n`;
+  const at = (directory, text) =>
+    job('', '', `{ run: '${text}', working-directory: ${directory} }`);
+  assert.equal(job(db(`options: ${health('redis-cli ping')}, env: { A: b }, ports: ['1:1']`)), '');
+  assert.equal(job(db('command: postgres -c max_connections=300') + run('shell: bash')), '');
+  assert.equal(job('', 'defaults: { run: { shell: sh } }\n'), '');
+  assert.equal(at('scripts/trivy-db-check', 'go vet ./...'), '');
+  const service = /service db has a key, options or a command not reviewed/;
+  const inherited = /an inherited directory is not read/;
+  for (const [text, pattern] of [
+    [
+      job('    container: { image: node, options: --env PATH=/tmp/bin }\n'),
+      /container is not a job/,
+    ],
+    [job(db(`options: ${health('npm rebuild')}`)), service],
+    [job(db('options: postgres -c max_connections=300')), service],
+    [job(db('command: sh -c "npm rebuild"')), service],
+    [job(db('volumes: [/tmp/bin:/usr/local/bin]')), service],
+    [job(db('env: { PATH: /tmp/bin }')), /service db: env sets PATH/],
+    [job(db("env: '${{ fromJSON(inputs.env) }}'")), /service db: env is not a mapping/],
+    [job('    services: { db: ~ }\n'), service],
+    [job('    services: x\n'), /services is not a mapping/],
+    [job(run('working-directory: /tmp')), inherited],
+    [job(run('shell: bash, working-directory: services')), inherited],
+    [job('    defaults: x\n'), inherited],
+    [job('', 'defaults: { run: { working-directory: /tmp } }\n'), inherited],
+    [at('services/api-gateway', 'go vet ./...'), /only the lines reviewed in REVIEWED/],
+    [at('services/api-gateway', 'node dist/main.js'), /only the lines reviewed in REVIEWED/],
+    [at('scripts', 'cd services/api-gateway'), form('cd')],
+    [at('scripts', semgrep), changed],
+  ])
+    assert.match(text, pattern);
+});
+
+test('a step builds and uses only files of the inventory (FU-334)', () => {
+  const env = "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n";
+  const build = (inputs, uses = 'docker/build-push-action@0', matrix = '') =>
+    `      - uses: ${uses}\n        with:\n${inputs.map((input) => `          ${input}\n`).join('')}${matrix}`;
+  const job = (steps, matrix = "['economic-service', 'api-gateway']") =>
+    `on: push\n${env}jobs:\n  a:\n    runs-on: x\n    strategy:\n      matrix:\n        service: ${matrix}\n    steps:\n${steps}`;
+  const checks = {
+    workflow: (step, matrix) => workflowLifecycle('new.yml', job(step, matrix)),
+    action: (step) =>
+      actionLifecycle(ENTRY.action, `${repoText(ENTRY.action)}${step.replaceAll(/^ {2}/gm, '')}`),
+  };
+  const notRead = /builds .*, a file this check does not read/;
+  for (const [inputs, pattern] of [
+    // 3. The reviewer's probes: a Dockerfile-shaped name outside the inspected inventory.
+    [['file: /tmp/Dockerfile'], notRead],
+    [['file: ../external/Dockerfile'], notRead],
+    [['file: ${{ env.BUILD_ROOT }}/Dockerfile'], notRead],
+    // The same class: every other way a build is given a file nobody read.
+    [['file: services/not-in-the-inventory/Dockerfile'], notRead],
+    [['file: services/economic-service/../../../tmp/Dockerfile'], notRead],
+    [['file: ${{ inputs.dockerfile }}'], notRead],
+    [['file: services/${{ matrix.other }}/Dockerfile'], notRead],
+    [['context: .'], notRead], // no `file`: the Dockerfile of the root, which the inventory lacks
+    [
+      ['context: ../external', 'file: services/economic-service/Dockerfile'],
+      /not from the checkout/,
+    ],
+    [['context: ${{ inputs.context }}', 'file: services/economic-service/Dockerfile'], /not from/],
+    [
+      ['file: services/economic-service/Dockerfile', 'build-contexts: deps=docker-image://x'],
+      /build input build-contexts/,
+    ],
+    [
+      ['file: services/economic-service/Dockerfile', 'build-args: BUILDKIT_SYNTAX=x/y'],
+      /build input build-args/,
+    ],
+    [['file: services/economic-service/Dockerfile', 'target: deps'], /build input target/],
+  ])
+    for (const [where, check] of Object.entries(checks))
+      assert.match(check(build(inputs)).errors.join('\n'), pattern, `${where}: ${inputs}`);
+  // PR #1100 r1 F2, F3: what is run and built is the tested commit's checkout, at the root.
+  for (const input of ['path: sub', 'repository: other/repo', 'ref: main'])
+    for (const check of Object.values(checks))
+      assert.match(check(build([input], 'actions/checkout@0')).errors.join(), /checkout input/);
+  // A matrix value is read only from a list written in the job, or from the reviewed source.
+  const perService = build(['context: .', 'file: services/${{ matrix.service }}/Dockerfile']);
+  assert.deepEqual(checks.workflow(perService).errors, []);
+  // PR #1100 r1 F3: the computed matrix is read only with its reviewed producer, key and consumer.
+  const ci = repoText('.github/workflows/ci.yml');
+  const producer = /the matrix is not computed by the producer reviewed in MATRIX/;
+  assert.match(checks.workflow(perService, MATRIX.values).errors.join('\n'), producer);
+  for (const [from, to, pattern] of [
+    ['services: ${{ steps.scope.outputs.services }}', `services: '["../../tmp"]'`, producer],
+    ['node scripts/container-scope.mjs --run', 'echo services=[] >> "$GITHUB_OUTPUT"', producer],
+    ['id: scope\n', 'id: other\n', producer],
+    [`service: ${MATRIX.values}`, `other: ${MATRIX.values}`, notRead],
+    [MATRIX.consumer, 'services/${{ matrix.service }}/../Dockerfile', notRead],
+  ])
+    assert.match(workflowLifecycle('ci.yml', swap(ci, from, to)).errors.join('\n'), pattern, to);
+  const scripts = createHash('sha256').update(MATRIX.scripts.map(repoText).join('')).digest('hex');
+  assert.equal(`sha256:${scripts}`, MATRIX.scriptsSha256, 'read what they print, then pin again');
+  for (const matrix of [
+    "['economic-service', '../../tmp']",
+    "['economic-service', 7]",
+    '${{ fromJSON(inputs.services) }}',
+    "['economic-service']\n        include:\n          - service: ../../tmp",
+  ])
+    assert.match(checks.workflow(perService, matrix).errors.join('\n'), notRead, matrix);
+  assert.match(checks.action(perService).errors.join('\n'), notRead);
+  assert.match(
+    workflowLifecycle(
+      'new.yml',
+      job(perService).replace(
+        '      matrix:\n        service:',
+        '      matrix: ${{ fromJSON(inputs.matrix) }}\n      other:',
+      ),
+    ).errors.join('\n'),
+    notRead,
+  );
+  // An action nobody reviewed can name a build file by any key; a local one is read as a file.
+  const unreviewed = /an action this check has neither read nor reviewed/;
+  for (const step of [
+    build(['dockerfile: /tmp/Dockerfile'], 'someone/build-image-action@v1'),
+    build(['args: sh -c "npm rebuild"'], 'docker://alpine:3'),
+    build(['key: x'], './.github/actions/not-in-the-inventory'),
+    build(['key: x'], './tmp/action'),
+    build(['key: x'], '${{ inputs.action }}'),
+    '      - run: echo\n        with:\n          file: /tmp/Dockerfile\n',
+  ])
+    for (const [where, check] of Object.entries(checks))
+      assert.match(
+        check(step).errors.join('\n'),
+        step.includes('run: echo') ? /with is given to no action/ : unreviewed,
+        `${where}: ${step}`,
+      );
+  assert.deepEqual(
+    checks.workflow(build(['key: x'], './.github/actions/restore-trivy-db')).errors,
+    [],
+  );
 });
 
 // The shared reader by itself, under a policy that is not this guard's: what FU-338 will hand it.
@@ -902,6 +1191,29 @@ test('the shared shell reader refuses whatever its policy does not list (FU-334)
     '--',
   ])
     assert.ok(read(text).problem, text);
+  const run = (text) => dockerRun(parseCommands(text).commands[0].words);
+  const split = run('--rm -e A="$b" --entrypoint=sh "$image" -c "x y"');
+  assert.deepEqual(
+    split.options.map(({ name, value }) => [name, value?.value ?? null]),
+    [
+      ['--rm', null],
+      ['-e', 'A='],
+      ['--entrypoint', 'sh'],
+    ],
+  );
+  assert.deepEqual(
+    split.command.map((word) => word.value),
+    ['-c', 'x y'],
+  );
+  for (const text of [
+    '--rm',
+    '--unknown image',
+    '$options image',
+    '-e $value image',
+    '"$@"',
+    '--entrypoint',
+  ])
+    assert.ok(run(text).problem, text);
   const steps = { step: { shell: 'sh' }, job: { defaults: { run: { shell: 'bash' } } } };
   assert.deepEqual(effectiveShell(steps), { shell: 'sh' });
   assert.deepEqual(effectiveShell({ step: {}, job: steps.job }), { shell: 'bash' });
