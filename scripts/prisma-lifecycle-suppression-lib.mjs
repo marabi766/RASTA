@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import { parseDocument } from 'yaml';
 import { dockerInstructions } from './check-dockerfile-pins-lib.mjs';
-import { executionChain, parseCommands } from './ci-shell-text-lib.mjs';
+import { effectiveShell, oneWord, plain, readOptions, readShell } from './ci-shell-policy-lib.mjs';
+import { parseCommands } from './ci-shell-text-lib.mjs';
 
 /**
  * No dependency lifecycle hook generates the Prisma client (FU-329).
@@ -21,15 +23,22 @@ import { executionChain, parseCommands } from './ci-shell-text-lib.mjs';
  *    covers), so it may not name the variable at all.
  *
  * Everywhere the variable may be named only by that one setting. Shell text (a RUN, a step's
- * `run`) is read by the shared tokenizer and refused unless every command word is a literal from
- * `COMMANDS`: those hand their environment on unchanged, and the few that could change it or
- * start something outside it (`export`, `unset`, `eval`, `bash`, `docker`, `pnpm`, `npm`) are held
- * to the forms in `FORMS`. So `env`, `exec`, `sudo`, a quoted or computed command word and any
- * command not listed are refused without being named here (PR #1085 r1). What an image starts
- * is `node` itself and nothing else, an `env` is a mapping written in the file, and a build names
- * a file the rule below reads as a Dockerfile.
- * Not proven: what a listed program (`node x.mjs`, a repository script, an action, an image's
- * own entry point, a `package.json` script) does with the environment it was given.
+ * `run`) is read by the shared default-deny reader (ci-shell-policy-lib.mjs) under `HOST`: a
+ * command word is a literal of its `programs` or a file of this repository, or it is refused, so
+ * `env`, `exec`, `sudo`, `xargs`, `npx`, a quoted or computed command word are refused without
+ * being named here (PR #1085 r1). A program that can run what it is given has a closed grammar
+ * there (PR #1085 r2 F1, FU-334): `pnpm`/`npm` by their option tables, so an option that is not
+ * listed (`-c`, `--shell-mode`, `--config.*`) is refused, and `bash` by its `-c` body, read by
+ * the same reader. `node`, `git`, `go`, `psql` and `set` are read only as the exact lines of
+ * `REVIEWED`, what an image starts only as the exact texts of `STARTS` (D-173). An `env` is a
+ * mapping written in the file, and a build names a file the rule below reads as a Dockerfile.
+ * The names of `PROTECTED` are bound by no text but a reviewed line.
+ * Not proven (D-173: accidental regression, not a hostile edit; ci-shell-policy-lib.mjs has the
+ * reader's own limits): what a listed program (`node x.mjs`, `curl`, `mc`, a repository script,
+ * an action, an image's own entry point, a `package.json` script) does with the environment and
+ * the operands it was given; what a variable holds where a reviewed line uses it; what a
+ * program reads from a variable outside `PROTECTED`; which directory a relative path of a
+ * reviewed line is read from (PR #1100 binds it); a job's `container` and `services`.
  *
  * Pure: text in, problems and the lifecycle commands found out.
  */
@@ -41,17 +50,21 @@ const PACKAGE_MANAGER = /p?np[mx]|yarn|corepack|\bbunx?\b/i;
 const LIFECYCLE =
   /\b(pnpm|npm|yarn)\b(?:\s+(?!-)\S*[=@/.]\S*|\s+-\S+)*?\s+(install|i|ci|add|deploy|rebuild|update|up|import|dlx|prune|dedupe|remove|fetch)(?=\s|$)/g;
 /** Instructions that run nothing while the image is built or started. */
-const DOCKER_INERT = new Set('ARG WORKDIR COPY ADD LABEL EXPOSE USER VOLUME STOPSIGNAL'.split(' '));
+const DOCKER_INERT = new Set('WORKDIR COPY ADD LABEL EXPOSE USER VOLUME STOPSIGNAL'.split(' '));
 const DOCKER_STARTS = new Set(['CMD', 'ENTRYPOINT', 'HEALTHCHECK']);
 /**
  * All a RUN outside a suppressed stage may hold: one of these, with plain words only. The names
  * are the base image's programs only until the stage copies a file in or changes a search path.
  */
 const INERT_RUN = /^(?:addgroup|adduser|rm|mkdir|chown|chmod)(?: [\w@%+=:,./-]+)+$/;
-/** All a container may start: `node` itself, on a plain path or on inline text that quotes nothing. */
-const STARTS_NODE = /^(?:\["node"(?:, "[\w./-]+")+\]|node -e "[^"\\$`]*")$/;
-const SHELLS = new Set(['bash', 'sh']);
-const list = (text) => new Set(text.split(' '));
+/**
+ * All a container may start, by exact text (D-173): `node` on the built entry point, and the
+ * health probe, whose port (written here as PORT) is the one part that differs between images.
+ */
+const STARTS = new Set([
+  '["node", "dist/main.js"]',
+  `node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||PORT)+'/health/ready',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"`,
+]);
 /**
  * What the tokenizer does not model but still reads as commands: nothing hides behind these.
  * A backslash inside `$( )` is read as bash reads it; inside backticks it is not (bash removes it
@@ -66,49 +79,148 @@ const READ_PAST = new Set([
   'a backslash inside a command substitution',
   'a parameter expansion with an operator, subscript or nested text',
 ]);
-/** Every word that may stand where a command runs. Each hands its environment on as it got it. */
-const COMMANDS = list(
-  'if then elif else fi for while until do done break ! [ { } true test set cd exit echo cat tail tee grep seq sleep ' +
-    'mkdir chmod rm mktemp command export unset eval bash docker pnpm npm node go git curl psql ' +
-    'openssl gitleaks mc',
-);
+const UNLISTED = 'a command this check cannot prove hands on the environment';
 /** A file of this repository run by its path: a listed program in the sense of the header. */
 const REPO_FILE = /^(?:scripts|infrastructure)\/(?!.*\.\.)[\w./-]+$/;
+/**
+ * The names no text binds but a reviewed line (r1 F3): a package manager option as a variable
+ * (`pnpm_config_<setting>`), the search path, a shell's startup file, and what the reviewed
+ * environment-file lines are written from.
+ */
+const PROTECTED = /^(?:p?npm_config_\w*|PATH|BASH_ENV|ENV|GITHUB_(?:ENV|PATH)|RUNNER_TEMP)$/i;
+const unassignable = (name) =>
+  PROTECTED.test(name)
+    ? `sets ${name}: a package manager option, the search path or an environment file is not text's to set`
+    : null;
+/** The one instruction that sets a protected name: every image puts pnpm's home on the path. */
+const DOCKER_PATH = 'ENV PATH="$PNPM_HOME:$PATH"';
+const sha256 = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+/**
+ * A program that runs what it is given is read only as the lines reviewed here (D-173, in place
+ * of PR #1101's grammars): the words after it exactly as written, joined by one blank; a long
+ * line by the sha256 of `<program> <that>` (`REVIEWED_DIGESTS`). Nothing is folded: a blank changed inside a quoted
+ * word is another line. `node` also runs a file the policy admits, on operands of one word each.
+ */
+const REVIEWED = {
+  set: ['-euo pipefail'],
+  git: [
+    'cat-file -e "$SCAN_BASE^{commit}"',
+    'cat-file -e "$SCAN_HEAD^{commit}"',
+    'log -p -U0 --full-history --diff-merges=remerge "$SCAN_BASE..$SCAN_HEAD"',
+    'rev-list --count "$SCAN_BASE..$SCAN_HEAD"',
+    'rev-list --min-parents=3 --count "$SCAN_BASE..$SCAN_HEAD"',
+  ],
+  go: [
+    'mod download',
+    'mod verify',
+    'vet ./...',
+    'test -v ./...',
+    'build -o "$RUNNER_TEMP/trivy-db-check-bin/trivy-db-check" .',
+  ],
+  psql: [
+    '-U rasta -d postgres -c "SELECT 1"',
+    "-X -At -c 'SHOW max_connections'",
+    '-v ON_ERROR_STOP=1 -h localhost -U rasta_contract -d rasta_contract -f apps/web/e2e/fixtures/contract-statements.sql',
+    '-v ON_ERROR_STOP=1 -h localhost -U rasta_marketplace -d rasta_marketplace -f apps/web/e2e/fixtures/marketplace-returns.sql',
+  ],
+  node: ['dist/main.js'],
+};
+/** ci.yml's three inline `node -e` programs (needs, clamd ping, scan range) and the reward cutover `psql -c`. */
+const REVIEWED_DIGESTS = new Set([
+  'sha256:d53514bb3ad8189b1c8ec7ba4e7822f87a477542d9473cb5b5c204119ffd36e2',
+  'sha256:4c9ab2743c6aa630f50072254040cb56f34e7be0b4920c7e4fca4949f01a80d3',
+  'sha256:fb064447788a1770ae0fd2883cb9ec041e554c356d78c0459d8e117a26b930a9',
+  'sha256:aa7427c4412c4f50f5ca558d44b322051f1c2dd4477dbf0788a42773926c5317',
+]);
+const reviewed =
+  (name, policy) =>
+  (args, { state }) => {
+    const text = args.map((word) => word.source).join(' ');
+    const [file, ...operands] = args;
+    return REVIEWED[name].includes(text) ||
+      REVIEWED_DIGESTS.has(sha256(`${name} ${text}`)) ||
+      (name === 'node' && plain(file) && !policy.file(file.value, state) && operands.every(oneWord))
+      ? null
+      : 'only the lines reviewed in REVIEWED are read';
+  };
+
+const options = (table) => (args) => readOptions(args, table).problem ?? null;
+/** Every option an install-like verb is given here; an operand is a package or a directory. */
+const INSTALL_OPTIONS = options({
+  flags: '--frozen-lockfile --ignore-scripts --prod --legacy --offline -g',
+  values: '--filter -F',
+});
+/** The first word after the verb is the script or program; what follows it is that one's own. */
+const starts = (named) => (args) =>
+  plain(args[0]) && named.test(args[0].value) ? null : 'what it starts is not one this check reads';
+const INSTALL_VERBS = 'install i ci add deploy rebuild update remove prune fetch';
+const verbs = (names, grammar) =>
+  Object.fromEntries(names.split(' ').map((name) => [name, grammar]));
+/**
+ * `pnpm [--filter x]… verb …`, measured on pnpm 11.22.0: options before the verb are pnpm's own
+ * (`-c`, `--shell-mode`, `--config.script-shell=x` change what runs); after `exec <program>` and
+ * `run <script>` every word is handed on, quoted. A verb outside the table is a script name.
+ */
+const PNPM = {
+  ...verbs(INSTALL_VERBS, INSTALL_OPTIONS),
+  audit: options({ flags: '--prod', values: '--audit-level' }),
+  config: (args) =>
+    args.length === 3 &&
+    args.every(plain) &&
+    `${args[0].value} ${args[1].value}` === 'set store-dir'
+      ? null
+      : 'only `config set store-dir <path>` is read',
+  run: starts(/^[A-Za-z][\w:.-]*$/),
+  build: () => null,
+  exec: starts(/^(?:turbo|jest|playwright)$/),
+};
+/**
+ * npm reads an option wherever it stands, and an option it does not know as a flag: `--filter x`
+ * is pnpm's, and under npm leaves `x` (or `--script-shell=…`) to be read on its own (r1 F2). So
+ * npm has its own table: the install verbs, and the one option given here.
+ */
+const NPM = verbs('install i ci', options({ flags: '-g' }));
+const packageManager = (table, before) => (args) => {
+  let at = 0;
+  while (plain(args[at]) && args[at].value.startsWith('-')) {
+    const width = args[at].value.includes('=') ? 1 : 2;
+    const { problem } = readOptions(args.slice(at, at + width), before);
+    if (problem) return problem;
+    at += width;
+  }
+  if (!plain(args[at]) || !Object.hasOwn(table, args[at].value))
+    return 'its verb is not one this check reads';
+  return table[args[at].value](args.slice(at + 1));
+};
+
 /** The one script a container is started on, read by hand: it only starts Keycloak's launcher. */
 const KEYCLOAK_GATE = '/opt/keycloak/data/import/dev-realm-gate.sh';
-const PNPM_EXEC = list('turbo jest playwright');
 /** A container gets none of the step's environment: its words may name nothing that installs. */
 const INSTALLS = new RegExp(`${PACKAGE_MANAGER.source}|\\bnode\\b|\\.(?:sh|[cm]?js)\\b`, 'i');
-/** `NAME=…` with the name written out: bash runs `A$x=1` as a command, not as an assignment. */
-const assigns = (word) =>
-  /^[A-Za-z_]\w*\+?=/.test(word.dynamic ? word.value.slice(0, word.cut) : word.value);
-const plain = (word) => word && !word.dynamic;
-const isName = (word) => plain(word) && /^[A-Za-z_]\w*$/.test(word.value);
-/** Any other first word a package manager runs as a script or, failing that, as a program. */
-const VERBS = list(
-  'install i ci add deploy rebuild update remove prune fetch audit config run build exec',
-);
-const TAKES_VALUE = list('--filter -F --dir -C');
-/** `pnpm [options] verb …` with the verb written out; `exec` starts a listed program only. */
-const runsListed = (args) => {
-  const at = args.findIndex(
-    (word, index) => !word.value.startsWith('-') && !TAKES_VALUE.has(args[index - 1]?.value),
-  );
-  const [verb, program] = [args[at], args[at + 1]];
-  if (!plain(verb) || !VERBS.has(verb.value)) return false;
-  return verb.value !== 'exec' || (plain(program) && PNPM_EXEC.has(program.value));
+
+/** Everything a step, a RUN or a `bash -c` body may run. */
+const HOST = {
+  tolerated: READ_PAST,
+  unlisted: UNLISTED,
+  name: unassignable,
+  file: (path) => (REPO_FILE.test(path) ? null : 'is not a file of this repository'),
 };
-/** The only forms of the commands that can change the environment or start something outside it. */
-const FORMS = {
-  export: (args) => args.every((word) => assigns(word) || isName(word)),
-  unset: (args) => args.every(isName),
-  bash: (args) => plain(args[0]) && REPO_FILE.test(args[0].value),
+HOST.programs = {
+  ...verbs(
+    'if then elif else fi for while until do done break ! [ { } true test cd exit echo cat tail tee ' +
+      'grep seq sleep mkdir chmod rm mktemp command eval export unset curl openssl gitleaks mc',
+    true,
+  ),
+  ...Object.fromEntries(Object.keys(REVIEWED).map((name) => [name, reviewed(name, HOST)])),
+  bash: (args, context) => context.shell(args, 'bash', HOST),
   docker: ([verb, ...args]) =>
     /^(?:logs|tag)$/.test(verb?.value) ||
     (/^(?:run|exec)$/.test(verb?.value) &&
-      !args.some((word) => INSTALLS.test(word.value) && word.value !== KEYCLOAK_GATE)),
-  pnpm: runsListed,
-  npm: runsListed,
+      !args.some((word) => INSTALLS.test(word.value) && word.value !== KEYCLOAK_GATE))
+      ? null
+      : 'its words name a package manager, node or a script',
+  pnpm: packageManager(PNPM, { values: '--filter -F' }),
+  npm: packageManager(NPM, {}),
 };
 /** `eval` runs only what the Kafka credentials script printed into the variable it names. */
 const EVAL = /\beval "\$\{(\w+_credentials)\}"/g;
@@ -118,8 +230,17 @@ const credentials = (name) =>
     'g',
   );
 const count = (text, pattern) => [...text.matchAll(pattern)].length;
-/** The one line that may write the environment of later steps. */
-const GITHUB_ENV = /^\s*(?:#.*|echo "[A-Z][A-Z0-9_]*=\$\{\w+\}" >> "\$GITHUB_ENV")$/;
+/**
+ * The only lines that may name a file later steps take their environment or search path from, or
+ * a shell its startup text, by exact text (r1 F3). What the variable holds is not read.
+ */
+const ENV_FILE = /\b(?:GITHUB_(?:ENV|PATH)|BASH_ENV)\b/;
+const ENV_FILE_LINES = new Set([
+  'echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"',
+  'echo "KEYCLOAK_ADMIN_PASSWORD=${keycloak_password}" >> "$GITHUB_ENV"',
+  'echo "WEB_SESSION_SECRET=${web_session_secret}" >> "$GITHUB_ENV"',
+  'echo "$RUNNER_TEMP/trivy-db-check-bin" >> "$GITHUB_PATH"',
+]);
 
 /**
  * GitHub pastes an expression's value in before bash reads the text. Only a value written in the
@@ -135,37 +256,16 @@ const lifecycle = (text) => [...text.matchAll(LIFECYCLE)].map((found) => `${foun
  */
 export function scriptProblems(script) {
   const problems = [];
-  const text = script.replace(EXPRESSION, '$_').replace(/\d*>&\d+/g, '');
-  const read = parseCommands(text);
+  const text = script.replace(EXPRESSION, '$_');
+  const read = readShell(text, HOST);
   if (text.includes('${{')) problems.push('an expression other than `${{ env.NAME }}` is not read');
   if (text.replace(/^\s*#.*$/gm, '').includes('`'))
     problems.push('a backtick command substitution is not read');
-  for (const unread of read.problems)
-    if (!READ_PAST.has(unread)) problems.push(`${unread} is not read`);
-  let evals = 0;
-  for (const { words } of read.commands) {
-    const refuse = (why) =>
-      problems.push(`\`${clip(words.map((w) => w.value).join(' '))}\` ${why}`);
-    if (words.some((word) => word.value.includes(VARIABLE))) refuse(`names ${VARIABLE}`);
-    const { chain, problem } = executionChain(words);
-    if (problem) refuse(problem);
-    for (const at of chain) {
-      const { value, dynamic } = words[at];
-      if (
-        dynamic
-          ? /\w/.test(value) || !COMMANDS.has(value)
-          : !COMMANDS.has(value) && !REPO_FILE.test(value)
-      )
-        refuse(`runs \`${value}\`, a command this check cannot prove hands on the environment`);
-    }
-    const last = chain.at(-1) ?? words.length;
-    if (!words.slice(0, last).every((word, at) => chain.includes(at) || assigns(word)))
-      refuse('has a word before its command that is not an assignment to a written-out name');
-    const form = FORMS[words[last]?.value];
-    if (form && !form(words.slice(last + 1)))
-      refuse(`is not a form of \`${words[last].value}\` this check reads`);
-    if (words[last]?.value === 'eval') evals += 1;
-  }
+  problems.push(...read.problems);
+  for (const { words } of read.commands)
+    if (words.some((word) => word.value.includes(VARIABLE)))
+      problems.push(`\`${clip(words.map((w) => w.value).join(' '))}\` names ${VARIABLE}`);
+  const evals = read.commands.filter(({ program }) => program.value === 'eval').length;
   const evaluated = [...text.matchAll(EVAL)];
   if (
     evals !== evaluated.length ||
@@ -176,12 +276,12 @@ export function scriptProblems(script) {
     )
   )
     problems.push('`eval` runs text other than what kafka-credentials.sh printed');
-  if (
-    script
-      .split('\n')
-      .some((line) => /\b(?:GITHUB|BASH)_ENV\b/.test(line) && !GITHUB_ENV.test(line))
-  )
-    problems.push('writes the environment of later steps in a form this check does not read');
+  // Every command, as the tokenizer read it (a comment is none): its words and redirections as written.
+  for (const { words } of parseCommands(text).commands) {
+    const line = words.map(({ redirect, source }) => `${redirect ? `${redirect} ` : ''}${source}`);
+    if (ENV_FILE.test(line.join(' ')) && !ENV_FILE_LINES.has(line.join(' ')))
+      problems.push('writes the environment of later steps in a line this check has not reviewed');
+  }
   return problems;
 }
 
@@ -223,6 +323,13 @@ export function dockerfileLifecycle(name, text) {
       suppressed = true;
     } else if (rest.replace(/["'\\]/g, '').includes(VARIABLE)) {
       refuse(`${VARIABLE} may be set only by the instruction \`ENV ${DOCKER_SETTING}\``);
+    } else if (/^(?:ENV|ARG)$/.test(keyword)) {
+      // One written-out name per instruction, and a protected one only by the reviewed text.
+      if (!/^[A-Za-z_]\w*(?:=\S*)?$/.test(rest))
+        refuse(`${keyword} ${clip(rest)} is not a form this check reads`);
+      else if (unassignable(rest.split('=')[0]) && `${keyword} ${rest}` !== DOCKER_PATH)
+        refuse(`${keyword} ${clip(rest)} ${unassignable(rest.split('=')[0])}`);
+      if (/PATH/.test(rest)) replaced = true;
     } else if (keyword === 'RUN') {
       if (suppressed) {
         for (const problem of scriptProblems(rest.replace(/^(?:--[a-z]+=\S+\s+)+/, '')))
@@ -236,14 +343,12 @@ export function dockerfileLifecycle(name, text) {
     } else if (DOCKER_STARTS.has(keyword)) {
       const started =
         keyword === 'HEALTHCHECK' ? rest.replace(/^(?:--[a-z-]+=\w+ +)*CMD /, '') : rest;
-      if (!STARTS_NODE.test(started) || PACKAGE_MANAGER.test(rest))
+      if (!STARTS.has(started.replace(/\|\|\d{4}\)/, '||PORT)')))
         refuse(
           `${keyword} ${clip(rest)} does not start \`node\` directly: a shell, a script or ` +
             `a variable there runs without ${VARIABLE}`,
         );
-    } else if (keyword === 'ENV' && !/^[A-Za-z_]\w*=\S*$/.test(rest)) {
-      refuse(`ENV ${clip(rest)} is not a form this check reads`);
-    } else if (keyword !== 'ENV' && !DOCKER_INERT.has(keyword)) {
+    } else if (!DOCKER_INERT.has(keyword)) {
       refuse(`${keyword} is not an instruction this check reads`);
     } else if (keyword === 'COPY' || keyword === 'ADD' || /PATH/.test(rest)) {
       replaced = true;
@@ -274,21 +379,27 @@ function readYaml(name, text) {
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const CALL_KEYS = new Set('name uses permissions needs if strategy with concurrency'.split(' '));
 
-/** `env` is a mapping written in the file, or it can hold anything (`env: ${{ fromJSON(…) }}`). */
-const readsEnv = (where, owner, errors) =>
-  owner.env === undefined ||
-  record(owner.env) ||
-  !errors.push(`${where}: env is not a mapping this check reads`);
+/**
+ * `env` is a mapping written in the file, or it can hold anything (`env: ${{ fromJSON(…) }}`);
+ * and it names no option of a package manager.
+ */
+const readsEnv = (where, owner, errors) => {
+  if (owner.env === undefined) return true;
+  if (!record(owner.env)) return !errors.push(`${where}: env is not a mapping this check reads`);
+  for (const name of Object.keys(owner.env))
+    if (unassignable(name)) errors.push(`${where}: env ${unassignable(name)}`);
+  return true;
+};
 
 /**
  * Problems of the steps themselves: an unknown shell, an opaque `env`, a script that is not
  * proven, a build of a file the name rule above does not read (`file: Containerfile`).
  */
-function stepProblems(where, step, errors, commands) {
+function stepProblems(where, step, errors, commands, composite = false) {
   if (!record(step)) return void errors.push(`${where} is not a mapping`);
   readsEnv(where, step, errors);
-  if (step.shell !== undefined && !SHELLS.has(step.shell))
-    errors.push(`${where}: shell ${clip(String(step.shell))} is not one this check reads`);
+  const { problem } = effectiveShell({ step, composite: composite && step.run !== undefined });
+  if (problem) errors.push(`${where}: ${problem}`);
   const built = record(step.with ?? {}) ? step.with?.file : step.with;
   if (built !== undefined && lifecycleFileKind(String(built)) !== 'dockerfile')
     errors.push(`${where}: builds ${clip(String(built))}, a file this check does not read`);
@@ -325,9 +436,8 @@ export function workflowLifecycle(name, text, workflows = {}, ancestors = []) {
   if (!record(workflow) || !record(workflow.jobs) || Object.keys(workflow.jobs).length === 0)
     return { errors: [`${name}: no jobs were read`], commands };
   const everywhere = sets(name, workflow);
-  const shell = workflow.defaults?.run?.shell;
-  if (shell !== undefined && !SHELLS.has(shell))
-    errors.push(`${name}: shell ${clip(String(shell))} is not one this check reads`);
+  const unread = effectiveShell({ workflow }).problem;
+  if (unread) errors.push(`${name}: ${unread}`);
   for (const [id, job] of Object.entries(workflow.jobs)) {
     const where = `${name}: job ${id}`;
     if (record(job) && Object.hasOwn(job, 'uses')) {
@@ -358,9 +468,8 @@ export function workflowLifecycle(name, text, workflows = {}, ancestors = []) {
       errors.push(`${where} has no steps this check reads (a called workflow gets no env)`);
       continue;
     }
-    const jobShell = job.defaults?.run?.shell;
-    if (jobShell !== undefined && !SHELLS.has(jobShell))
-      errors.push(`${where}: shell ${clip(String(jobShell))} is not one this check reads`);
+    const jobShell = effectiveShell({ job }).problem;
+    if (jobShell) errors.push(`${where}: ${jobShell}`);
     const inJob = sets(where, job);
     for (const [index, step] of job.steps.entries()) {
       const at = `${where} step ${index + 1}`;
@@ -392,7 +501,7 @@ export function actionLifecycle(name, text) {
   if (!record(runs) || runs.using !== 'composite' || !Array.isArray(runs.steps))
     return { errors: [`${name}: not a composite action this check reads`], commands };
   for (const [index, step] of runs.steps.entries())
-    stepProblems(`${name}: step ${index + 1}`, step, errors, commands);
+    stepProblems(`${name}: step ${index + 1}`, step, errors, commands, true);
   if (read.named !== 0)
     errors.push(`${name}: an action inherits ${VARIABLE} from its caller and may not name it`);
   return { errors, commands };
