@@ -5,6 +5,8 @@ import { relative, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { generate, schemaArgs } from './prisma-generate.mjs';
+import { effectiveShell, readOptions, readShell } from './ci-shell-policy-lib.mjs';
+import { parseCommands } from './ci-shell-text-lib.mjs';
 import {
   actionLifecycle,
   dockerfileLifecycle,
@@ -437,42 +439,45 @@ test('a workflow step or an action outside the suppression is refused', () => {
     refused(actionLifecycle, action, mutant, pattern);
 });
 
+// The three places shell text runs: a RUN of a suppressed stage, a workflow step, an action step.
+const ENTRY = {
+  docker: 'services/economic-service/Dockerfile',
+  action: '.github/actions/install-ci-tool/action.yml',
+};
+const indent = (script, by) => script.replaceAll(/^/gm, by);
+const runs = {
+  dockerfile: (script) =>
+    dockerfileLifecycle(
+      ENTRY.docker,
+      swap(
+        repoText(ENTRY.docker),
+        'FROM deps AS build\n',
+        `FROM deps AS build\nRUN ${script.replaceAll('\n', ' && ')}\n`,
+      ),
+    ),
+  workflow: (script) =>
+    workflowLifecycle(
+      'new.yml',
+      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: |\n${indent(script, '          ')}\n`,
+    ),
+  action: (script) =>
+    actionLifecycle(
+      ENTRY.action,
+      `${repoText(ENTRY.action)}    - shell: bash\n      run: |\n${indent(script, '        ')}\n`,
+    ),
+};
+const everywhere = (script, pattern, accepted = false) => {
+  for (const [where, run] of Object.entries(runs)) {
+    const { errors } = run(script);
+    if (accepted) assert.deepEqual(errors, [], `${where}: ${script}`);
+    else assert.match(errors.join('\n'), pattern, `${where}: ${script}`);
+  }
+};
+const form = (name) => new RegExp(`is not a form of \`${name}\` this check reads`);
+
 // PR #1085 r1 F1: every probe the reviewer ran, and the same gap in other spellings. Each was
 // accepted with no error at ac94f313.
 test('shell text that could drop the suppression is refused wherever it runs', () => {
-  const docker = 'services/economic-service/Dockerfile';
-  const action = '.github/actions/install-ci-tool/action.yml';
-  const [image, composite] = [repoText(docker), repoText(action)];
-  const indent = (script, by) => script.replaceAll(/^/gm, by);
-  const runs = {
-    dockerfile: (script) =>
-      dockerfileLifecycle(
-        docker,
-        swap(
-          image,
-          'FROM deps AS build\n',
-          `FROM deps AS build\nRUN ${script.replaceAll('\n', ' && ')}\n`,
-        ),
-      ),
-    workflow: (script) =>
-      workflowLifecycle(
-        'new.yml',
-        `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: |\n${indent(script, '          ')}\n`,
-      ),
-    action: (script) =>
-      actionLifecycle(
-        action,
-        `${composite}    - shell: bash\n      run: |\n${indent(script, '        ')}\n`,
-      ),
-  };
-  const everywhere = (script, pattern, accepted = false) => {
-    for (const [where, run] of Object.entries(runs)) {
-      const { errors } = run(script);
-      if (accepted) assert.deepEqual(errors, [], `${where}: ${script}`);
-      else assert.match(errors.join('\n'), pattern, `${where}: ${script}`);
-    }
-  };
-  const form = (name) => new RegExp(`is not a form of \`${name}\` this check reads`);
   for (const [script, pattern] of [
     // The reviewer's probes, as run.
     [
@@ -601,6 +606,202 @@ test('what an image or a step starts outside the suppression is refused', () => 
     workflowLifecycle('new.yml', file('services/${{ matrix.service }}/Dockerfile')).errors,
     [],
   );
+});
+
+// PR #1085 r2 F1 (FU-334): the three forms the reviewer ran and found accepted at ac94f313's
+// successor, each at every entry point it applies to, then the same class in other spellings.
+test('an option, a nested shell or a wrapper that runs unread text is refused (FU-334)', () => {
+  const reset = '; env -i PATH=/usr/local/bin:/usr/bin:/bin pnpm deploy /out';
+  // 1. pnpm options that turn a quoted argument into a shell command, with every exec target.
+  for (const target of ['turbo', 'jest', 'playwright'])
+    for (const option of ['-c', '--shell-mode', '--shell-mode=true', '--config.shell-mode=true'])
+      everywhere(`pnpm ${option} exec ${target} "${reset}"`, form('pnpm'));
+  // The reviewer's replacement of the real deploy keeps the inventory and is refused all the same.
+  const deploy = 'pnpm --filter @rasta/economic-service deploy --prod --legacy /deploy';
+  const replaced = dockerfileLifecycle(
+    ENTRY.docker,
+    swap(repoText(ENTRY.docker), deploy, `pnpm -c exec turbo "${reset}"`),
+  );
+  assert.deepEqual(replaced.commands, ['npm install', 'pnpm install', 'pnpm deploy']);
+  assert.match(replaced.errors.join('\n'), form('pnpm'));
+  for (const [script, pattern] of [
+    // The same class: an option nobody listed, wherever a package manager reads one.
+    ['pnpm --config.script-shell=/tmp/sh run build', form('pnpm')],
+    ['pnpm --dir /tmp/elsewhere run build', form('pnpm')],
+    ['pnpm exec -c turbo "; pnpm deploy /out"', form('pnpm')],
+    ['pnpm install --config.side-effects-cache=false', form('pnpm')],
+    ['pnpm install --frozen-lockfile "$extra"', form('pnpm')],
+    ['pnpm deploy $options /out', form('pnpm')],
+    ['pnpm run -c build', form('pnpm')],
+    ['pnpm config set script-shell /tmp/sh', form('pnpm')],
+    ['pnpm dlx create-thing', form('pnpm')],
+    ['npm install --script-shell=/tmp/sh', form('npm')],
+    ['npm run build', form('npm')],
+    ['npm exec turbo -c "; pnpm deploy /out"', form('npm')],
+    ['npm --prefix /tmp install', form('npm')],
+    // The same options as variables: pnpm reads `pnpm_config_<setting>` (measured, 11.22.0).
+    ['pnpm_config_script_shell=/tmp/sh pnpm run build', /a package manager option/],
+    ['export PNPM_CONFIG_SCRIPT_SHELL=/tmp/sh', form('export')],
+    ['npm_config_script_shell=/tmp/sh npm install', /a package manager option/],
+    // Other programs that run what they are given: none is listed, so none is read past.
+    ['npx turbo run build', UNPROVEN],
+    ['corepack pnpm install', UNPROVEN],
+    ['xargs -n1 pnpm deploy', UNPROVEN],
+    ['env pnpm install', UNPROVEN],
+    ['nice -n 5 pnpm install', UNPROVEN],
+    ['timeout 60 pnpm install', UNPROVEN],
+    ['nohup pnpm install', UNPROVEN],
+    ['time pnpm install', UNPROVEN],
+    ['builtin source /tmp/setup', UNPROVEN],
+    ['command source /tmp/setup', UNPROVEN],
+    ['/usr/bin/ap[t]-get install -y libnss3', /which this check cannot read/],
+    ['echo "$SETUP" | bash </dev/stdin', form('bash')],
+    // A redirection written into a word: bash runs `n`, `pnp` and `nod`, not what is spelled.
+    ['n>pm install', /writes a redirection into a word/],
+    ['pnp>m deploy /out', /writes a redirection into a word/],
+    ['nod<e scripts/prisma-generate.mjs', /writes a redirection into a word/],
+    ['n2>&1pm install', UNPROVEN],
+    // `bash` runs a file of this repository, or text that was read.
+    ['bash -c "env -i pnpm deploy /out"', form('bash')],
+    ['bash -lc "pnpm install"', form('bash')],
+    ['bash /tmp/install.sh', form('bash')],
+  ])
+    everywhere(script, pattern);
+  // Controls: the read forms.
+  for (const script of [
+    'pnpm --filter @rasta/web exec playwright test -c playwright.config.ts',
+    'pnpm run test:integration --shard=economic -- --verbose',
+    'npm install -g pnpm@11.22.0\npnpm config set store-dir /pnpm/store',
+    'bash -c "pnpm install --frozen-lockfile"',
+  ])
+    everywhere(script, null, true);
+});
+
+test('the shell that reads a step and the variables it is given are read at every level (FU-334)', () => {
+  const env = "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n";
+  const job = (steps) => `on: push\n${env}jobs:\n  a:\n    runs-on: x\n    steps:\n${steps}`;
+  const run = (extra) => `      - run: bash scripts/ci-install-browser.sh\n${extra}`;
+  const errors = (text) => workflowLifecycle('new.yml', text).errors.join('\n');
+  assert.equal(errors(job(run(''))), '');
+  const shell = /shell .* is not one this check reads/;
+  const indirect = 'env -i bash {0}';
+  for (const text of [
+    job(run('')).replace('jobs:', `defaults:\n  run:\n    shell: ${indirect}\njobs:`),
+    job(run('')).replace(
+      '    steps:',
+      `    defaults:\n      run:\n        shell: ${indirect}\n    steps:`,
+    ),
+    job(run(`        shell: ${indirect}\n`)),
+    job(run('        shell: ${{ inputs.shell }}\n')),
+  ])
+    assert.match(errors(text), shell);
+  const composite = `${repoText(ENTRY.action)}    - run: pnpm install\n`;
+  assert.match(actionLifecycle(ENTRY.action, composite).errors.join('\n'), /names no shell/);
+  // A package manager option as an `env` entry or a Dockerfile variable.
+  const option = /a package manager option/;
+  for (const text of [
+    job(run('')).replace(env, `${env}  pnpm_config_script_shell: /tmp/sh\n`),
+    job(run('        env:\n          NPM_CONFIG_SCRIPT_SHELL: /tmp/sh\n')),
+    job('      - run: echo "PNPM_CONFIG_SCRIPT_SHELL=${shell}" >> "$GITHUB_ENV"\n'),
+  ])
+    assert.match(errors(text), /a package manager option|writes the environment of later steps/);
+  for (const instruction of [
+    'ENV pnpm_config_script_shell=/tmp/sh',
+    'ARG npm_config_script_shell=/tmp/sh',
+  ])
+    refused(
+      dockerfileLifecycle,
+      ENTRY.docker,
+      swap(
+        repoText(ENTRY.docker),
+        'ENV PNPM_HOME=/pnpm\n',
+        `ENV PNPM_HOME=/pnpm\n${instruction}\n`,
+      ),
+      option,
+    );
+});
+
+// The shared reader by itself, under a policy that is not this guard's: what FU-338 will hand it.
+test('the shared shell reader refuses whatever its policy does not list (FU-334)', () => {
+  const policy = {
+    programs: {
+      echo: true,
+      command: true,
+      sudo: true,
+      bash: (args, context) => context.shell(args, 'bash'),
+    },
+    file: (path) => (path === 'scripts/reviewed.sh' ? null : 'is not reviewed'),
+    tolerated: new Set(['a pipeline, an || list or a background command', 'redirection']),
+  };
+  const problems = (text) => readShell(text, policy).problems.join('\n');
+  for (const text of [
+    'sudo /usr/bin/ap[t]-get install -y libnss3',
+    'sudo apt-get install -y libnss3',
+    'builtin source /tmp/setup-browser',
+    'command source /tmp/setup-browser',
+    'echo "$SETUP" | bash</dev/stdin',
+    'bash -c "apt-get install -y libnss3"',
+    'bash /tmp/setup-browser',
+    '"$tool" install',
+    'echo $(apt-get install -y libnss3)',
+    'echo ok; (apt-get install -y libnss3)',
+  ])
+    assert.notEqual(problems(text), '', text);
+  for (const text of ['echo ok', 'bash -c "echo ok"', 'bash scripts/reviewed.sh', 'sudo echo ok'])
+    assert.equal(problems(text), '', text);
+  // A policy that gives no rule for a part of the text admits none of it: no assignment, no file.
+  assert.match(problems('LEVEL=1 echo ok'), /assigns a variable/);
+  assert.equal(readShell('LEVEL=1 echo ok', { ...policy, name: () => null }).problems.length, 0);
+  assert.match(readShell('scripts/reviewed.sh', { programs: {} }).problems.join(), /does not list/);
+  // A word keeps its spelling, so an exception can be bound to the exact text that was reviewed.
+  const [{ words }] = parseCommands('x="${A}" docker -v "$PWD/a:/b" \'c d\'').commands;
+  assert.deepEqual(
+    words.map((word) => word.source),
+    ['x="${A}"', 'docker', '-v', '"$PWD/a:/b"', "'c d'"],
+  );
+  // A subshell's `cd` does not reach the command after it; one in the same shell does.
+  const scopes = (text) => parseCommands(text).commands.map(({ scope }) => scope);
+  assert.deepEqual(scopes('a; (cd x; b); c; d=$(cd y; e); f'), [
+    '',
+    '1',
+    '1',
+    '',
+    '2',
+    '2',
+    '',
+    '',
+  ]);
+  // A `case` pattern closes with a `)` that opened nothing: after one, no subshell is left.
+  assert.deepEqual(scopes('a; (cd x; case q in q) b;; esac; c); d'), ['', ...Array(6).fill('1')]);
+  const table = { flags: '--prod', values: '--filter' };
+  const read = (text, grammar = table) =>
+    readOptions(parseCommands(text).commands[0].words, grammar);
+  assert.deepEqual(
+    read('--prod --filter a --filter=b /out').operands.map((word) => word.value),
+    ['/out'],
+  );
+  for (const text of [
+    '-c',
+    '--shell-mode',
+    '--prod=1',
+    '--filter',
+    '--filter "$x"',
+    '"$option"',
+    '--',
+  ])
+    assert.ok(read(text).problem, text);
+  const steps = { step: { shell: 'sh' }, job: { defaults: { run: { shell: 'bash' } } } };
+  assert.deepEqual(effectiveShell(steps), { shell: 'sh' });
+  assert.deepEqual(effectiveShell({ step: {}, job: steps.job }), { shell: 'bash' });
+  assert.deepEqual(effectiveShell({ step: {} }), { shell: 'bash' });
+  assert.ok(effectiveShell({ step: {}, composite: true }).problem);
+  for (const shell of ['bash -e {0}', 'python', 'pwsh', '${{ inputs.shell }}', ['bash']])
+    for (const level of [
+      { step: { shell } },
+      { job: { defaults: { run: { shell } } } },
+      { workflow: { defaults: { run: { shell } } } },
+    ])
+      assert.ok(effectiveShell({ step: { shell: 'bash' }, ...level }).problem, String(shell));
 });
 
 // The class of F2: a script that hands PATH on by name builds a child's environment from scratch,
