@@ -107,12 +107,22 @@ test('usage: B2 backfill and vacuum option parsers', async () => {
   await assertRefusal('usage', () => parseVacuumOptions([], {}));
 });
 
+test('usage: maintenance apply is refused before environment or database access', () => {
+  assertCliRefusal(
+    'usage',
+    'services/maintenance-service/dist/maintenance/meter-reconcile.cli.js',
+    ['--apply'],
+    2,
+  );
+});
+
 for (const [entry, exit] of [
   ['services/asset-service/dist/insurance/reproject.cli.js', 2],
   ['services/asset-service/dist/insurance/drain-check.cli.js', 2],
   ['services/asset-service/dist/outbox/flush.cli.js', 2],
   ['services/fleet-service/dist/fleet/clear-transferred.cli.js', 2],
   ['services/fleet-service/dist/fleet/drain-check.cli.js', 2],
+  ['services/maintenance-service/dist/maintenance/meter-reconcile.cli.js', 2],
   ['services/identity-service/dist/keycloak/projection.cli.js', 2],
   ['services/economic-service/dist/transaction/resolved-dispute-backfill.cli.js', 1],
   ['services/marketplace-service/dist/ops/hold-deadline-backfill.cli.js', 1],
