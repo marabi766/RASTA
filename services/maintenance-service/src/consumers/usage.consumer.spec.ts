@@ -41,8 +41,11 @@ function harness(
       marked.push(eventId);
       return !options.alreadyProcessed;
     },
-    async foldUsageIntoMeter(_tx: unknown, input: Fold): Promise<void> {
+    async foldUsageIntoMeter(_tx: unknown, input: Fold, eventId: string): Promise<boolean> {
+      if (options.alreadyProcessed || (options.ledger && marked.includes(eventId))) return false;
+      marked.push(eventId);
       folds.push(input);
+      return true;
     },
   } as unknown as MaintenanceRepository;
 
@@ -272,4 +275,18 @@ describe('usage consumer', () => {
     expect(folds[0]).toMatchObject({ assetId: 'AST-SEED-0001', hoursDelta: '8.00' });
     expect(announced).toEqual(['AST-SEED-0001']);
   });
+  it.each(['hours', 'kilometres', 'hourMeter', 'odometer'])(
+    'strict %s quantities are refused before markEventProcessed',
+    async (field) => {
+      for (const value of ['-2', '1e3', ' 5', '5.', '5\n', '100000000000']) {
+        const { consumer, marked, folds } = harness();
+        const e = envelope();
+        await expect(
+          consumer.handle({ ...e, payload: { ...(e.payload as object), [field]: value } }),
+        ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+        expect(marked).toEqual([]);
+        expect(folds).toEqual([]);
+      }
+    },
+  );
 });

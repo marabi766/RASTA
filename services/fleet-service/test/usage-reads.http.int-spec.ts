@@ -189,6 +189,28 @@ describe('EXP-007 PR 9 usage reads: tenant isolation and physical meter boundary
     expect(result.body).not.toHaveProperty('outcome');
   });
 
+  it('refuses users with 403 before parsing a malformed internal query', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/v1/internal/usage-records')
+      .auth('self', { type: 'bearer' })
+      .query({ limit: 'bad' });
+    expect(response.status).toBe(403);
+  });
+
+  it.each(['hourMeter', 'odometer'])('fleet still refuses 11 digit %s with 400', async (field) => {
+    const response = await request(app.getHttpServer())
+      .post('/v1/usage-records')
+      .auth('supervisor', { type: 'bearer' })
+      .send({
+        assetId,
+        periodStart: '2026-04-01T01:00:00Z',
+        periodEnd: '2026-04-01T02:00:00Z',
+        hours: '1',
+        [field]: '10000000000',
+      });
+    expect(response.status).toBe(400);
+  });
+
   it.each(['self', 'supervisor'])(
     'refuses user token %s on internal collection, even with an internal token',
     async (user) => {

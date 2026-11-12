@@ -4516,15 +4516,73 @@ export const EXPECTED = {
     ],
     // Added by 20261005130000_availability_window_one_live (review #225 r1):
     // one live window per machine, a partial index only the migration holds.
-    indexes: ['ux_availability_window_live'],
+    indexes: ['ux_availability_window_live', 'usage_record_asset_id_period_end_id_idx'],
   },
   maintenance: {
     // D-045: the runtime role owns nothing and cannot create the scratch schema
     // or database; the migrator owns rasta_maintenance.
     connectAs: 'migrator',
+    dataRollback: {
+      migration: '20261112070000_usage_ledger',
+      label: 'expanded cumulative meters and schedule anchors',
+      steps: [
+        {
+          label: 'seed the largest expanded meter',
+          sql: `
+          INSERT INTO asset_usage_meter(asset_id, organization_id, hour_meter, odometer, updated_at)
+          VALUES ('AST_METER_MIGCHECK', 'ORG-MIGCHECK', 999999999999999999.99, 0, now());`,
+        },
+        {
+          label: 'down refuses narrowing the hour meter without schema/data changes',
+          runDownScript: true,
+          mustFail: 'usage ledger rollback requires meters and anchors within NUMERIC(12,2)',
+        },
+        {
+          label: 'isolate the odometer boundary',
+          sql: `UPDATE asset_usage_meter
+          SET hour_meter = 0, odometer = 10000000000.99 WHERE asset_id = 'AST_METER_MIGCHECK';`,
+        },
+        {
+          label: 'down refuses narrowing the odometer',
+          runDownScript: true,
+          mustFail: 'usage ledger rollback requires meters and anchors within NUMERIC(12,2)',
+        },
+        {
+          label: 'seed expanded anchors with a small meter',
+          sql: `
+          UPDATE asset_usage_meter SET odometer = 0 WHERE asset_id = 'AST_METER_MIGCHECK';
+          INSERT INTO maintenance_schedule(id, organization_id, asset_id, title, interval_hours,
+            last_serviced_hour_meter, last_serviced_odometer, updated_at, created_by, updated_by)
+          VALUES ('MSC_METER_MIGCHECK', 'ORG-MIGCHECK', 'AST_METER_MIGCHECK', 'Meter', 1,
+            10000000000.99, 0, now(), 'MIGCHECK', 'MIGCHECK');`,
+        },
+        {
+          label: 'down refuses narrowing a copied hour anchor',
+          runDownScript: true,
+          mustFail: 'usage ledger rollback requires meters and anchors within NUMERIC(12,2)',
+        },
+        {
+          label: 'isolate the odometer anchor boundary',
+          sql: `UPDATE maintenance_schedule
+          SET last_serviced_hour_meter = 0, last_serviced_odometer = 10000000000.99 WHERE id = 'MSC_METER_MIGCHECK';`,
+        },
+        {
+          label: 'down refuses narrowing a copied odometer anchor',
+          runDownScript: true,
+          mustFail: 'usage ledger rollback requires meters and anchors within NUMERIC(12,2)',
+        },
+        {
+          label: 'remove probe rows before the full reversible chain',
+          sql: `
+          DELETE FROM maintenance_schedule WHERE id = 'MSC_METER_MIGCHECK';
+          DELETE FROM asset_usage_meter WHERE asset_id = 'AST_METER_MIGCHECK';`,
+        },
+      ],
+    },
     tables: [
       'asset_ref',
       'asset_usage_meter',
+      'asset_usage_entry',
       'labor_entry',
       'maintenance_cost',
       'maintenance_request',
@@ -4536,6 +4594,7 @@ export const EXPECTED = {
       'repair_order',
     ],
     triggers: [],
+    indexes: ['asset_usage_entry_asset_id_period_end_idx', 'asset_usage_entry_organization_id_idx'],
     constraints: [
       'ck_cost_provenance',
       'ck_labor_entry_amounts',
@@ -4552,6 +4611,9 @@ export const EXPECTED = {
       'ck_schedule_has_interval',
       'ck_schedule_intervals_positive',
       'ck_usage_meter_non_negative',
+      'ck_usage_meter_source',
+      'ck_usage_entry_non_negative',
+      'ck_usage_entry_interval',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',
