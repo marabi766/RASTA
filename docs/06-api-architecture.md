@@ -925,8 +925,9 @@ POST   /v1/assignments/{id}/end          پایان تخصیص
 DELETE /v1/assignments/{id}              مترادف پایان تخصیص
 
 POST   /v1/usage-records                 ثبت کارکرد
-GET    /v1/usage-records                 تاریخچه کارکرد (assetId، driverId، source، from/to)
+GET    /v1/usage-records                 تاریخچه کارکرد (assetId، driverId، source، clientReference، from/to)
 GET    /v1/usage-records/{id}            دریافت
+GET    /v1/internal/usage-records         رکوردهای شمارندهٔ یک دارایی میان مالک‌ها (فقط maintenance-service)
 
 GET    /v1/fleet/availability            دارایی‌های آزاد، با مانع‌های نام‌دار (assetId، availableOnly، at)؛ مانع `DISPATCH_BLOCKED` علاوه بر `detail` میدان ساخت‌یافتهٔ `cause` (`INSPECTION`/`INSURANCE`) و برای بیمه `coverages` دارد (EXP-002 برش ۷)
 GET    /v1/fleet/availability/windows    اعلام‌های یک دارایی، تازه‌ترین نخست، ابطال‌شده‌ها هم (assetId اجباری؛ cursor/limit) — EXP-002 برش ۷
@@ -954,6 +955,22 @@ Prefix های خودشان منتقل شدند و `assetId` یک **فیلد بد
 | Idempotency       | `POST /v1/usage-records` فیلد `clientReference` می‌پذیرد؛ همان درخواست دوباره رکورد نخست را برمی‌گرداند (بند زیر همین جدول). |
 | خطاها             | قرارداد خطای پلتفرم. تعارض انحصار → `422 BUSINESS_RULE_VIOLATION` با `rule` مشخص؛ گذار نامعتبر → `409`.                      |
 | کمیت‌ها           | `hours`، `kilometres`، `hourMeter`، `odometer` **رشته**‌اند (ستون `NUMERIC`؛ همان استدلال ADR-022).                          |
+
+خواندن مرجع (`GET /v1/usage-records?clientReference=…`) برابری دقیق با همان اعتبارسنجی مرجع نوشتن
+(۸ تا ۱۲۸ نویسه) است و همان قاعدهٔ فهرست را دارد: `SELF` فقط رکورد رانندهٔ خودش و ناظر فقط سازمان خودش.
+پاسخ فقط رکورد است؛ پاسخ خالی یعنی «نامعلوم»، نه گواه نبودن یا ادعای بازنشستگی مرجع (ADR-073، PR 11).
+
+خواندن داخلی مجموعه (`GET /v1/internal/usage-records?assetId=…&cursor=…&limit=…`، ADR-073 § ۴ F) استثنای
+صریح میان مستأجرها برای آشتی شمارندهٔ فیزیکی دارایی در maintenance-service است. فقط توکن سرویس همان مصرف‌کننده
+با `@AllowService` و بررسی دوبارهٔ هویت در سرویس پذیرفته می‌شود؛ هر کاربر و هر سرویس دیگر `403` می‌گیرد.
+این مسیر در api-gateway مسیریابی نمی‌شود. پاسخ `{ items, nextCursor, hasMore }` و هر قلم فقط `id`،
+`organizationId`، `periodStart`، `periodEnd`، `hours`، `kilometres`، `hourMeter` و `odometer` است؛ کمیت‌ها
+رشته یا `null` هستند و یادداشت، راننده، مرجع و هویت ثبت‌کننده برنمی‌گردند.
+صفحه‌بندی زنده با ترتیب صعودی `(period_end, id)` است، نه Snapshot ثابت؛ `limit` پیش‌فرض ۲۵ و بیشینه ۲۰۰.
+تا `hasMore=false` باید `nextCursor` دنبال شود. Cursor مبهم و بسته به دارایی است؛ ساختار، زمان UTC معیار و شناسه به‌سختی اعتبارسنجی می‌شوند.
+ناجور یا متعلق به دارایی دیگر ← `400` پیش از Query؛ سپس یک خواندن با کلید اصلی وجود همان ردیف، دارایی و زمان
+را می‌سنجد؛ ترکیب نامعتبر یا ناموجود ← `400`، هرگز آغاز دوبارهٔ فهرست یا پیمایش کامل. درج هم‌زمان جلوتر از Cursor دیده می‌شود؛ درج دیررس پشت Cursor
+به رویداد زنده یا دور تازهٔ آشتی نیاز دارد. پایان صفحه‌بندی گواه نبودن کارکرد دیررس نیست.
 
 **`clientReference` به فرستنده و بدنه بسته است.** همان شکل `Idempotency-Key` در
 `IdempotencyStore` (`services/fleet-service/src/fleet/idempotency.ts`، رونوشت

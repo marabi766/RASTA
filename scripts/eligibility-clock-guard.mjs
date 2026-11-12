@@ -250,6 +250,20 @@ export const REVIEWED_SITES = [
     reason: 'new Date(query.from/to): request filters',
   },
   {
+    site: 'services/fleet-service/src/fleet/fleet.repository.ts#hasMeterUsageCursor',
+    columns: ['period_end'],
+    verdict: 'not-db-clock',
+    reason:
+      'after.end is a canonical UTC instant from the validated request cursor, compared with its primary-key anchor; not a clock',
+  },
+  {
+    site: 'services/fleet-service/src/fleet/fleet.repository.ts#listMeterUsage',
+    columns: ['period_end'],
+    verdict: 'not-db-clock',
+    reason:
+      'after.end is a canonical UTC instant decoded from the request cursor and validated against its existing usage row; keyset position, not a clock',
+  },
+  {
     site: 'services/fleet-service/src/fleet/fleet.repository.ts#listUsage',
     columns: ['period_end'],
     verdict: 'not-db-clock',

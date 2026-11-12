@@ -65,6 +65,7 @@ import {
   type TransferRecordSource,
 } from './fleet/transfer-record';
 import { UsageFactService } from './fleet/source-fact';
+import { MeterUsageService } from './fleet/meter-usage';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
 import {
   AssetSnapshotClient,
@@ -166,6 +167,7 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
     AssignmentService,
     UsageService,
     UsageFactService,
+    MeterUsageService,
     AssetWorkStateService,
     TransferClearanceService,
     // One monotonic clock for the clearance bound, read by the arrival

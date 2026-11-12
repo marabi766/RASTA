@@ -12,6 +12,9 @@ describe('FleetInternalController', () => {
     expect(Reflect.getMetadata(PATH_METADATA, FleetInternalController)).toBe(
       'internal/usage-records',
     );
+    expect(Reflect.getMetadata(ALLOW_SERVICE_KEY, FleetInternalController.prototype.list)).toEqual([
+      'maintenance-service',
+    ]);
     const handler = FleetInternalController.prototype.get;
     expect(Reflect.getMetadata(ALLOW_SERVICE_KEY, handler)).toEqual(['economic-service']);
     // No role grants it: the service decides, and refuses every user.
