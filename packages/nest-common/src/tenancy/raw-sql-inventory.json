@@ -3197,5 +3197,12 @@
     "hash": "c488678c464303b5b2823306d7a223ecb17904f069ef7839604d0744496aa062",
     "occurrence": 0,
     "decision": "platform-wide: operational gauge counts known physical assets without LEDGER, including missing meters; no tenant output or labels; explicit runUnscoped and shared registry only"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-certificate.ts",
+    "hash": "7187128a6cff210c41dadc9892f37ac599ecfebddcff0508d6ecefa0d509e391",
+    "occurrence": 0,
+    "line": 28,
+    "decision": "platform-wide: PostgreSQL snapshot identifier only; no tenant table or fact is read by this statement"
   }
 ]

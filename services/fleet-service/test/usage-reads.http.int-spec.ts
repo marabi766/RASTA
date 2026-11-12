@@ -145,6 +145,27 @@ describe('EXP-007 PR 9 usage reads: tenant isolation and physical meter boundary
     );
     return recordId;
   }
+  it('certificate HTTP projection refuses user/other-service access', async () => {
+    await request(app.getHttpServer())
+      .get('/v1/internal/usage-records/certificate')
+      .auth('supervisor', { type: 'bearer' })
+      .query({ assetId })
+      .expect(403);
+    for (const caller of ['maintenance-service', 'economic-service']) {
+      const token = await mintTestInternalToken(tokenKey, caller, SERVICE_NAME, 'SERVICE', org.a);
+      const response = await request(app.getHttpServer())
+        .get('/v1/internal/usage-records/certificate')
+        .set('x-internal-token', token)
+        .query({ assetId });
+      expect(response.status).toBe(caller === 'maintenance-service' ? 200 : 403);
+      if (response.status === 200) {
+        expect(response.body.facts.map((r: { id: string }) => r.id).sort()).toEqual(
+          [recordA, recordB].sort(),
+        );
+        expect(response.body.facts.every((r: object) => Object.keys(r).length === 8)).toBe(true);
+      }
+    }
+  });
   const publicRead = (user: string, clientReference = reference) =>
     request(app.getHttpServer())
       .get('/v1/usage-records')

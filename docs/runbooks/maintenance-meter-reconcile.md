@@ -71,3 +71,34 @@ can double-count covered/replayed usage and does not reconstruct the prior state
 Pause rollout, preserve evidence, repair the completeness/fact issue, and rerun a
 verified apply; do not delete entries, reset event markers, run schema down, or
 change modes as an operational shortcut.
+
+## 7b-2a snapshot certificate (cutover still refused)
+
+Production preview now requests `GET /v1/internal/usage-records/certificate?assetId=…`
+from fleet, using the existing maintenance service identity. Fleet fixes a PostgreSQL
+REPEATABLE READ snapshot with `pg_current_snapshot()`, then reads all identities and
+the eight minimal physical fact fields in that same transaction. More than 20,000
+facts, malformed history or an unavailable source refuses the asset; the client
+also enforces a 16-MiB response ceiling and its exchange deadline. No truncated
+manifest is issued. The SHA-256 digest covers version, asset, snapshot marker and
+identity-sorted canonical facts (exact decimals and UTC instants). Null deltas
+normalize to zero, as ledger insertion already does; null readings stay distinct.
+The authenticated owner response supplies provenance; the digest is an equality
+check, not a signature or a bearer authorization token.
+
+Preview stages facts before the meter lock, then checks the entire ledger set
+under the shared meter lock, before calculating fresh L. Extra identities, changed
+quantities/owners/intervals, or unresolved null intervals refuse verification.
+`snapshotVerified=true` means only that the tentative ledger equals this source
+snapshot. Staging still rolls back. `pagesExhausted` describes live pagination only
+and remains false for this path. Certificate failure never falls back to live pages.
+
+This certificate intentionally excludes transactions committed after its snapshot,
+including backdated records. It supplies no durable live-write handoff, authoritative
+asset inventory or persisted full-run marker. `sourceComplete=false`, `--apply`
+refusal and LEGACY defaults remain mandatory. **7b-2b** must prove outbox delivery
+and post-cutover meter-lock ordering (or refuse the asset), implement atomic mode
+and counter writes plus post-commit announcements, and serialize marker activation
+against first-meter creation. Its actual-cutover tests must include both r3
+after-insert/before-lock orders (102, never 104), fresh apply after preview, repeated
+apply, covered spill, tenant reports, tail/backdated commit, gauge and rollback.
