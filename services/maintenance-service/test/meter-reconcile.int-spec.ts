@@ -4,7 +4,9 @@ import { MaintenanceRepository } from '../src/maintenance/maintenance.repository
 import { MeterReconcile, type MeterUsageSource } from '../src/maintenance/meter-reconcile';
 import { maintenanceMeterLegacyAssets } from '../src/observability/metrics';
 import { insertUsageEntry } from '../src/maintenance/usage-meter';
-import type { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { databaseUrl } from './helpers';
+import { LegacyMeterGauge } from '../src/maintenance/legacy-meter-gauge';
 import { asActor, cleanup, id, newPrisma, seedAsset, seedMeter, tenants, waitFor } from './helpers';
 
 describe('maintenance-meter-reconcile dry run', () => {
@@ -40,6 +42,47 @@ describe('maintenance-meter-reconcile dry run', () => {
   function command(source: MeterUsageSource) {
     return new MeterReconcile(prisma, source);
   }
+  it.each(['table lock', 'exhausted pool'])(
+    'bounds gauge reads with %s and no configured timeout',
+    async (block) => {
+      const url = new URL(databaseUrl());
+      url.searchParams.set('connection_limit', '1');
+      url.searchParams.set('pool_timeout', '30');
+      const pool = new PrismaService(url.toString());
+      let acquired!: () => void;
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        acquired = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const holding = (block === 'table lock' ? prisma : pool).transaction(
+        async (tx) => {
+          if (block === 'table lock')
+            await tx.$executeRaw`LOCK TABLE asset_usage_meter IN ACCESS EXCLUSIVE MODE`;
+          acquired();
+          await held;
+        },
+        { timeoutMs: 10_000 },
+      );
+      await ready;
+      const start = performance.now();
+      try {
+        await expect(
+          new MaintenanceRepository(pool).countLegacyMeterAssetsAcrossTenants(),
+        ).rejects.toThrow(
+          block === 'table lock' ? /statement timeout/ : /Unable to start a transaction/,
+        );
+        expect(performance.now() - start).toBeLessThan(block === 'table lock' ? 2800 : 1800);
+      } finally {
+        release();
+        await holding;
+        await pool.stop();
+      }
+    },
+  );
+
   it('existing 100 plus covered 2 reports L=100, leaves every table unchanged, and repeats identically', async () => {
     const assetId = await machine();
     const records = [
@@ -377,8 +420,10 @@ describe('maintenance-meter-reconcile dry run', () => {
     });
     const count = await repository.countLegacyMeterAssetsAcrossTenants();
     expect(count).toBe(before + 2);
-    maintenanceMeterLegacyAssets.set(count);
+    const sampler = new LegacyMeterGauge(repository);
+    await sampler.sample();
     expect((await maintenanceMeterLegacyAssets.get()).values[0].value).toBe(count);
+    await sampler.stop();
     expect((await repository.findMeter(legacy))!.meterSource).toBe('LEGACY');
   });
 });

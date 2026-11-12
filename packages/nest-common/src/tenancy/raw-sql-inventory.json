@@ -3193,8 +3193,15 @@
   },
   {
     "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
-    "line": 827,
-    "hash": "c488678c464303b5b2823306d7a223ecb17904f069ef7839604d0744496aa062",
+    "line": 832,
+    "hash": "1d4d038793204dded7071b1a6ebc4d2698e73caf564b9848cdb3cdffcb2ec165",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-local mandatory statement deadline for the background operational gauge; no tenant data read or changed"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
+    "line": 833,
+    "hash": "b0ea3438f493160c416c203a41287befbc53f14ff3875e9b0864526d33060bb2",
     "occurrence": 0,
     "decision": "platform-wide: operational gauge counts known physical assets without LEDGER, including missing meters; no tenant output or labels; explicit runUnscoped and shared registry only"
   },
