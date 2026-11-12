@@ -206,7 +206,7 @@ export const JEST_LAUNCHERS = {
       'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed. Workspace manifests are listed through authoredFiles() (read-only git ls-files).',
     sha256: {
       'scripts/ci-shell-text-lib.mjs':
-        '195c6157ff686add94a437ff49224b633f77bc81f619fc2c32d49ea47039ffa5',
+        '247c5af8313c2feada29f9cb8d11c03131320538efb990c62d529d2664e18f18',
       'scripts/ci-node-test-timeouts-lib.mjs':
         '4e98805f63b3698beb0eed84ec66ffa575032d4dbd4b50012fa9f96e428fa806',
       'scripts/check-unit-step-concurrency.test.mjs':
