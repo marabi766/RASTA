@@ -172,3 +172,36 @@ export const transferFenceResolutionsTotal = new Counter({
   labelNames: ['service', 'outcome'] as const,
   registers: [registry],
 });
+
+type LegacyMeterSample = { count: number; ageSeconds: number };
+let collectLegacyMeters: () => LegacyMeterSample | undefined = () => undefined;
+export function bindLegacyMeterCollector(collect: typeof collectLegacyMeters): void {
+  collectLegacyMeters = collect;
+}
+
+/** Unreconciled known physical assets, including replicas with no meter row. */
+export const maintenanceMeterLegacyAssets = new Gauge({
+  collect() {
+    const sample = collectLegacyMeters();
+    if (sample) this.set(sample.count);
+    else this.remove();
+  },
+  name: 'maintenance_meter_legacy_assets',
+  help: 'Known assets without a verified LEDGER meter; not a source inventory completeness proof',
+  registers: [registry],
+});
+
+export const maintenanceMeterLegacySampleAge = new Gauge({
+  collect() {
+    const sample = collectLegacyMeters();
+    if (sample) this.set(sample.ageSeconds);
+    else this.remove();
+  },
+  name: 'maintenance_meter_legacy_assets_sample_age_seconds',
+  help: 'Monotonic age of the last confirmed legacy meter count',
+  registers: [registry],
+});
+
+// No startup zero before the first confirmed database sample.
+maintenanceMeterLegacyAssets.remove();
+maintenanceMeterLegacySampleAge.remove();

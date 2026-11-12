@@ -3183,5 +3183,26 @@
     "hash": "9685de3810212cfc8dad2935f95a7772a83e5a7b3d66dc2a66126c1bc1589742",
     "occurrence": 0,
     "decision": "platform-wide: calculateLegacyMeter computes numeric constants from the already locked physical meter; no database rows read"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/meter-reconcile.ts",
+    "line": 241,
+    "hash": "82bbdc127540f299a36cd166966b2a85dfd702a94122b6a0d970dfb0d6ce5373",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
+    "line": 832,
+    "hash": "1d4d038793204dded7071b1a6ebc4d2698e73caf564b9848cdb3cdffcb2ec165",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-local mandatory statement deadline for the background operational gauge; no tenant data read or changed"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
+    "line": 833,
+    "hash": "b0ea3438f493160c416c203a41287befbc53f14ff3875e9b0864526d33060bb2",
+    "occurrence": 0,
+    "decision": "platform-wide: operational gauge counts known physical assets without LEDGER, including missing meters; no tenant output or labels; explicit runUnscoped and shared registry only"
   }
 ]
