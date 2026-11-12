@@ -5,7 +5,8 @@ import { RepairOrderService } from '../src/maintenance/repair-order.service';
 import { UnverifiedWorkshopDirectory } from '../src/maintenance/workshop.directory';
 import { createScheduleSchema } from '../src/maintenance/dto';
 import type { MaintenanceEnv } from '../src/config/env';
-import type { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { calculateLedgerMeter } from '../src/maintenance/usage-meter';
 import { asActor, cleanup, id, newPrisma, seedAsset, tenants } from './helpers';
 
 describe('ADR-073 cumulative meter precision', () => {
@@ -59,6 +60,38 @@ describe('ADR-073 cumulative meter precision', () => {
       ),
     );
   }
+  it.each(['hours', 'kilometres'])(
+    'unbounded LEDGER SQL refuses over-max %s totals before column conversion',
+    async (dimension) => {
+      const url = process.env.DATABASE_URL_MAINTENANCE_MIGRATOR;
+      if (!url)
+        throw new Error(
+          'DATABASE_URL_MAINTENANCE_MIGRATOR is required for the isolated SQL aggregate fixture',
+        );
+      const owner = new PrismaService(url);
+      try {
+        // A compact aggregate fixture stands in for millions of individually bounded source rows.
+        // Only a transaction-local temporary table has unbounded quantities; public tables keep fleet bounds.
+        await expect(
+          owner.transaction(async (tx) => {
+            await tx.$executeRaw`CREATE TEMP TABLE asset_usage_entry (
+          usage_record_id text, asset_id text, period_start timestamp, period_end timestamp,
+          hours numeric, kilometres numeric, hour_meter numeric, odometer numeric
+        ) ON COMMIT DROP`;
+            const h = dimension === 'hours' ? '999999999999999999.99' : '0';
+            const k = dimension === 'kilometres' ? '999999999999999999.99' : '0';
+            await tx.$executeRaw`INSERT INTO asset_usage_entry VALUES
+          ('USG_first', 'AST_LIMIT', '2026-01-01', '2026-01-02', ${h}::numeric, ${k}::numeric, NULL, NULL),
+          ('USG_second', 'AST_LIMIT', '2026-01-02', '2026-01-03', 0.01, 0.01, NULL, NULL)`;
+            return calculateLedgerMeter(tx, 'AST_LIMIT');
+          }),
+        ).rejects.toMatchObject({ code: 'METER_OUT_OF_RANGE' });
+      } finally {
+        await owner.stop();
+      }
+    },
+  );
+
   it('schedule without explicit anchors copies both post-old-max counters exactly', async () => {
     const assetId = await machine();
     await setMeter(assetId, '10000000000.99');
@@ -93,9 +126,9 @@ describe('ADR-073 cumulative meter precision', () => {
     expect(page.items[0].due.triggers.map((t) => t.remaining)).toEqual(['-0.01', '-0.01']);
     const { DueAnnouncerService } = await import('../src/maintenance/due-announcer.service');
     const announcer = new DueAnnouncerService(new MaintenanceRepository(prisma));
-    expect(await announcer.announceForAsset(assetId, new Date())).toBe(1);
+    expect(await actor(() => announcer.announceForAsset(assetId, new Date()))).toBe(1);
     const rows = await prisma.client.$queryRaw<{ payload: { dueAtMeter: string } }[]>`
-      SELECT payload FROM outbox_message WHERE organization_id = ${org.a} AND event_name = 'MAINTENANCE_DUE' AND aggregate_id = ${s.id}`;
+      SELECT payload->'payload' AS payload FROM outbox_message WHERE organization_id = ${org.a} AND event_name = 'MAINTENANCE_DUE' AND aggregate_id = ${s.id}`;
     expect(rows[0].payload.dueAtMeter).toBe('999999999999999999.98');
   });
 });

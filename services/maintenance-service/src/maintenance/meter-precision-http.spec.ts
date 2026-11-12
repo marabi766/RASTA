@@ -60,8 +60,10 @@ describe('cumulative anchor HTTP and OpenAPI bounds', () => {
     it('OpenAPI publishes the 18 digit ' + field + ' bound on create/update', () => {
       for (const schema of [createScheduleSchema, updateScheduleSchema]) {
         const props = toJsonSchema(schema).properties as Record<string, unknown>;
-        // quantity canonicalizes, so the converter may describe its post-transform bound.
-        expect(JSON.stringify(props[field])).toContain('18');
+        expect(props[field]).toMatchObject({
+          type: 'string',
+          pattern: '^\\d{1,18}(\\.\\d{1,2})?$',
+        });
       }
     });
   }

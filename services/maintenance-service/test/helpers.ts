@@ -159,6 +159,7 @@ export async function cleanup(
     'maintenance_schedule',
     'asset_ref',
     'asset_usage_meter',
+    'asset_usage_entry',
     'asset_transfer_fence',
     'outbox_message',
     'idempotency_key',

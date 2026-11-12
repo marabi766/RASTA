@@ -3270,6 +3270,7 @@ test('every rollback against real data leaves no newer migration applied under w
     'document',
     'economic',
     'identity',
+    'maintenance',
     'marketplace',
   ]);
 });

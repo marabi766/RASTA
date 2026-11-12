@@ -341,6 +341,11 @@ export const EXEMPTIONS = {
     },
   },
   fleet: {
+    usage_record_asset_id_period_end_id_idx: {
+      index: 'usage_record (asset_id, period_end, id)',
+      reason:
+        'ADR-073 PR 9: maintenance-only internal paging spans physical asset owners; MeterUsageService.list authorizes the service caller before the asset-bound minimal projection, and tenant reads retain organization-leading indexes',
+    },
     asset_transfer_release_pkey: {
       index: 'asset_transfer_release (asset_id, fence_id)',
       reason: `${RELEASE_TOMBSTONE} (FleetRepository.releaseTransferFence, isTransferReleased)`,
@@ -364,6 +369,11 @@ export const EXEMPTIONS = {
     },
   },
   maintenance: {
+    asset_usage_entry_asset_id_period_end_idx: {
+      index: 'asset_usage_entry (asset_id, period_end)',
+      reason:
+        'ADR-073 PR 7: the physical meter invariant spans asset owners; calculateLedgerMeter recomputes under the shared meter row lock; raw facts remain tenant guarded and asset_usage_entry_organization_id_idx supports tenant access',
+    },
     asset_transfer_release_pkey: {
       index: 'asset_transfer_release (asset_id, fence_id)',
       reason: `${RELEASE_TOMBSTONE} (MaintenanceRepository.releaseTransferFence, isTransferReleased)`,

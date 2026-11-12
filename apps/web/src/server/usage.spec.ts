@@ -73,6 +73,12 @@ describe('local time becomes a UTC instant', () => {
 });
 
 describe('parsing a submission', () => {
+  it.each(['hourMeter', 'odometer'] as const)('keeps the fleet 10 digit bound on %s', (field) => {
+    expect(parseUsageForm(values({ [field]: '9999999999.99' }), SUBMISSION).ok).toBe(true);
+    const result = parseUsageForm(values({ [field]: '10000000000' }), SUBMISSION);
+    expect(result.ok).toBe(false);
+  });
+
   it('builds the request fleet-service accepts, with the submission id as the client reference', () => {
     const parsed = parseUsageForm(values(), SUBMISSION);
     expect(parsed).toMatchObject({

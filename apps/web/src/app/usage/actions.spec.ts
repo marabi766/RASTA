@@ -99,6 +99,18 @@ beforeEach(() => {
 });
 
 describe('what is refused before anything is called', () => {
+  it.each(['hourMeter', 'odometer'])(
+    'refuses 11 digit %s before any gateway write',
+    async (field) => {
+      const state = await submitUsage(
+        IDLE_USAGE_FORM,
+        formData({ ...VALID, [field]: '10000000000' }),
+      );
+      expect(state.kind).toBe('INVALID');
+      expect(recordUsage).not.toHaveBeenCalled();
+    },
+  );
+
   it('refuses a post with no session', async () => {
     currentSession.mockResolvedValue(null);
     const state = await submitUsage(IDLE_USAGE_FORM, formData(VALID));

@@ -61,6 +61,11 @@ describe('meter usage boundary and cursor', () => {
     expect(listMeterUsage).not.toHaveBeenCalled();
   });
 
+  it('refuses to emit a cursor it cannot decode', async () => {
+    listMeterUsage.mockResolvedValueOnce([{ ...row, id: 'invalid/id' }, row]);
+    await expect(read()).rejects.toBeDefined();
+  });
+
   it('validates an asset-bound cursor and resumes at the exact tuple', async () => {
     const first = await read();
     expect(first).toMatchObject({

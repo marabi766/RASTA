@@ -3,7 +3,8 @@ import { UsageConsumer, CONSUMER_NAME } from '../src/consumers/usage.consumer';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { DueAnnouncerService } from '../src/maintenance/due-announcer.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { insertUsageEntry, lockUsageMeter } from '../src/maintenance/usage-meter';
+import { asActor, cleanup, id, newPrisma, tenants, waitFor } from './helpers';
 
 // Real consumer -> transaction -> PostgreSQL. Errors here are the broker's DLQ signal.
 describe('ADR-073 usage ledger', () => {
@@ -20,7 +21,7 @@ describe('ADR-073 usage ledger', () => {
         announced.push(assetId);
         return 0;
       },
-    } as DueAnnouncerService);
+    } as unknown as DueAnnouncerService);
   });
   afterAll(async () => {
     // Explicit tenant predicate also works before the ledger migration exists (red run).
@@ -133,6 +134,125 @@ describe('ADR-073 usage ledger', () => {
     },
   );
 
+  it('a waiting live event reads LEDGER only after the shared meter lock is granted', async () => {
+    const assetId = await machine('LEGACY', '100');
+    const reading = event(assetId, { hourMeter: '100' });
+    const delta = event(assetId, {
+      hours: '2',
+      periodStart: '2026-11-01T11:00:00Z',
+      periodEnd: '2026-11-01T12:00:00Z',
+    });
+    // Simulate facts loaded by PR 7b, without implementing its completeness/cutover command.
+    await repository.transaction(async (tx) => {
+      for (const e of [reading, delta]) {
+        const p = e.payload as Record<string, string>;
+        await insertUsageEntry(tx, {
+          assetId,
+          organizationId: org.a,
+          usageRecordId: p.usageRecordId,
+          periodStart: new Date(p.periodStart),
+          periodEnd: new Date(p.periodEnd),
+          hoursDelta: p.hours,
+          kilometresDelta: p.kilometres,
+          reportedHourMeter: p.hourMeter ?? null,
+          reportedOdometer: null,
+          now: new Date(),
+        });
+      }
+    });
+    let unlock!: () => void;
+    let ready!: () => void;
+    const gate = new Promise<void>((r) => {
+      unlock = r;
+    });
+    const held = new Promise<void>((r) => {
+      ready = r;
+    });
+    const cutover = repository.transaction(
+      async (tx) => {
+        await lockUsageMeter(tx, { assetId, organizationId: org.a, now: new Date() });
+        ready();
+        await gate;
+        await tx.$executeRaw`UPDATE asset_usage_meter SET hour_meter = 102, meter_source = 'LEDGER' WHERE asset_id = ${assetId}`;
+      },
+      { timeoutMs: 15000 },
+    );
+    await Promise.race([held, cutover]);
+    const live = apply(delta);
+    // Attach rejection handlers while the barrier is held; cleanup always releases it.
+    const pending = Promise.all([cutover, live]);
+    pending.catch(() => undefined);
+    try {
+      await waitFor(
+        'live consumer blocked on the shared meter row lock',
+        async () => {
+          const [row] = await prisma.client.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid()
+            AND wait_event_type = 'Lock' AND query LIKE '%SELECT meter_source%FOR UPDATE%'
+        `;
+          return row.n > 0 ? true : null;
+        },
+        5000,
+        20,
+      );
+    } finally {
+      unlock();
+      await pending;
+    }
+    expect((await meter(assetId))!.hourMeter.toString()).toBe('102');
+  });
+
+  it('a processed event with a changed record/asset rolls back its tentative entry', async () => {
+    const original = await machine();
+    const e = event(original, { hours: '2' });
+    await apply(e);
+    const other = await machine();
+    const changed = event(other, { hours: '9' });
+    expect(await apply({ ...changed, eventId: e.eventId })).toBe('SKIPPED');
+    expect((await meter(other))!.hourMeter.toString()).toBe('0');
+    expect(
+      await asActor({ organizationId: org.a }, () =>
+        prisma.client.assetUsageEntry.count({ where: { assetId: other } }),
+      ),
+    ).toBe(0);
+  });
+
+  it('concurrent distinct events serialize the full recomputation', async () => {
+    const assetId = await machine();
+    const reading = event(assetId, { hourMeter: '100', odometer: '200' });
+    const delta = event(assetId, {
+      hours: '2',
+      kilometres: '3',
+      periodStart: '2026-11-01T11:00:00Z',
+      periodEnd: '2026-11-01T12:00:00Z',
+    });
+    await Promise.all([apply(reading), apply(delta)]);
+    const m = await meter(assetId);
+    expect(m!.hourMeter.toString()).toBe('102');
+    expect(m!.odometer.toString()).toBe('203');
+  });
+
+  it('refuses a record-id collision across tenants before marker or phantom meter creation', async () => {
+    const assetId = await machine();
+    const original = event(assetId, { hours: '2' });
+    await apply(original);
+    const other = id('AST');
+    const collision = {
+      ...event(other, { ...(original.payload as object), assetId: other, organizationId: org.b }),
+      tenantId: org.b,
+    };
+    await expect(apply(collision)).rejects.toMatchObject({
+      name: 'UnprocessableEventError',
+      reason: 'VALIDATION_FAILED',
+    });
+    expect(await meter(other)).toBeNull();
+    expect((await meter(assetId))!.hourMeter.toString()).toBe('2');
+    expect(
+      await prisma.client.processedEvent.count({ where: { eventId: collision.eventId } }),
+    ).toBe(0);
+  });
+
   it('keeps entries tenant scoped while the physical meter spans ownership transfers', async () => {
     const assetId = await machine();
     await apply(event(assetId, { hours: '2' }));
@@ -148,6 +268,17 @@ describe('ADR-073 usage ledger', () => {
     const rows = await prisma.client.$queryRaw<{ organization_id: string }[]>`
       SELECT organization_id FROM asset_usage_entry WHERE asset_id = ${assetId} AND organization_id = ${org.a}`;
     expect(rows).toEqual([{ organization_id: org.a }]);
+    const own = await asActor({ organizationId: org.a }, () =>
+      prisma.client.assetUsageEntry.findMany({ where: { assetId } }),
+    );
+    expect(own.map((r) => r.organizationId)).toEqual([org.a]);
+    const refusedWrite = await asActor({ organizationId: org.b }, () =>
+      prisma.client.assetUsageEntry.updateMany({
+        where: { usageRecordId: own[0].usageRecordId },
+        data: { hours: '99' },
+      }),
+    );
+    expect(refusedWrite.count).toBe(0);
     const forged = event(assetId, { organizationId: org.b, hours: '9' });
     await expect(apply(forged)).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
     expect((await meter(assetId))!.hourMeter.toString()).toBe('5');
@@ -157,6 +288,7 @@ describe('ADR-073 usage ledger', () => {
   it.each(['LEGACY', 'LEDGER'] as const)(
     '%s: invalid quantities/intervals DLQ without marker, meter change or announcement',
     async (source) => {
+      const mark = jest.spyOn(repository, 'markEventProcessed');
       const assetId = await machine(source, '100');
       const patches = ['hours', 'kilometres', 'hourMeter', 'odometer'].flatMap((field) =>
         malformed.map((value) => ({ [field]: value })),
@@ -182,6 +314,8 @@ describe('ADR-073 usage ledger', () => {
         expect((await meter(assetId))!.hourMeter.toString()).toBe('100');
       }
       expect(announced).not.toContain(assetId);
+      expect(mark).not.toHaveBeenCalled();
+      mark.mockRestore();
     },
   );
 
@@ -235,7 +369,7 @@ describe('ADR-073 usage ledger', () => {
         prisma.client.$executeRawUnsafe(
           `
         INSERT INTO asset_usage_entry(usage_record_id, asset_id, organization_id, period_start, period_end, hours, kilometres, hour_meter, odometer)
-        VALUES ($1, $2, $3, '2026-11-01T10:00:00Z', $4::timestamp, $5, $6, $7, $8)`,
+        VALUES ($1, $2, $3, '2026-11-01T10:00:00Z', $4::timestamp, $5::numeric, $6::numeric, $7::numeric, $8::numeric)`,
           id('USG'),
           id('AST'),
           org.a,

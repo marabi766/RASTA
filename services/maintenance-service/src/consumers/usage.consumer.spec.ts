@@ -41,8 +41,11 @@ function harness(
       marked.push(eventId);
       return !options.alreadyProcessed;
     },
-    async foldUsageIntoMeter(_tx: unknown, input: Fold): Promise<void> {
+    async foldUsageIntoMeter(_tx: unknown, input: Fold, eventId: string): Promise<boolean> {
+      if (options.alreadyProcessed || (options.ledger && marked.includes(eventId))) return false;
+      marked.push(eventId);
       folds.push(input);
+      return true;
     },
   } as unknown as MaintenanceRepository;
 
