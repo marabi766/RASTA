@@ -3166,7 +3166,7 @@
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
     "line": 93,
-    "hash": "d857c38a0226818dcfc08979f584f764ec8fcdd0e58f33c63036d273ba16b3c5",
+    "hash": "42e58ec22ca7ccd7e84c65c16d236ef49b063c66d0c9f04ac61d5566d98c2625",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
   },

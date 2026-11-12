@@ -20,6 +20,7 @@ export type MaintenancePayload<N extends MaintenanceEventName> = z.infer<
 
 /** The aggregate each event is *about*, which is not what orders it. */
 export const AGGREGATE_OF = {
+  MAINTENANCE_METER_RECONCILED: 'AssetUsageMeter',
   MAINTENANCE_DUE: 'MaintenanceSchedule',
   BREAKDOWN_REPORTED: 'MaintenanceRequest',
   MAINTENANCE_CREATED: 'MaintenanceRequest',
@@ -71,6 +72,7 @@ type PartitionRule<N extends MaintenanceEventName> = (
  * holds that line so nobody later infers a guarantee that was never made.
  */
 export const PARTITION_KEY_POLICY: { [N in MaintenanceEventName]: PartitionRule<N> } = {
+  MAINTENANCE_METER_RECONCILED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   MAINTENANCE_DUE: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   BREAKDOWN_REPORTED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   MAINTENANCE_CREATED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),

@@ -372,3 +372,10 @@ export {
   canonicalMeterCertificate,
 } from './common/meter-certificate';
 export type { MeterCertificate, MeterCertificateFact } from './common/meter-certificate';
+
+export {
+  MAINTENANCE_METER_RECONCILED,
+  MAINTENANCE_METER_RECONCILED_VERSION,
+  maintenanceMeterReconciledPayloadV1,
+  meterReconcileOperatorSchema,
+} from './events/maintenance-meter';
