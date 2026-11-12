@@ -820,6 +820,21 @@ export class MaintenanceRepository {
     );
   }
 
+  async countLegacyMeterAssetsAcrossTenants(): Promise<number> {
+    return runUnscoped(
+      'operational legacy meter gauge across tenants; never returned to a tenant',
+      async () => {
+        const [row] = await this.client.$queryRaw<{ count: bigint }[]>`
+        SELECT count(*) AS count FROM (
+          SELECT id FROM asset_ref
+          UNION SELECT asset_id AS id FROM asset_usage_meter
+        ) assets LEFT JOIN asset_usage_meter m ON m.asset_id = assets.id
+        WHERE m.meter_source IS DISTINCT FROM 'LEDGER'`;
+        return Number(row.count);
+      },
+    );
+  }
+
   /** How many requests are awaiting the owner's approval, deployment-wide. */
   async countAwaitingApprovalAcrossTenants(): Promise<number> {
     return runUnscoped('operational gauge across the deployment; never returned to a tenant', () =>

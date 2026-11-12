@@ -172,3 +172,21 @@ export const transferFenceResolutionsTotal = new Counter({
   labelNames: ['service', 'outcome'] as const,
   registers: [registry],
 });
+
+let collectLegacyMeters: () => Promise<void> = async () => undefined;
+export function bindLegacyMeterCollector(collect: () => Promise<void>): void {
+  collectLegacyMeters = collect;
+}
+
+/** Unreconciled known physical assets, including replicas with no meter row. */
+export const maintenanceMeterLegacyAssets = new Gauge({
+  async collect() {
+    await collectLegacyMeters();
+  },
+  name: 'maintenance_meter_legacy_assets',
+  help: 'Known assets without a verified LEDGER meter; not a source inventory completeness proof',
+  registers: [registry],
+});
+
+// No startup zero before the first confirmed database sample.
+maintenanceMeterLegacyAssets.remove();
