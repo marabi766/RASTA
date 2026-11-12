@@ -102,3 +102,35 @@ markers or run schema down: arrival-order folding can double-count covered or
 replayed usage. Pause rollout, preserve evidence, repair source/delivery issues,
 and rerun verified apply. Full rollout still requires the separately persisted
 marker and its first-meter race proof; this PR neither writes nor infers it.
+
+## Full-run activation acceptance contract (implementation still blocked)
+
+The full-run follow-up must persist its authoritative inventory, per-asset
+outcomes and explicit refusals before activating a durable marker. The local
+replica scan, a collection of per-asset certificates, an empty tenant report
+and a zero gauge cannot establish inventory exhaustion. An unavailable or
+unproven owner inventory must refuse activation, including after restart.
+Historical/transferred source usage and local orphan meters must be accounted
+for; the owner inventory must define which concurrent asset creations belong
+to the run. No operator flag may substitute for that proof.
+
+Activation must recheck durable modes and outcomes while serialized against
+every production first-meter insertion. Prove both PostgreSQL race orders:
+an earlier LEGACY insertion is included in the final check or blocks activation;
+an insertion following activation observes the committed marker. An explicitly
+refused pre-existing asset must retain its LEGACY treatment even if its first
+meter is created later. Only proven new assets may start LEDGER. Unknown apply
+results require durable reconciliation and must not silently become refusals.
+
+The serialization must preserve the existing fact-insert-before-meter-lock
+order and both r3 regressions (102, never 104). Test restart, lost activation
+responses, explicit refusals and unavailable inventory against real PostgreSQL.
+The full-run marker and each per-asset cutover also require transactional audit
+evidence; a conditional MAINTENANCE_DUE announcement is not cutover evidence.
+
+After activation, rollback retains the inventory, refusals, marker, ledger facts,
+processed-event markers and transactional cutover evidence. Keep a LEDGER-aware
+image that also honors the marker and refused-asset bootstrap rules. If no such
+image is available, pause rollout instead of resetting modes, removing the
+marker or running schema down. Gauge zero remains an additional rollout check,
+never authority to activate or erase the marker.
