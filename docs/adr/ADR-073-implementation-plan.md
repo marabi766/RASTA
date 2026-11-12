@@ -175,6 +175,14 @@ Historical LEGACY events without interval endpoints are retained with nullable e
 LEDGER calculation refuses any incomplete entry. 7b must resolve those facts from fleet and prove
 interval completeness before cutover; counting rows alone cannot establish it.
 
+Task 1359 splits 7b at the completeness boundary: **7b-1** adds the default
+read-only reconcile preview, explicit unproven completeness status, and the legacy
+assets gauge ([runbook](../runbooks/maintenance-meter-reconcile.md)). **7b-2 remains
+required** for an authoritative inventory/source fence, `--apply`, current-under-lock
+recalculation, interval resolution or refusal, new-asset full-run marker, announcements
+and the cutover/concurrency regressions. No asset is switched by 7b-1; `--apply` is
+refused. Exhausting PR 9 live pages is not proof against tail/backdated commits.
+
 - Migration برگشت‌پذیر: جدول `asset_usage_entry` (کلید `usage_record_id`؛ `asset_id`، `organization_id`، `period_start`،
   `period_end`، `hours` `NUMERIC(10,2)`، `kilometres`، `hour_meter`، `odometer` `NUMERIC(12,2)`؛ ایندکس `(asset_id, period_end)`؛
   CHECK: کمیت‌ها `>= 0` یا تهی برای دو خواندن، `period_end > period_start`) و ستون `meter_source` (`LEGACY` پیش‌فرض | `LEDGER`) در
