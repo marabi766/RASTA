@@ -1,5 +1,6 @@
 import {
   ASSIGN_LIKE,
+  DECLARERS,
   executionChain,
   parseCommands,
   shellInvocation,
@@ -7,6 +8,26 @@ import {
 } from './ci-shell-text-lib.mjs';
 
 /**
+ * THREAT MODEL (PM decision D-173). This reader guards against ACCIDENTAL REGRESSION: a
+ * contributor editing a workflow, an action or a Dockerfile in good faith. It is not a defence
+ * against a hostile insider, who can edit the guard itself.
+ * CONTRACT: whatever it reads it reads as bash does, and whatever it cannot read with certainty
+ * it REFUSES. It does not model every shell feature; a feature it does not model is a refusal,
+ * never a guess. A new form is admitted by adding the exact reviewed form to a policy.
+ * KNOWN LIMITS (outside D-173, or a policy's to close by listing less; FU-340 holds the list):
+ *  - a program a policy lists as `true` is read no further than its name: what `curl`, `tee`,
+ *    `rm` or a repository script does with its operands, its input and the files it writes;
+ *  - no value is traced: what a variable holds where a reviewed line uses it (`"$SCAN_BASE"`, a
+ *    value of several lines written to `$GITHUB_ENV`), and what a file holds when it is run
+ *    after an earlier command of the same text wrote it;
+ *  - a redirection's target is known not to be a word of the command; it is not judged;
+ *  - a name is bound by more than the forms the name rule is asked about (`read`, `printf -v`,
+ *    `mapfile`, `getopts`, `let`): they are refused only while a policy does not list them;
+ *  - shell state is not modelled: `set` options, traps, a function named like a listed program
+ *    (its body is read as commands, by the same policy), startup files;
+ *  - text inside `${x:-…}` is read as words of commands: stricter than bash there, and not
+ *    proven equal to it.
+ *
  * FU-334: the ONE default-deny reader of shell text for a guard that must prove what a step, a
  * RUN or a container runs (the Prisma lifecycle-suppression guard now; the browser-install guard
  * next, FU-338). It follows the image-pin check's rule (check-dockerfile-pins-lib.mjs,
@@ -17,10 +38,14 @@ import {
  *
  *  - `programs`: every word that may stand where a command runs. `true` is a program whose
  *    operands are data; a function is its grammar, `(args, context) => problem | null`, and sees
- *    every word after the program. A word that is not an own key is refused: a wrapper (`env`,
+ *    every word after the program; a wrapper's grammar sees the command it runs too (r1 F4).
+ *    A word that is not an own key holding one of the two is refused: a wrapper (`env`,
  *    `xargs`, `sudo`, `npx`, `timeout`), `source`, a glob (`/usr/bin/ap[t]-get`), a variable.
  *  - `file(path, state)`: why a program named by a path is not one this guard reads, or null.
- *  - `name(NAME)`: why a variable may not be assigned here, or null. Without the rule, none may.
+ *  - `name(NAME)`: why a variable may not be bound here, or null. Without the rule, none may.
+ *    Every form that binds one is asked (r1 F3): `A=b`, a declaration (`export`, `readonly`,
+ *    `declare`, `typeset`, `local`), `unset`, `for`/`select NAME`. The forms that bind a name
+ *    the text computes or hides are the tokenizer's refusals (`${x:=v}`, `${!x}`, `$(( ))`).
  *  - `tolerated`: the tokenizer's findings the guard reads past. Every other one is a problem.
  *  - `unlisted`: how the guard words a refused command word.
  *
@@ -43,11 +68,10 @@ export const plain = (word) => Boolean(word) && !word.dynamic;
 const unquoted = (source) => source.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '');
 export const oneWord = (word) =>
   plain(word) || (!vector({ value: word.source }) && !/[$`*?[\]{}~]/.test(unquoted(word.source)));
-/**
- * `ech>o x` runs `ech`, and the tokenizer (which drops the operator) reads `echo`: a redirection
- * written into a word makes the word read another one. Only a descriptor may stand before it.
- */
-const GLUED = /^(?!\d*[<>])[^<>]*[<>]/;
+const written = (word) => (word.dynamic ? word.value.slice(0, word.cut) : word.value);
+/** The programs whose operands are names they bind, and those whose first operand is. */
+const BINDERS = new Set([...DECLARERS, 'unset']);
+const LOOPS = new Set(['for', 'select']);
 
 /**
  * A closed option grammar. `flags` take no value; `values` take one, attached with `=` or as the
@@ -64,13 +88,17 @@ export function readOptions(args, { flags = '', values = '', computed = false } 
   for (let at = 0; at < args.length; at++) {
     const word = args[at];
     if (!data(word)) return { problem: `\`${clip(word.value)}\` is computed` };
-    const written = word.dynamic ? word.value.slice(0, word.cut) : word.value;
-    const [name] = written.split('=');
+    const [name] = written(word).split('=');
     if (!name.startsWith('-')) operands.push(word);
-    else if (written.includes('=') && valued.has(name))
+    else if (written(word).includes('=') && valued.has(name))
       options.push({ name, value: { ...word, value: word.value.slice(name.length + 1) } });
     else if (word.value === name && bare.has(name)) options.push({ name, value: null });
-    else if (word.value === name && valued.has(name) && data(args[at + 1]))
+    else if (
+      word.value === name &&
+      valued.has(name) &&
+      data(args[at + 1]) &&
+      !written(args[at + 1]).startsWith('-') // r1 F2: a program may read that as an option of its own
+    )
       options.push({ name, value: args[++at] });
     else return { problem: `option \`${clip(word.value)}\` is not one this check reads` };
   }
@@ -98,15 +126,23 @@ export function readShell(
   const read = parseCommands(text);
   for (const unread of read.problems)
     if (!policy.tolerated?.has(unread)) problems.push(`${unread} is not read`);
-  const listed = (name) => Object.hasOwn(policy.programs, name);
-  for (const { words, scope } of read.commands) {
+  const grammarOf = (name) => (Object.hasOwn(policy.programs, name) ? policy.programs[name] : null);
+  const listed = (name) => grammarOf(name) === true || typeof grammarOf(name) === 'function';
+  for (const { words: all, scope } of read.commands) {
+    // r1 F1: a redirection's target is no word of the command: `>echo env -i x` runs `env`.
+    const words = all.filter((word) => !word.redirect);
     state.moved = left.some((at) => at === '' || scope === at || scope.startsWith(`${at}/`));
     const refuse = (why) =>
       problems.push(`\`${clip(words.map((word) => word.value).join(' '))}\` ${why}`);
     const { chain, problem } = executionChain(words);
     if (problem) refuse(problem);
-    if (words.some((word) => GLUED.test(unquoted(word.source))))
-      refuse('writes a redirection into a word, which is then not the word this check reads');
+    const bind = (name) => {
+      state.assigned.add(name);
+      const unbound = policy.name
+        ? policy.name(name)
+        : 'assigns a variable, which its policy does not read';
+      if (unbound) refuse(unbound);
+    };
     for (const at of chain) {
       const { value, dynamic } = words[at];
       // A computed word is a word of the grammar (`[`, `{`) or nothing this reader knows.
@@ -119,24 +155,26 @@ export function readShell(
     const last = chain.at(-1) ?? words.length;
     for (const [at, word] of words.slice(0, last).entries()) {
       if (chain.includes(at)) continue;
-      const assignment = word.dynamic ? word.value.slice(0, word.cut) : word.value;
-      const name = ASSIGN_LIKE.test(assignment) && /^\w+/.exec(assignment)?.[0];
-      if (!name || /^\w+\[/.test(assignment))
+      const name = ASSIGN_LIKE.test(written(word)) && /^\w+/.exec(written(word))?.[0];
+      if (!name || /^\w+\[/.test(written(word)))
         refuse('has a word before its command that is not an assignment to a written-out name');
-      else {
-        state.assigned.add(name);
-        const unassignable = policy.name
-          ? policy.name(name)
-          : 'assigns a variable, which its policy does not read';
-        if (unassignable) refuse(unassignable);
-      }
+      else bind(name);
     }
     const program = words[last];
     if (!program) continue;
     const args = words.slice(last + 1);
     commands.push({ words, program, args });
-    const grammar = plain(program) && listed(program.value) ? policy.programs[program.value] : null;
-    if (typeof grammar !== 'function') continue;
+    const bound = BINDERS.has(program.value) ? args : LOOPS.has(program.value) ? [args[0]] : [];
+    for (const word of bound) {
+      const name =
+        /^[A-Za-z_]\w*(?=\+?=)/.exec(written(word ?? { value: '' }))?.[0] ??
+        (plain(word) && /^[A-Za-z_]\w*$/.test(word.value) ? word.value : null);
+      if (name) bind(name);
+      else
+        refuse(
+          `is not a form of \`${program.value}\` this check reads: a word is not a written-out name`,
+        );
+    }
     const context = {
       state,
       /** From here on, in this subshell, a relative path is no longer one of the starting directory. */
@@ -157,8 +195,12 @@ export function readShell(
         return body.problems.length > 0 ? `${name} -c runs ${body.problems.join('; ')}` : null;
       },
     };
-    const unread = grammar(args, context);
-    if (unread) refuse(`is not a form of \`${program.value}\` this check reads: ${unread}`);
+    // r1 F4: every word of the chain that has a grammar is asked, a wrapper before what it runs.
+    for (const at of chain) {
+      const grammar = plain(words[at]) ? grammarOf(words[at].value) : null;
+      const unread = typeof grammar === 'function' ? grammar(words.slice(at + 1), context) : null;
+      if (unread) refuse(`is not a form of \`${words[at].value}\` this check reads: ${unread}`);
+    }
   }
   return { problems, commands };
 }
