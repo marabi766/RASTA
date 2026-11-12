@@ -3,6 +3,7 @@ import { OutboxShutdown, type EventConsumer, type OutboxStopOptions } from '@ras
 import { AppModule } from './app.module';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
 import { UsageConsumer } from './consumers/usage.consumer';
+import { LegacyMeterGauge } from './maintenance/legacy-meter-gauge';
 import { ENV } from './tokens';
 
 /**
@@ -54,7 +55,9 @@ describe('AppModule shutdown wiring (Codex on #267)', () => {
     const before = Date.now();
     await shutdown.stop();
 
-    expect(inject).toEqual(expect.arrayContaining([UsageConsumer, AssetSyncConsumer]));
+    expect(inject).toEqual(
+      expect.arrayContaining([UsageConsumer, AssetSyncConsumer, LegacyMeterGauge]),
+    );
     expect(stops.size).toBe(inject.length - 1);
     expect(stops.get(UsageConsumer)).toHaveLength(1);
     expect(stops.get(AssetSyncConsumer)).toHaveLength(1);

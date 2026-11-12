@@ -23,6 +23,8 @@ import type { ListRepairOrdersQuery, ListRequestsQuery, ListSchedulesQuery } fro
 
 /** Expired release tombstones removed per release or clearance (ADR-062 § 2). */
 const RELEASE_PURGE_BATCH = 100;
+const GAUGE_CONNECTION_WAIT_MS = 1_000;
+const GAUGE_TRANSACTION_MS = 2_000;
 
 /**
  * Data access for maintenance.
@@ -817,6 +819,28 @@ export class MaintenanceRepository {
       this.client.maintenanceRequest.count({
         where: { status: { in: [...OPEN_REQUEST_STATUSES] } },
       }),
+    );
+  }
+
+  async countLegacyMeterAssetsAcrossTenants(): Promise<number> {
+    return runUnscoped(
+      'operational legacy meter gauge across tenants; never returned to a tenant',
+      async () => {
+        return this.client.$transaction(
+          async (tx) => {
+            // Mandatory per-sample bounds, independent of optional session configuration.
+            await tx.$executeRaw`SET LOCAL statement_timeout = '1000ms'`;
+            const [row] = await tx.$queryRaw<{ count: bigint }[]>`
+        SELECT count(*) AS count FROM (
+          SELECT id FROM asset_ref
+          UNION SELECT asset_id AS id FROM asset_usage_meter
+        ) assets LEFT JOIN asset_usage_meter m ON m.asset_id = assets.id
+        WHERE m.meter_source IS DISTINCT FROM 'LEDGER'`;
+            return Number(row.count);
+          },
+          { maxWait: GAUGE_CONNECTION_WAIT_MS, timeout: GAUGE_TRANSACTION_MS },
+        );
+      },
     );
   }
 

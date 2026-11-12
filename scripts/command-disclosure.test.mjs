@@ -14,6 +14,7 @@ const reporters = [
   ['asset', 'outbox/flush', 2],
   ['fleet', 'fleet/clear-transferred', 2],
   ['fleet', 'fleet/drain-check', 2],
+  ['maintenance', 'maintenance/meter-reconcile', 2],
   ['identity', 'keycloak/projection', 2],
   ['economic', 'transaction/resolved-dispute-backfill', 1],
   ['marketplace', 'ops/hold-deadline-backfill', 1],
@@ -67,7 +68,7 @@ Module._load = function(id, ...args) {
   if (id === '@rasta/config') return load.call(this, id, ...args);
   if (id === '@rasta/logging') return { createLogger: () => ({ info() {}, error() {} }) };
   if (id === '@rasta/nest-common') return {
-    preflightRuntimeRole: async () => fault('preflight'), OutboxRelay: Relay,
+    preflightRuntimeRole: async () => fault('preflight'), OutboxRelay: Relay, InternalTokenService: Empty,
     kafkaConnection: () => ({}), kafkaClientConfig: () => ({}),
   };
   if (id === 'kafkajs') return { Kafka: class { admin() { return {
@@ -75,12 +76,13 @@ Module._load = function(id, ...args) {
   }; } } };
   if (id.endsWith('/config/env')) return {
     SERVICE_NAME: 'probe', ASSET_SYNC_TOPICS: [], loadAssetEnv: env,
-    loadFleetEnv: env, loadIdentityEnv: env, loadEconomicEnv: env, loadMarketplaceEnv: env,
+    loadFleetEnv: env, loadMaintenanceEnv: env, loadIdentityEnv: env, loadEconomicEnv: env, loadMarketplaceEnv: env,
   };
   if (id.endsWith('/generated/prisma')) return { PrismaClient: Empty };
   if (id.endsWith('/prisma/prisma.service')) return { PrismaService };
   if (id.endsWith('.command') || id === './resolved-dispute-backfill' || id === './hold-deadline-backfill') return commandExports;
-  if (id.endsWith('.args')) return { parseReprojectArgs: () => ({}), parseClearTransferredArgs: () => ({}) };
+  if (id.endsWith('.args')) return { parseReprojectArgs: () => ({}), parseClearTransferredArgs: () => ({}), parseMeterReconcileArgs: () => ({ organizationId: 'ORG_TEST' }) };
+  if (id === './meter-reconcile') return { MeterUsageClient: Empty, MeterReconcile: class { async report() { return command(); } } };
   if (id.endsWith('.repository')) return { AssetRepository: Empty, FleetRepository: Empty, IdentityRepository: Empty };
   if (id === './keycloak.client') return { KeycloakAdminClient: Empty };
   if (id === './keycloak.projector') return { KeycloakProjector: Empty };
@@ -106,6 +108,7 @@ function run(entry, phase, drained = true, databaseDrained = true) {
         timeout: 15_000,
         env: {
           ...process.env,
+          FLEET_SERVICE_URL: 'http://fleet-service:3104',
           PROBE_PHASE: phase,
           PROBE_DRAINED: String(drained),
           PROBE_DB_DRAINED: String(databaseDrained),
@@ -140,6 +143,7 @@ for (const [service, command, exit] of reporters.filter(
     service === 'asset' ||
     service === 'marketplace' ||
     service === 'economic' ||
+    service === 'maintenance' ||
     (service === 'fleet' && command === 'fleet/clear-transferred'),
 )) {
   test(`${service}/${command}: unconfirmed database close refuses success`, () => {

@@ -46,6 +46,7 @@ import { IdempotencyStore } from './maintenance/idempotency';
 import { RepairOrderService } from './maintenance/repair-order.service';
 import { DueAnnouncerService } from './maintenance/due-announcer.service';
 import { DueScanner } from './maintenance/due-scanner';
+import { LegacyMeterGauge } from './maintenance/legacy-meter-gauge';
 import { WorkshopDirectory, UnverifiedWorkshopDirectory } from './maintenance/workshop.directory';
 import { ScheduleController } from './maintenance/schedule.controller';
 import { RequestController } from './maintenance/request.controller';
@@ -169,6 +170,11 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     RepairOrderService,
     DueAnnouncerService,
     DueScanner,
+    {
+      provide: LegacyMeterGauge,
+      inject: [MaintenanceRepository],
+      useFactory: (repository: MaintenanceRepository) => new LegacyMeterGauge(repository),
+    },
 
     // The boundary with supplier-service, bound to the one implementation this
     // platform can honestly provide today. Filling the gap is a second class
@@ -320,6 +326,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         OutboxRelay,
         OutboxPurgeScheduler,
         DueScanner,
+        LegacyMeterGauge,
         UsageConsumer,
         AssetSyncConsumer,
         KafkaEventPublisher,
@@ -330,6 +337,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         dueScanner: DueScanner,
+        legacyMeterGauge: LegacyMeterGauge,
         usage: UsageConsumer,
         assetSync: AssetSyncConsumer,
         publisher: KafkaEventPublisher,
@@ -339,7 +347,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         new OutboxShutdown({
           relay,
           purge,
-          workers: [dueScanner, usage, assetSync],
+          workers: [dueScanner, legacyMeterGauge, usage, assetSync],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
           databases: [prisma],
