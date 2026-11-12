@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import { AllowService, zodPipe } from '@rasta/nest-common';
-import { listMeterUsageQuerySchema, type ListMeterUsageQuery } from './dto';
+import type { ListMeterUsageQuery } from './dto';
 import { METER_USAGE_CALLER, MeterUsageService, type MeterUsagePage } from './meter-usage';
 import {
   AssetWorkStateService,
@@ -49,9 +49,7 @@ export class FleetInternalController {
       'Malformed, mismatched or nonexistent cursor tuples return 400. Inserts behind the cursor require a fresh scan; ' +
       'this is not a frozen snapshot. No retirement claims are returned.',
   })
-  list(
-    @Query(zodPipe(listMeterUsageQuerySchema)) query: ListMeterUsageQuery,
-  ): Promise<MeterUsagePage> {
+  list(@Query() query: ListMeterUsageQuery): Promise<MeterUsagePage> {
     return this.meter.list(query);
   }
 

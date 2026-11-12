@@ -12,8 +12,8 @@
 //                       foreign key — the two live in different databases and
 //                       a cross-database constraint is not expressible (ADR-005).
 //   Driver, Assignment  fleet-service. Usage arrives as USAGE_RECORDED and is
-//                       reduced to a meter reading here; the usage records
-//                       themselves are never copied (docs/04 § 4.6).
+//                       reduced to a meter here, with the minimal quantity ledger
+//                       required by ADR-073 for arrival-order independence.
 //   Workshop profile    supplier-service. `workshop_organization_id` is a
 //                       reference to an organization, not a profile.
 //   Part stock          inventory-service. A consumed part records what was
@@ -79,7 +79,7 @@ model MaintenanceSchedule {
 
   organizationId String @map("organization_id")
   /// Owned by asset-service. A reference, never a foreign key.
-  assetId String @map("asset_id")
+  assetId        String @map("asset_id")
 
   /// What this service is, in the organization's own words — "تعویض روغن
   /// موتور". Free text because the platform does not own a catalogue of
@@ -118,8 +118,8 @@ model MaintenanceSchedule {
   /// meter read model never moves backwards, so a new instrument reading low
   /// is corrected by setting this anchor rather than by rewriting history.
   lastServicedAt        DateTime? @map("last_serviced_at")
-  lastServicedHourMeter Decimal?  @map("last_serviced_hour_meter") @db.Decimal(12, 2)
-  lastServicedOdometer  Decimal?  @map("last_serviced_odometer") @db.Decimal(12, 2)
+  lastServicedHourMeter Decimal?  @map("last_serviced_hour_meter") @db.Decimal(20, 2)
+  lastServicedOdometer  Decimal?  @map("last_serviced_odometer") @db.Decimal(20, 2)
   /// The request that last served this schedule, for the audit trail.
   lastServiceRequestId  String?   @map("last_service_request_id")
 
@@ -496,8 +496,8 @@ model MaintenanceCost {
   /// `MCS_<ULID>`.
   id String @id
 
-  organizationId String @map("organization_id")
-  repairOrderId  String @map("repair_order_id")
+  organizationId       String @map("organization_id")
+  repairOrderId        String @map("repair_order_id")
   /// Denormalised from the repair order so a request's total is one query
   /// rather than a join through every referral it ever had.
   maintenanceRequestId String @map("maintenance_request_id")
@@ -674,14 +674,32 @@ enum IdempotencyState {
   COMPLETED
 }
 
+// Raw fleet quantities keep their original per-record bounds (ADR-073 § 4.1).
+model AssetUsageEntry {
+  usageRecordId  String    @id @map("usage_record_id")
+  assetId        String    @map("asset_id")
+  organizationId String    @map("organization_id")
+  periodStart    DateTime? @map("period_start")
+  periodEnd      DateTime? @map("period_end")
+  hours          Decimal   @default(0) @db.Decimal(10, 2)
+  kilometres     Decimal   @default(0) @db.Decimal(12, 2)
+  hourMeter      Decimal?  @map("hour_meter") @db.Decimal(12, 2)
+  odometer       Decimal?  @db.Decimal(12, 2)
+
+  @@index([assetId, periodEnd], map: "asset_usage_entry_asset_id_period_end_idx")
+  @@index([organizationId], map: "asset_usage_entry_organization_id_idx")
+  @@map("asset_usage_entry")
+}
+
 model AssetUsageMeter {
   /// The asset id issued by asset-service.
   assetId String @id @map("asset_id")
 
   organizationId String @map("organization_id")
 
-  hourMeter Decimal @default(0) @map("hour_meter") @db.Decimal(12, 2)
-  odometer  Decimal @default(0) @db.Decimal(12, 2)
+  hourMeter   Decimal @default(0) @map("hour_meter") @db.Decimal(20, 2)
+  odometer    Decimal @default(0) @db.Decimal(20, 2)
+  meterSource String  @default("LEGACY") @map("meter_source")
 
   /// The last usage record folded in, and the end of its period. Kept for
   /// diagnosis: "why does this machine read 4 310 hours" is answerable.
@@ -745,8 +763,8 @@ model OutboxMessage {
   ///
   /// Nothing sets either field in B1: no allocation, no head maintenance, no
   /// ordering guarantee. D-027 stays open until B2–B6 ship and are accepted.
-  streamSeq      BigInt?   @map("stream_seq")
-  isStreamHead   Boolean   @default(false) @map("is_stream_head")
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
 
   @@index([createdAt], map: "idx_outbox_pending")
   @@map("outbox_message")

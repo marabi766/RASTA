@@ -563,12 +563,40 @@ export const usageRecordedSchema = z
     usageRecordId: z.string().min(1),
     assetId: z.string().min(1),
     organizationId: z.string().min(1).optional(),
-    periodEnd: z.string().optional(),
-    hours: z.string().nullable().optional(),
-    kilometres: z.string().nullable().optional(),
-    hourMeter: z.string().nullable().optional(),
-    odometer: z.string().nullable().optional(),
+    periodStart: z.string().check(isoDateTime()).optional(),
+    periodEnd: z.string().check(isoDateTime()).optional(),
+    hours: z
+      .string()
+      .regex(/^\d{1,8}(\.\d{1,2})?$/)
+      .refine((v) => !/\s/u.test(v))
+      .nullable()
+      .optional(),
+    kilometres: z
+      .string()
+      .regex(/^\d{1,10}(\.\d{1,2})?$/)
+      .refine((v) => !/\s/u.test(v))
+      .nullable()
+      .optional(),
+    hourMeter: z
+      .string()
+      .regex(/^\d{1,10}(\.\d{1,2})?$/)
+      .refine((v) => !/\s/u.test(v))
+      .nullable()
+      .optional(),
+    odometer: z
+      .string()
+      .regex(/^\d{1,10}(\.\d{1,2})?$/)
+      .refine((v) => !/\s/u.test(v))
+      .nullable()
+      .optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine(
+    (p) =>
+      !p.periodStart ||
+      !p.periodEnd ||
+      new Date(p.periodEnd).getTime() > new Date(p.periodStart).getTime(),
+    { path: ['periodEnd'], message: 'periodEnd must follow periodStart' },
+  );
 
 export type UsageRecordedEvent = z.infer<typeof usageRecordedSchema>;

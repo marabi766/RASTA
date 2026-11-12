@@ -91,7 +91,9 @@ export class MeterUsageService {
   }
 
   private encode(assetId: string, end: string, id: string): string {
-    return Buffer.from(JSON.stringify([assetId, end, id])).toString('base64url');
+    return Buffer.from(JSON.stringify(cursorPayload.parse([assetId, end, id]))).toString(
+      'base64url',
+    );
   }
 
   private decode(cursor: string, assetId: string): { end: Date; id: string } {

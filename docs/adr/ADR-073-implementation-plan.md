@@ -167,6 +167,14 @@ PR 2b پیش از پاسخ Q-150 ادغام نمی‌شود؛ تا آن زمان
 
 ### PR 7 — شمارنده‌ی نگهداری مستقل از ترتیب رسیدن (`L`، پیش‌نیاز)
 
+PR 7 is split by the PM (task 1358): **7a** supplies the reversible ledger/precision migrations,
+strict consumer validation and the shared `insertUsageEntry`, `lockUsageMeter`,
+`calculateLedgerMeter` helpers. **7b remains required**: reconciliation, completeness/catch-up proof,
+cutover, the legacy-assets gauge and the runbook. Existing and new assets remain `LEGACY` in 7a.
+Historical LEGACY events without interval endpoints are retained with nullable endpoints;
+LEDGER calculation refuses any incomplete entry. 7b must resolve those facts from fleet and prove
+interval completeness before cutover; counting rows alone cannot establish it.
+
 - Migration برگشت‌پذیر: جدول `asset_usage_entry` (کلید `usage_record_id`؛ `asset_id`، `organization_id`، `period_start`،
   `period_end`، `hours` `NUMERIC(10,2)`، `kilometres`، `hour_meter`، `odometer` `NUMERIC(12,2)`؛ ایندکس `(asset_id, period_end)`؛
   CHECK: کمیت‌ها `>= 0` یا تهی برای دو خواندن، `period_end > period_start`) و ستون `meter_source` (`LEGACY` پیش‌فرض | `LEDGER`) در

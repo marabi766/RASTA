@@ -284,6 +284,7 @@ model UsageRecord {
   @@index([organizationId, assetId, periodEnd(sort: Desc)])
   @@index([organizationId, driverId, periodEnd(sort: Desc)])
   @@index([assignmentId])
+  @@index([assetId, periodEnd, id], map: "usage_record_asset_id_period_end_id_idx")
   @@map("usage_record")
 }
 

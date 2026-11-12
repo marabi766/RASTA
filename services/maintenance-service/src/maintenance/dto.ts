@@ -105,10 +105,10 @@ export const directCostCategorySchema = z.enum(DIRECT_COST_CATEGORIES);
 const quantity = (maxIntegerDigits: number) =>
   z
     .string()
-    .regex(/^\d+(\.\d{1,2})?$/, 'Expected a non-negative number with at most two decimals')
-    .refine((value) => (value.split('.')[0] ?? '').length <= maxIntegerDigits, {
-      message: `At most ${maxIntegerDigits} digits before the decimal point`,
-    });
+    .regex(
+      new RegExp(`^\\d{1,${maxIntegerDigits}}(\\.\\d{1,2})?$`),
+      `Expected a non-negative number with at most ${maxIntegerDigits} integer digits and two decimals`,
+    );
 
 /** Part quantities allow three decimals — half a litre of oil is 0.5, but
  *  0.125 of a metre of hose is a real entry. */
@@ -190,8 +190,8 @@ export const createScheduleSchema = refineIntervals(
        * on it does not report it overdue on day one.
        */
       lastServicedAt: z.string().check(isoDateTime()).optional(),
-      lastServicedHourMeter: quantity(10).optional(),
-      lastServicedOdometer: quantity(10).optional(),
+      lastServicedHourMeter: quantity(18).optional(),
+      lastServicedOdometer: quantity(18).optional(),
 
       notes: displayText(1, 1000).optional(),
     })
@@ -215,8 +215,8 @@ export const updateScheduleSchema = z
      * instead of the history being rewritten.
      */
     lastServicedAt: z.string().check(isoDateTime()).nullable().optional(),
-    lastServicedHourMeter: quantity(10).nullable().optional(),
-    lastServicedOdometer: quantity(10).nullable().optional(),
+    lastServicedHourMeter: quantity(18).nullable().optional(),
+    lastServicedOdometer: quantity(18).nullable().optional(),
     notes: displayText(1, 1000).nullable().optional(),
   })
   .strict()

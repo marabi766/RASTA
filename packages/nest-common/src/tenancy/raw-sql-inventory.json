@@ -2359,13 +2359,6 @@
     "decision": "has bound organization predicate"
   },
   {
-    "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
-    "line": 782,
-    "hash": "6d0a6664e5bff317648ce35f00c702fc78989f285cb9ddfb807d7e79996b063c",
-    "occurrence": 0,
-    "decision": "platform-wide: foldUsageIntoMeter inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
-  },
-  {
     "file": "services/maintenance-service/src/prisma/prisma.service.ts",
     "line": 134,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
@@ -3141,5 +3134,54 @@
     "hash": "27360f95bffbb6777e0caa1fa50f25edb7b7098c8bc1aad72f54007ae45b3224",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 section 4 F physical asset meter reconciliation across owners; MeterUsageService admits only maintenance-service service identities, strictly validated asset/time/id cursor with primary-key anchor lookup and bounded minimal meter projection; no user, driver, notes, reference or reward fields"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
+    "line": 788,
+    "hash": "9aba39ed55b219193fc041e3e33f1a219846143bfb88ac2459ecf3d8be758a00",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 49,
+    "hash": "535e7f3addffbb783f60820ec184f39357068ac54e9378ab420798929e465ad6",
+    "occurrence": 0,
+    "decision": "platform-wide: insertUsageEntry explicitly binds the validated envelope organization into each immutable quantity fact; no implicit tenant default"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 62,
+    "hash": "e5b93ed147ab653a54492de8490748cdc139c705e617e57664344f6f101f6194",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 88,
+    "hash": "2a15ae9f18702fdcf26e3ec40708c2b8d4e6f2515db312c071b3c6d1746f01d0",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 93,
+    "hash": "d857c38a0226818dcfc08979f584f764ec8fcdd0e58f33c63036d273ba16b3c5",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 117,
+    "hash": "1e7f1260f602881d5c4413e6808c4ccbef71c3a98486ed631c76da8afb951a91",
+    "occurrence": 0,
+    "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
+    "line": 151,
+    "hash": "9685de3810212cfc8dad2935f95a7772a83e5a7b3d66dc2a66126c1bc1589742",
+    "occurrence": 0,
+    "decision": "platform-wide: calculateLegacyMeter computes numeric constants from the already locked physical meter; no database rows read"
   }
 ]

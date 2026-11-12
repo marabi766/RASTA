@@ -32,6 +32,7 @@ import { Prisma, PrismaClient } from '../generated/prisma';
  * and from `organizationId` on this service's own rows.
  */
 export const TENANT_SCOPED_MODELS = [
+  'AssetUsageEntry',
   'MaintenanceSchedule',
   'MaintenanceRequest',
   'RepairOrder',
