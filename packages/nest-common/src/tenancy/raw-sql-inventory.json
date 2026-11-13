@@ -3166,7 +3166,7 @@
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
     "line": 93,
-    "hash": "d857c38a0226818dcfc08979f584f764ec8fcdd0e58f33c63036d273ba16b3c5",
+    "hash": "42e58ec22ca7ccd7e84c65c16d236ef49b063c66d0c9f04ac61d5566d98c2625",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
   },
@@ -3211,5 +3211,12 @@
     "occurrence": 0,
     "line": 28,
     "decision": "platform-wide: PostgreSQL snapshot identifier only; no tenant table or fact is read by this statement"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/meter-reconcile.ts",
+    "line": 268,
+    "hash": "1601ab0120aeb71d6a1bf0bd8d7057fac5fd9200e9bfbcce10b7f610019c9b17",
+    "occurrence": 0,
+    "decision": "platform-wide: verified physical asset meter cutover under shared lock spans historical owners; tenant partition checked before source read"
   }
 ]

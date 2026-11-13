@@ -93,6 +93,63 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
     await migrator.onModuleDestroy();
   }, 60_000);
 
+  it('stores meter before/after, operator and certificate evidence once through the domain consumer', async () => {
+    const { DomainProjectorConsumer } = await import('../src/consumers/domain-projector.consumer');
+    const source = envelope({
+      eventName: 'MAINTENANCE_METER_RECONCILED',
+      producer: 'maintenance-service',
+      aggregateType: 'AssetUsageMeter',
+      actor: { type: 'USER', id: 'USR_OPERATOR' },
+    });
+    source.payload = {
+      assetId: source.aggregateId,
+      organizationId: source.tenantId,
+      operatorId: 'USR_OPERATOR',
+      before: {
+        mode: 'LEGACY',
+        hours: '102.00',
+        kilometres: '0.00',
+        recordCount: 2,
+        lastPeriodEnd: null,
+        lastUsageRecordId: null,
+      },
+      after: {
+        mode: 'LEDGER',
+        hours: '100.00',
+        kilometres: '0.00',
+        recordCount: 2,
+        lastPeriodEnd: null,
+        lastUsageRecordId: null,
+      },
+      certificateDigest: 'a'.repeat(64),
+      snapshot: '1:2:',
+      runId: source.correlationId,
+    };
+    const consumer = new DomainProjectorConsumer(jest.fn(), repository, {
+      error: jest.fn(),
+      debug: jest.fn(),
+    } as never);
+    await consumer.handle(source, delivery('rasta.maintenance.v1'));
+    await consumer.handle(source, delivery('rasta.maintenance.v1'));
+    const rows = await prisma.client.auditEvent.findMany({
+      where: { sourceEventId: source.eventId },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      actorType: 'USER',
+      actorId: 'USR_OPERATOR',
+      organizationId: source.tenantId,
+    });
+    expect(rows[0].changes).toEqual(
+      expect.arrayContaining([
+        { field: 'hours', from: '102.00', to: '100.00' },
+        { field: 'mode', from: 'LEGACY', to: 'LEDGER' },
+        { field: 'snapshot', from: null, to: '1:2:' },
+        { field: 'certificateDigest', from: null, to: 'a'.repeat(64) },
+      ]),
+    );
+  });
+
   it('stores the mapped record with database-generated recorded_at', async () => {
     const source = envelope({ causationId: id('CAU'), traceparent: '00-aa-bb-01', streamSeq: 7 });
     const record = toAuditEventRecord(source, delivery());
