@@ -4495,6 +4495,7 @@ export const EXPECTED = {
     // or database; the migrator owns rasta_fleet.
     connectAs: 'migrator',
     tables: [
+      'meter_inventory_seal',
       'asset_ref',
       'assignment',
       'availability_window',
@@ -4504,7 +4505,12 @@ export const EXPECTED = {
       'processed_event',
       'usage_record',
     ],
-    triggers: [],
+    triggers: [
+      'meter_inventory_creation_fence',
+      'meter_inventory_seal_fixed',
+      'meter_inventory_seal_no_truncate',
+    ],
+    functions: ['meter_inventory_creation_fence', 'meter_inventory_seal_fixed'],
     constraints: [
       'ck_assignment_period',
       'ck_availability_period',
@@ -4597,8 +4603,8 @@ export const EXPECTED = {
       'processed_event',
       'repair_order',
     ],
-    triggers: ['usage_meter_insert_fence'],
-    functions: ['set_usage_meter_source'],
+    triggers: ['usage_meter_insert_fence', 'usage_meter_mode_fixed'],
+    functions: ['set_usage_meter_source', 'usage_meter_mode_fixed'],
     indexes: ['asset_usage_entry_asset_id_period_end_idx', 'asset_usage_entry_organization_id_idx'],
     constraints: [
       'ck_cost_provenance',

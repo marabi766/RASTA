@@ -191,7 +191,12 @@ export class MeterReconcile {
           await this.source.certificate(organizationId, assetId),
           assetId,
         );
-        if (apply) maintenanceMeterReconciledPayloadV1.shape.snapshot.parse(certificate.snapshot);
+        if (
+          apply &&
+          !maintenanceMeterReconciledPayloadV1.shape.snapshot.safeParse(certificate.snapshot)
+            .success
+        )
+          return { ...report, refusal: 'SNAPSHOT_NOT_AUDITABLE' };
         records.push(...certificate.facts);
         report.sourceSnapshot = certificate.snapshot;
       } else {
@@ -277,7 +282,7 @@ export class MeterReconcile {
                 )
                 .map((s) => s.id);
               if (!apply) throw new PreviewComplete({ ...report, outcome: 'PREVIEW' });
-              if (!certificate) throw new Error('CUTOVER_PROOF_REQUIRED');
+              if (!certificate) throw new UsageMeterRefusal('CUTOVER_PROOF_REQUIRED');
               const state = (mode: 'LEGACY' | 'LEDGER', value: typeof ledger | typeof meter) => ({
                 mode,
                 hours: difference(value.hour_meter, '0'),
@@ -290,6 +295,17 @@ export class MeterReconcile {
               const after = state('LEDGER', ledger);
               // Under the shared lock: timestamp-only retries write no transition evidence.
               if (JSON.stringify(before) !== JSON.stringify(after)) {
+                const payload = maintenanceMeterReconciledPayloadV1.safeParse({
+                  assetId,
+                  organizationId,
+                  before,
+                  after,
+                  certificateDigest: certificate.digest,
+                  snapshot: certificate.snapshot,
+                  runId: this.runId,
+                  operatorId: this.operatorId,
+                });
+                if (!payload.success) throw new UsageMeterRefusal('CUTOVER_AUDIT_INVALID');
                 await new MaintenanceRepository(this.prisma).enqueueEvent(tx, {
                   aggregateType: 'AssetUsageMeter',
                   aggregateId: assetId,
@@ -297,16 +313,7 @@ export class MeterReconcile {
                   eventVersion: MAINTENANCE_METER_RECONCILED_VERSION,
                   topic: MAINTENANCE_TOPIC,
                   organizationId,
-                  payload: maintenanceMeterReconciledPayloadV1.parse({
-                    assetId,
-                    organizationId,
-                    before,
-                    after,
-                    certificateDigest: certificate.digest,
-                    snapshot: certificate.snapshot,
-                    runId: this.runId,
-                    operatorId: this.operatorId,
-                  }),
+                  payload: payload.data,
                 });
               }
               // Staging precedes the shared lock. An unseen post-snapshot fact
@@ -391,6 +398,6 @@ export class MeterReconcile {
 function difference(a: string, b: string): string {
   const x = parseHundredths(a);
   const y = parseHundredths(b);
-  if (x === null || y === null) throw new Error('METER_OUT_OF_RANGE');
+  if (x === null || y === null) throw new UsageMeterRefusal('METER_OUT_OF_RANGE');
   return formatHundredths(x - y);
 }

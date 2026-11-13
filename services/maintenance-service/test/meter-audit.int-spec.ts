@@ -81,7 +81,8 @@ describe('meter transition audit boundary', () => {
       .update(canonicalMeterCertificate(f.certificate))
       .digest('hex');
     expect(await f.command.reportAsset(org.a, f.assetId, new Date(), true)).toMatchObject({
-      refusal: 'SOURCE_READ_FAILED',
+      outcome: 'REFUSED',
+      refusal: 'SNAPSHOT_NOT_AUDITABLE',
     });
     expect(await f.rows()).toHaveLength(0);
     expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
@@ -93,6 +94,20 @@ describe('meter transition audit boundary', () => {
       outcome: 'APPLIED',
     });
     expect(await f.rows()).toHaveLength(1);
+  });
+  it('invalid post-lock audit state is a proven refusal, with no staged transition', async () => {
+    const f = await fixture();
+    await prisma.client.assetUsageMeter.update({
+      where: { assetId: f.assetId },
+      data: { lastUsageRecordId: 'x'.repeat(65) },
+    });
+    expect(await f.command.reportAsset(org.a, f.assetId, new Date(), true)).toMatchObject({
+      outcome: 'REFUSED',
+      refusal: 'CUTOVER_AUDIT_INVALID',
+    });
+    expect(await f.rows()).toHaveLength(0);
+    expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
+    expect((await repository.findMeter(f.assetId))!.hourMeter.toString()).toBe('100');
   });
   it('lost commit response replays without another transition', async () => {
     const f = await fixture();
