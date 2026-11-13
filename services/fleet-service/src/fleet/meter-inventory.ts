@@ -14,6 +14,7 @@ import {
 import type { PrismaService } from '../prisma/prisma.service';
 import { FLEET_TOPIC } from '../config/env';
 import { FleetRepository } from './fleet.repository';
+import { Prisma } from '../generated/prisma';
 
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const assetsSchema = z
@@ -48,20 +49,32 @@ export class FleetMeterInventorySeal {
             try {
               return await this.prisma.transaction(
                 async (tx) => {
-                  // Lock source tables BEFORE the gate: writers hold these tables before their gate
-                  // share lock. Earlier writers finish; later writers wait and see the durable seal.
-                  await tx.$executeRaw`LOCK TABLE asset_ref, usage_record, assignment, availability_window,
-              asset_transfer_fence, asset_transfer_release, insurance_pending_verification IN SHARE MODE`;
-                  const [gate] = await tx.$queryRaw<
+                  // A sealed gate is immutable: replay needs no source or gate row locks.
+                  let [gate] = await tx.$queryRaw<
                     {
                       run_id: string | null;
                       operator_id: string | null;
                       inventory: unknown;
                       boundary: string | null;
+                      isolation_level: string;
                     }[]
                   >`
-              SELECT run_id, operator_id, inventory, boundary FROM meter_inventory_seal WHERE id = true FOR UPDATE`;
+              SELECT run_id, operator_id, inventory, boundary, current_setting('transaction_isolation') AS isolation_level
+              FROM meter_inventory_seal WHERE id = true`;
                   if (!gate) throw new FleetMeterInventoryRefusal('SOURCE_FENCE_MISSING');
+                  if (gate.isolation_level !== 'read committed')
+                    throw new FleetMeterInventoryRefusal('SOURCE_FENCE_REQUIRES_READ_COMMITTED');
+                  if (gate.run_id === null) {
+                    // Never queue behind a reverse-order multi-table writer. Release all acquired
+                    // locks on refusal, then retry the SAME run after draining source writers.
+                    await tx.$executeRaw`LOCK TABLE asset_ref, usage_record, assignment, availability_window,
+              asset_transfer_fence, asset_transfer_release, insurance_pending_verification,
+              meter_inventory_seal_asset IN SHARE MODE NOWAIT`;
+                    [gate] = await tx.$queryRaw<(typeof gate)[]>`
+              SELECT run_id, operator_id, inventory, boundary, current_setting('transaction_isolation') AS isolation_level
+              FROM meter_inventory_seal WHERE id = true FOR UPDATE NOWAIT`;
+                    if (!gate) throw new FleetMeterInventoryRefusal('SOURCE_FENCE_MISSING');
+                  }
                   if (gate.run_id !== null) {
                     if (gate.run_id !== runId || gate.operator_id !== operatorId)
                       throw new FleetMeterInventoryRefusal('SOURCE_SEAL_CONFLICT');
@@ -124,6 +137,11 @@ export class FleetMeterInventorySeal {
               );
             } catch (error) {
               if (error instanceof FleetMeterInventoryRefusal) throw error;
+              if (
+                error instanceof Prisma.PrismaClientKnownRequestError &&
+                (error.code === 'P2034' || ['55P03', '40P01'].includes(String(error.meta?.code)))
+              )
+                throw new FleetMeterInventoryRefusal('SOURCE_WRITERS_ACTIVE');
               // The seal/outbox may have committed. Reconcile by replaying the SAME run and actor.
               throw new Error('SOURCE_SEAL_UNCONFIRMED');
             }

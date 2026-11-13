@@ -2079,8 +2079,12 @@ Implemented + Tested + Live Verified هستند (بخش ۳).
 ### EXP-007 source inventory foundation (2026-11-13)
 
 Fleet now owns an immutable operator inventory seal across its seven physical
-asset identity tables. Database triggers fence future identities, including old
-images and direct SQL. The source seal and bounded global
+asset identity tables. Database triggers fence future asset/organization pairs,
+including old images and direct SQL, through immutable indexed seal membership.
+The real PostgreSQL suite covers owner drift, a reverse-order two-table writer,
+NOWAIT refusal and replay while a source writer is active. An active legacy seal
+refuses the upgrade rather than assuming its owners have not drifted.
+The source seal and bounded global
 `FLEET_METER_INVENTORY_SEALED` audit evidence share one outbox transaction.
 This primitive has no production endpoint, CLI, expiry or release path.
 Activation remains disabled: cross-service source completeness, the REST authority

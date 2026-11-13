@@ -4,6 +4,7 @@ import type { EventEnvelope } from '@rasta/contracts';
 import { FleetMeterInventorySeal } from '../src/fleet/meter-inventory';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
+import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { asActor, databaseUrl, id, ownerDatabaseUrl, tenants, waitFor } from './helpers';
 
 describe('fleet durable source seal and future-creation fence (real PostgreSQL)', () => {
@@ -38,6 +39,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     for (const table of [
       ...sources,
       'meter_inventory_seal',
+      'meter_inventory_seal_asset',
       'outbox_message',
       'outbox_stream_sequence',
     ])
@@ -54,6 +56,12 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await owner.client
       .$executeRawUnsafe(`CREATE TRIGGER meter_inventory_seal_no_truncate BEFORE TRUNCATE
       ON "${schema}".meter_inventory_seal FOR EACH STATEMENT EXECUTE FUNCTION public.meter_inventory_seal_fixed()`);
+    await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_inventory_seal_asset_fixed
+      BEFORE INSERT OR UPDATE OR DELETE ON "${schema}".meter_inventory_seal_asset
+      FOR EACH ROW EXECUTE FUNCTION public.meter_inventory_seal_asset_fixed()`);
+    await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_inventory_seal_asset_no_truncate
+      BEFORE TRUNCATE ON "${schema}".meter_inventory_seal_asset
+      FOR EACH STATEMENT EXECUTE FUNCTION public.meter_inventory_seal_asset_fixed()`);
     const role = decodeURIComponent(runtime.username).replaceAll('"', '""');
     await owner.client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`);
     await owner.client.$executeRawUnsafe(
@@ -111,7 +119,11 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await prisma.client
       .$executeRaw`INSERT INTO usage_record(id, asset_id, organization_id, period_start, period_end,
       hours, recorded_by) VALUES (${id('USG')}, ${ids[0]}, ${org.b}, '2026-01-01', '2026-01-02', 1, 'TEST')`;
+    const plantedId = id('AST');
+    await prisma.client.$executeRaw`INSERT INTO meter_inventory_seal_asset
+      VALUES (${plantedId}, ${org.a})`;
     const sealed = await command.seal(runId, actor);
+    await expect(asset(plantedId)).rejects.toThrow('SOURCE_INVENTORY_SEALED');
     expect(sealed.assets).toHaveLength(7);
     expect(sealed.assets.map((a) => a.assetId).sort()).toEqual([...ids].sort());
     expect(sealed.assets).toContainEqual({ assetId: currentId, organizationId: org.a });
@@ -128,8 +140,37 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
           id('AST'),
         ),
       ).rejects.toThrow('SOURCE_INVENTORY_SEALED');
-      await prisma.client.$executeRawUnsafe(`UPDATE "${table}" SET organization_id = $1`, org.b);
+      await expect(
+        prisma.client.$executeRawUnsafe(
+          `UPDATE "${table}" SET organization_id = CASE WHEN organization_id = $1 THEN $2 ELSE $1 END`,
+          org.a,
+          org.b,
+        ),
+      ).rejects.toThrow('SOURCE_OWNER_DRIFT');
+      await expect(
+        prisma.client.$executeRawUnsafe(
+          `INSERT INTO "${table}" SELECT
+          (jsonb_populate_record(NULL::"${table}", to_jsonb(t) || jsonb_build_object('organization_id',
+            CASE WHEN t.organization_id = $1 THEN $2 ELSE $1 END))).*
+          FROM "${table}" t WHERE t."${key}" = $3 LIMIT 1`,
+          org.a,
+          org.b,
+          ids[sources.indexOf(table)],
+        ),
+      ).rejects.toThrow('SOURCE_OWNER_DRIFT');
     }
+    // A known orphan cannot acquire a different owner through the replica INSERT path.
+    await expect(asset(ids[1])).rejects.toThrow('SOURCE_OWNER_DRIFT');
+    await expect(prisma.client.$executeRaw`UPDATE meter_inventory_seal_asset
+      SET organization_id = ${org.b}`).rejects.toThrow('SOURCE_SEAL_FIXED');
+    await expect(prisma.client.$executeRaw`DELETE FROM meter_inventory_seal_asset`).rejects.toThrow(
+      'SOURCE_SEAL_FIXED',
+    );
+    await expect(prisma.client.$executeRaw`INSERT INTO meter_inventory_seal_asset
+      VALUES (${id('AST')}, ${org.b})`).rejects.toThrow('SOURCE_SEAL_FIXED');
+    await expect(
+      owner.client.$executeRawUnsafe(`TRUNCATE "${schema}".meter_inventory_seal_asset`),
+    ).rejects.toThrow('SOURCE_SEAL_FIXED');
     const restarted = new PrismaService(runtime.toString());
     try {
       expect(await new FleetMeterInventorySeal(restarted).seal(runId, actor)).toEqual(sealed);
@@ -158,7 +199,18 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_SEAL_INVALID');
     expect(await events()).toHaveLength(0);
   });
-  it('earlier writer wins: seal waits and includes its committed identity', async () => {
+  it('refuses a stale-snapshot seal transaction before publishing inventory', async () => {
+    jest.spyOn(prisma, 'transaction').mockImplementationOnce((fn) =>
+      prisma.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), {
+        isolationLevel: 'RepeatableRead',
+      }),
+    );
+    await expect(command.seal(runId, actor)).rejects.toThrow(
+      'SOURCE_FENCE_REQUIRES_READ_COMMITTED',
+    );
+    expect(await events()).toHaveLength(0);
+  });
+  it('earlier writer wins: seal refuses immediately, then includes its committed identity', async () => {
     const assetId = id('AST'),
       locked = latch(),
       finish = latch();
@@ -172,14 +224,76 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       { timeoutMs: 30_000 },
     );
     await Promise.race([locked.ready, writer]);
-    const sealing = command.seal(runId, actor);
     try {
-      await waiter('LOCK TABLE asset_ref');
+      await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_WRITERS_ACTIVE');
     } finally {
       finish.release();
     }
     await writer;
-    expect((await sealing).assets).toEqual([{ assetId, organizationId: org.b }]);
+    expect((await command.seal(runId, actor)).assets).toEqual([{ assetId, organizationId: org.b }]);
+  });
+  it('refuses a reverse-order two-table writer without blocking its second write', async () => {
+    const assetId = id('AST'),
+      locked = latch(),
+      finish = latch();
+    const writer = prisma.transaction(
+      async (tx) => {
+        // Asset-sync's insurance-before-assignment order, opposite the seal's table order.
+        await tx.$executeRaw`INSERT INTO insurance_pending_verification(event_id, asset_id,
+        organization_id, envelope, source_topic, reason)
+        VALUES (${id('EVT')}, ${assetId}, ${org.a}, '{}', 'TEST', 'TEST')`;
+        locked.release();
+        await finish.ready;
+        await tx.$executeRaw`DELETE FROM assignment WHERE asset_id = ${assetId}`;
+      },
+      { timeoutMs: 5000 },
+    );
+    await Promise.race([locked.ready, writer]);
+    try {
+      await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_WRITERS_ACTIVE');
+      expect(await events()).toHaveLength(0);
+    } finally {
+      finish.release();
+    }
+    await writer;
+    expect((await command.seal(runId, actor)).assets).toEqual([{ assetId, organizationId: org.a }]);
+  });
+  it('replays the stored pair while a source writer is active, without taking table locks', async () => {
+    const assetId = id('AST'),
+      locked = latch(),
+      finish = latch();
+    await asset(assetId);
+    const sealed = await command.seal(runId, actor);
+    const writer = prisma.transaction(async (tx) => {
+      await tx.$executeRaw`UPDATE asset_ref SET status = 'SUSPENDED' WHERE id = ${assetId}`;
+      locked.release();
+      await finish.ready;
+    });
+    await Promise.race([locked.ready, writer]);
+    try {
+      expect(await command.seal(runId, actor)).toEqual(sealed);
+    } finally {
+      finish.release();
+    }
+    await writer;
+    expect(await events()).toHaveLength(1);
+  });
+  it('refuses a membership table writer before taking the gate lock', async () => {
+    const locked = latch(),
+      finish = latch();
+    const writer = prisma.transaction(async (tx) => {
+      await tx.$executeRaw`LOCK TABLE meter_inventory_seal_asset IN ROW EXCLUSIVE MODE`;
+      locked.release();
+      await finish.ready;
+    });
+    await Promise.race([locked.ready, writer]);
+    try {
+      await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_WRITERS_ACTIVE');
+    } finally {
+      finish.release();
+    }
+    await writer;
+    expect(await events()).toHaveLength(0);
   });
   it('seal wins: bypass writer waits, then refuses its unseen identity after commit', async () => {
     const locked = latch(),

@@ -38,6 +38,14 @@ model MeterInventorySeal {
   @@map("meter_inventory_seal")
 }
 
+/// Immutable indexed pairs backing the global operator seal, never tenant-facing.
+model MeterInventorySealAsset {
+  assetId        String @id @map("asset_id")
+  organizationId String @map("organization_id")
+
+  @@map("meter_inventory_seal_asset")
+}
+
 // -----------------------------------------------------------------------------
 // Driver
 // -----------------------------------------------------------------------------
