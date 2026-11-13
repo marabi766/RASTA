@@ -3000,8 +3000,8 @@ test('PR #1111 r1 item 3: prisma db execute is a CLI of the one registry, read b
     assert.deepEqual(texts(script).filter((text) => text !== null), [], script);
   }
   assert.deepEqual(texts('prisma db execute --file a.sql', null), [null]);
-  assert.deepEqual(texts('prisma migrate deploy && prisma generate && prisma db push && echo execute db'), []);
-  assert.deepEqual([['--stdin'], ['--file', 'a'], ['--file=a', '--url', 'u'], ['--stdin', '--file', 'a'], [], ['--stdin=1'], [undefined, '--stdin']].map(prismaSql),
+  assert.deepEqual(texts('prisma migrate deploy && prisma format && prisma db push && echo execute db'), []);
+  assert.deepEqual([['--stdin'], ['--file', 'a'], ['--file=a', '--url=u', '--schema', 's'], ['--stdin', '--file', 'a'], [], ['--stdin=1'], [undefined, '--stdin']].map(prismaSql),
     [[], [{ at: 1, file: 'a' }], [{ at: 0, file: 'a' }], null, null, null, null]);
   // The review's triggers and the five shapes of this repository's own sites.
   const refused = { 'scripts/argv.mjs': `spawnSync('prisma', ['db', 'execute', '--stdin'], { input: runtimeSql, shell: true });`,
