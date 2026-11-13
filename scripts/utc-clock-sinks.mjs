@@ -437,7 +437,10 @@ export function sqlSinkTexts(repository, files = productionFiles(repository)) {
     // `subject`: what identifies the site in the inventory: the argv or the call the name stands in.
     const site = (node, texts) => (texts?.length ? texts : [null]).forEach((text) =>
       cli.push({ node, text, file: node.getSourceFile().fileName, sink: n.text.split('/').at(-1), subject: p }));
-    if (!found?.length) site(n, null); // no argv, or SQL from standard input
+    // No argv, or SQL from standard input; PR #1109 r1 F1: or words in front of the name, in its
+    // array or its call (`docker exec`, `xargs`): that program decides what the CLI receives.
+    const led = ts.isArrayLiteralExpression(p) && (p.elements[0] !== n || (ts.isCallExpression(p.parent) && p.parent.arguments[0] !== p));
+    if (!found?.length || led) site(n, null);
     else for (const { at, text, file } of found)
       site(list[at] ?? n, file !== undefined || !list[at] ? null : text !== undefined ? [text] : resolve(list[at]));
   });

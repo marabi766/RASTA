@@ -9,6 +9,8 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   claimSubqueryProblems,
+  cliSqlSites,
+  psqlText,
   REVIEWED_DO_BLOCKS,
   definitionBinding,
   REVIEWED_FUNCTIONS,
@@ -2579,11 +2581,10 @@ test('FU-325 readable, proven sites pass; documents and tests are not execution 
   const picked = `WITH picked AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id;`;
   assert.deepEqual(claimScan({
     'ops/ok.sh': [`psql -X -v ON_ERROR_STOP=1 --username "$U" --dbname "$1" -c 'SELECT 1'`,
-      `psql -c "ALTER DATABASE \\"$1\\" SET app.flag = 'true'"`, `n="$(psql -X -At -c 'SHOW max_connections')"`,
-      `psql -c "SELECT 1 FROM pg_database WHERE datname = '$1' AND 1 IN (SELECT 1)"`,
-      `psql -f ops/fixtures/ok.sql`, `psql -X <<'SQL'`, '\\set ON_ERROR_STOP on', `\\if :flag`, picked, '\\endif', 'SQL'].join('\n'),
+      `n="$(psql -X -At -c 'SHOW max_connections')"`, `psql -c "SELECT 1 FROM pg_database WHERE 1 IN (SELECT 1)"`,
+      `psql -X <<'SQL'`, '\\set ON_ERROR_STOP on', `\\if :flag`, picked, '\\endif', 'SQL'].join('\n'),
     'ops/fixtures/ok.sql': picked,
-    '.github/workflows/ci.yml': `jobs:\n  a:\n    steps:\n      - run: >-\n          psql -U rasta\n          -c 'SELECT 1'\n`,
+    '.github/workflows/ci.yml': `jobs:\n  a:\n    steps:\n      - run: >-\n          psql -U rasta\n          -c 'SELECT 1'\n      - run: psql -f ops/fixtures/ok.sql\n`,
     'ops/ok.mjs': `spawnSync('psql', ['-X', '-d', database, '-c', ${JSON.stringify(picked)}]);`,
     'README.md': 'psql -c "$ANY"',
     'ops/test/run.sh': 'psql -c "$ANY"',
@@ -2609,6 +2610,141 @@ test('FU-325 the inventory lists CLI sites as it lists calls: new, stale and rea
   // A listed site waives nothing that is readable: the picker before the unread meta-command.
   assert.match(scan(`#\npsql --command=${JSON.stringify(`${CLAIM} \\gexec`)}`).join(), /locking subquery/);
   assert.match(scan(pipe, { ...keys, [listed]: ' ' }).join(), /unresolved executable SQL/);
+});
+
+// PR #1109 r1: the site is found by its command word (F1), its input is the one the CLI receives
+// (F2) and its SQL is complete (F3; PR #1111 r1 item 1), or the site is unresolved. One file per case.
+const UNSAFE = `DELETE FROM task WHERE id IN ${PICKED}`;
+const SAFE = `WITH picked(id) AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id`;
+const workflow = (run, step = '') => `jobs:\n  a:\n    steps:\n      - ${step}run: |\n${run.replace(/^/gm, '          ')}\n`;
+const inShells = (files, name, script) => Object.assign(files, {
+  [`ops/${name}.sh`]: script, [`ops/${name}.bash`]: script, [`.github/workflows/${name}.yml`]: workflow(script) });
+/** Asserts that exactly the files of `refused` have an unresolved site: none of `passing` has any FU-324. */
+function assertUnresolved(refused, passing, fixtures = {}) {
+  const found = claimScan({ ...fixtures, ...refused, ...passing });
+  const unresolved = new Set(found.filter((p) => p.includes('unresolved executable SQL')).map((p) => p.split(':')[0]));
+  assert.deepEqual(Object.keys(refused).filter((path) => !unresolved.has(path)), [], 'accepted');
+  assert.deepEqual(found.filter((p) => Object.keys(passing).some((path) => p.startsWith(`${path}:`))), []);
+}
+
+test('PR #1109 r1 F1: a SQL CLI is found by its command word, whatever follows its name', () => {
+  const commands = ['`psql mydb -c "${runtimeSql}"`', '`/usr/bin/psql mydb -c "${runtimeSql}"`', '`"psql" mydb -c "${runtimeSql}"`',
+    '`\'psql\' mydb -c "${runtimeSql}"`', `'psql mydb -c "' + runtimeSql + '"'`, `'ps' + 'ql ' + db + ' -c "' + runtimeSql + '"'`,
+    '`bash -c \'psql mydb -c "${runtimeSql}"\'`', '`sh -c \'psql mydb -c "${runtimeSql}"\'`', '`true && psql mydb -c "${runtimeSql}"`',
+    '`true; psql mydb -c "${runtimeSql}"`', "'cat x.sql | psql mydb'", "'psql mydb'", '`PGPASSWORD=x psql mydb -c "${runtimeSql}"`',
+    "'pgbench mydb -f probe.sql'", "'/usr/lib/postgresql/16/bin/pgbench mydb -f probe.sql'", `'"\${PSQL:-psql}" mydb -c "$SQL"'`, `'psql could not be started'`,
+    '`psql -d mydb -c "${runtimeSql}"`']; // the last one: the review's control, refused before too
+  const refused = {};
+  commands.forEach((command, i) => {
+    for (const ext of ['js', 'cjs', 'mjs', 'jsx', 'ts', 'cts', 'mts', 'tsx']) refused[`scripts/c${i}.${ext}`] = `execSync(${command});`;
+    // Under every root, and not by the call it stands in: held in a constant, handed to a wrapper.
+    for (const dir of ['services/x-service/src', 'services/x-service/prisma', 'packages/p/src', 'apps/web/src'])
+      refused[`${dir}/c${i}.ts`] = `const held = ${command};\nrun('bash', ['-c', held]);`;
+  });
+  for (const [i, script] of ['psql mydb -c "$RUNTIME"', '"psql" mydb -c "$RUNTIME"', '/usr/bin/psql mydb -c "$RUNTIME"', 'true && psql mydb -c "$RUNTIME"',
+    'cat x.sql | psql mydb', `bash -c 'psql mydb -c "$RUNTIME"'`, `sh -c 'psql mydb -c "$RUNTIME"'`, 'pgbench mydb -f probe.sql',
+    '"${PSQL:-psql}" mydb -c "$RUNTIME"', 'node scripts/psql-wrapper.mjs -c "$RUNTIME"', 'psql -c "$SQL"',
+    // Another program in front decides what the CLI receives: its words are not read as the CLI's.
+    `docker exec pg psql -c 'SELECT 1'`, `xargs -I{} psql -c '{}'`, `bash -c 'psql -c "$X"; exec "$@"' -- psql -c 'SELECT 1'`].entries()) inShells(refused, `s${i}`, script);
+  // The program named by a composed text is no argv site of utc-clock-sinks.mjs: it is one here.
+  for (const [i, call] of ['execFileSync(`${PG_BIN}/psql`, ["-c", runtimeSql]);', `spawnSync('ps' + 'ql', ['-c', runtimeSql]);`,
+    'execFileSync(`${PG_BIN}/pgbench`, ["-f", file]);', `spawnSync(binDir + '/psql', ['-c', 'SELECT 1']);`,
+    // Words in front of the name in its argv: that program decides what the CLI receives.
+    `spawnSync('xargs', ['-I{}', 'psql', '-c', '{}']);`, `run('docker', ['exec', 'pg', 'psql', '-c', 'SELECT 1']);`,
+    `spawnSync('env', ['psql', '-c', 'SELECT 1']);`].entries()) refused[`scripts/n${i}.mjs`] = call;
+  const passing = { 'scripts/ok.mjs': `execSync(${JSON.stringify(`psql mydb -c 'SELECT 1'`)});`,
+    'scripts/ok-path.ts': `const held = ${JSON.stringify(`/usr/bin/psql mydb -c '${SAFE}'`)};\nrun(held);`,
+    'scripts/words.mjs': `export const note = 'postgresql-client provides the SQL shell';` };
+  inShells(passing, 'ok', `psql mydb -c 'SELECT 1'\n"psql" -d mydb -c '${SAFE}'`);
+  assertUnresolved(refused, passing);
+});
+
+test('PR #1109 r1 F2: a file and standard input are read only where they are what the CLI receives', () => {
+  const texts = (script, read = (name) => `file ${name}`) => cliSqlSites(script, read).map(({ text }) => text);
+  const f = 'psql -f fixtures/claim.sql';
+  assert.deepEqual(texts(`${f} --file=b.sql\nPGPASSWORD=x psql -fc.sql\nn="$(psql -f d.sql)"\nif ! psql -f e.sql; then exit 1; fi`),
+    ['file d.sql', 'file fixtures/claim.sql', 'file b.sql', 'file c.sql', 'file e.sql']);
+  // The directory is not the one this was given: a change of it anywhere in the script, another
+  // program in front of the CLI, shell text run by something else, a path that is not a plain relative one.
+  for (const script of [`cd ops\n${f}`, `cd ops && ${f}`, `cd "$DIR"\n${f}`, `pushd ops\n${f}\npopd`, `(cd ops && ${f})`, `${f}\ncd ops`,
+    `n="$(cd ops && ${f})"`, `cd ops\nn="$(${f})"`, `chroot /mnt ${f}`, `docker exec pg ${f}`, `docker compose exec db ${f}`, `sudo -u postgres ${f}`,
+    `env -C ops ${f}`, `source ./lib.sh\n${f}`, `. ./lib.sh\n${f}`, `eval "$MOVE"\n${f}`, 'psql -f /tmp/claim.sql', 'psql --file=/tmp/claim.sql', 'psql -f ~/claim.sql', 'psql -f "$FILE"', 'psql -f "fixtures/$NAME.sql"',
+    'psql -f "a b.sql"', 'psql -f fixtures/*.sql'])
+    assert.deepEqual(texts(script), [null], script);
+  for (const script of [`bash -c 'cd ops && ${f}'`, `cd ops\nbash -c '${f}'`, `bash -c '${f}'`, `ssh host bash <<'EOF'\n${f}\nEOF`])
+    assert.deepEqual(texts(script).filter((text) => text !== null), [], script);
+  assert.deepEqual(texts(f, null), [null]);
+  // Standard input: the command's one `<<<` or `<<`, on descriptor 0, and no other `<` on its lines.
+  assert.deepEqual(texts(`psql -X <<< 'SELECT 1'`), ['SELECT 1']);
+  assert.deepEqual(texts(`psql -X 2>&1 <<-'SQL' | tee log\nSELECT 2;\nSQL\necho x | psql -f - <<SQL\nSELECT 3;\nSQL`), ['SELECT 2;', 'SELECT 3;']);
+  for (const script of [`psql <<< 'SELECT 1' <&3`, `psql <<< 'SELECT 1' 0<&3`, `psql <<< 'SELECT 1' < "$OTHER"`, `psql <<'SQL' < other.sql\nSELECT 1;\nSQL`,
+    `psql 3<<< 'SELECT 1'`, `psql 3<<'SQL'\nSELECT 1;\nSQL`, `psql <<< 'SELECT 1' <<SQL\n$RUNTIME\nSQL`, `psql <<SQL <<< 'SELECT 1'\n$RUNTIME\nSQL`,
+    `psql <<< "$RUNTIME" <<< 'SELECT 1'`, `psql <<A <<'B'\n$RUNTIME\nA\nSELECT 1;\nB`, 'psql < other.sql', 'psql -f - < other.sql', `psql {fd}<<< 'SELECT 1'`,
+    `psql -f <(echo 'SELECT 1')`, `{ psql; } <<< 'SELECT 1'`, 'echo "SELECT 1" | psql', `psql <<< 'SELECT 1' 0>&3`,
+    `psql <<'END SQL'\nSELECT 1;\nEND\n${UNSAFE}\nEND SQL`, `psql <<END$x\nSELECT 1;\nEND\n${UNSAFE}\nEND$x`])
+    assert.deepEqual(texts(script).filter((text) => text !== null), [], script);
+  // The review's trigger, and where a file sets the directory: the root file is not the one executed.
+  const fixtures = { 'fixtures/claim.sql': 'SELECT 1', 'ops/fixtures/claim.sql': UNSAFE, 'tmp/claim.sql': 'SELECT 1' };
+  const refused = { '.github/workflows/step.yml': workflow(f, 'working-directory: ops\n        '),
+    '.github/workflows/defaults.yml': `defaults:\n  run:\n    working-directory: ops\n${workflow(f)}`,
+    '.github/workflows/job.yml': workflow(f).replace('    steps:', '    defaults:\n      run:\n        working-directory: ops\n    steps:'),
+    '.github/workflows/with.yml': `jobs:\n  a:\n    steps:\n      - uses: x\n        with:\n          script: ${f}\n`,
+    '.github/workflows/checkout.yml': workflow(f).replace('      - run', '      - uses: actions/checkout@v4\n        with:\n          path: ops\n      - run'),
+    '.github/workflows/alias.yml': `jobs:\n  a:\n    steps:\n      - &step\n        run: ${f}\n  b:\n    defaults: { run: { working-directory: ops } }\n    steps:\n      - *step\n`,
+    '.github/workflows/merge.yml': `x: &dir { working-directory: ops }\njobs:\n  a:\n    steps:\n      - <<: *dir\n        run: ${f}\n`,
+    'docker-compose.yml': `services:\n  db:\n    command: ${f}\n`, 'ops/values.yaml': workflow(f),
+    'scripts/cwd.mjs': `execSync('${f}', { cwd: 'ops' });`, 'scripts/plain.mjs': `execSync('${f}');`, 'scripts/absolute.mjs': `execSync('psql -f /tmp/claim.sql');`,
+    'scripts/stdin.mjs': `execSync(${JSON.stringify(`psql <<< 'SELECT 1' <&3`)}, { shell: '/bin/bash' });` };
+  inShells(refused, 'cd', `cd ops\n${f}`);
+  inShells(refused, 'absolute', 'psql -f /tmp/claim.sql');
+  inShells(refused, 'fd', `psql <<< 'SELECT 1' <&3`);
+  // A script file runs where its caller stands (`cd ops && bash run.sh`, a package script): only a workflow step starts at the root.
+  Object.assign(refused, { 'ops/run.sh': f, 'ops/run.bash': f });
+  const passing = { '.github/workflows/file.yml': workflow(f) };
+  inShells(passing, 'ok', `psql -X <<'SQL'\nSELECT 1;\nSQL\npsql <<< 'SELECT 1'`);
+  assertUnresolved(refused, passing, fixtures);
+});
+
+test('PR #1109 r1 F3, PR #1111 r1 item 1: a part this cannot read, anywhere in the executed text, leaves the site unresolved', () => {
+  const U = UNKNOWN_SQL;
+  for (const text of [`DELETE FROM task ${U}`, `EXPLAIN ${U}`, `DELETE FROM task WHERE id = ${U}`, `SELECT ${U} FROM task`, `DO $$BEGIN ${U}; END$$`,
+    `DO 'BEGIN ${U}; END'`, `SELECT 1 FROM pg_database WHERE datname = '${U}'`, 'DELETE FROM task WHERE id = :picker', `DELETE FROM task WHERE id = :'picker'`,
+    'DELETE FROM :"table"', '\\set q :input\n:q', '\\echo start\n:statement', '\\if :flag\n:statement\n\\endif', 'SELECT 1; \\echo next\n:statement',
+    `SELECT 'DELETE FROM task' AS q\n\\gexec`, `\\echo -- \\\\ ${UNSAFE};`, '\\i other.sql', '\\copy task FROM stdin', '\\echo a \\\\ SELECT 1', '\\', U])
+    assert.equal(psqlText(text).whole, false, text);
+  // A meta-command is its line, not SQL: its words (a quote, a variable) are not read as a statement.
+  assert.deepEqual(psqlText(`\\set ON_ERROR_STOP on\n\\if :flag\nSELECT 1; \\echo it's :done\n\\endif\nSELECT id::text, tags[1:2], ':x', $$ :y \\z $$ FROM task -- :c`),
+    { sql: `\n\nSELECT 1; \n\nSELECT id::text, tags[1:2], ':x', $$ :y \\z $$ FROM task  `, whole: true });
+  // What is readable is still checked: before the part that is not, and under a meta-command that is not read.
+  assert.equal(claimSubqueryProblems(psqlText(`${UNSAFE} \\gexec`).sql).length, 1);
+  assert.equal(claimSubqueryProblems(psqlText(`\\echo a\n${UNSAFE}; SELECT :x`).sql).length, 1);
+  // A comment mark in a meta-command is one of its words: it hides nothing of the lines after it.
+  assert.equal(claimSubqueryProblems(psqlText(`\\echo /*\n${UNSAFE};\n-- */`).sql).length, 1);
+  const refused = {};
+  for (const [i, script] of ['psql -c "DELETE FROM task $WHERE"', 'psql -c "EXPLAIN $SQL"', 'psql -c "DELETE FROM task WHERE id = $picker"',
+    'psql -c "DELETE FROM task WHERE id = ${picker}"', 'psql -c "SELECT $expr FROM task"', 'psql -c "DO \\$\\$BEGIN ${statement}; END\\$\\$"',
+    'psql -c "CREATE FUNCTION f() RETURNS void LANGUAGE sql AS \\$\\$ $body \\$\\$"', `psql -c "SELECT 1 FROM pg_database WHERE datname = '$1'"`,
+    `psql -c "ALTER DATABASE \\"$1\\" SET app.flag = 'true'"`, `psql <<'SQL'\nDELETE FROM task WHERE id = :picker;\nSQL`,
+    `psql <<'SQL'\n\\set q :input\n:q\nSQL`, `psql <<'SQL'\n\\echo start\n:statement\nSQL`, `psql <<'SQL'\n\\if :flag\n:statement\n\\endif\nSQL`,
+    `psql <<'SQL'\nSELECT 1; \\echo next\n:statement\nSQL`, 'psql <<SQL\nDELETE FROM task WHERE id = $picker;\nSQL', 'psql <<< "DELETE FROM task $WHERE"',
+    'psql -f fixtures/set.sql', 'psql -c "$SQL"'].entries()) inShells(refused, `f${i}`, script);
+  for (const [i, call] of ['execSync(`psql -c "DELETE FROM task ${where}"`);', 'execSync(`psql mydb -c "DELETE FROM task WHERE id = ${picker}"`);',
+    'execSync(`psql -c "EXPLAIN ${sql}"`);', 'execSync(`psql -c \'DO $$BEGIN ${statement}; END$$\'`);', 'execSync(`psql -c "${sql}"`);',
+    `spawnSync('psql', ['-c', 'DELETE FROM task WHERE id = :picker']);`, `spawnSync('psql', ['-c', ${JSON.stringify('\\echo a\n:statement')}]);`,
+    `spawnSync('psql', ['-c', runtimeSql]);`].entries()) refused[`scripts/f${i}.mjs`] = call;
+  // What reads the YAML puts text in before any shell: a workflow expression inside quotes, any other reader anywhere.
+  for (const [i, run] of ["psql -c 'DELETE FROM task WHERE id IN ${{ inputs.picker }}'", "psql <<'SQL'\nDELETE FROM task WHERE id IN ${{ inputs.picker }};\nSQL",
+    "psql <<< 'DELETE FROM task ${{ inputs.tail }}'", "psql -c 'SELECT 1' '${{ inputs.more }}'"].entries()) refused[`.github/workflows/e${i}.yml`] = workflow(run);
+  refused['docker-compose.yml'] = "services:\n  db:\n    command: psql -c 'DELETE FROM task WHERE id IN ${PICKER}'\n";
+  refused['chart/templates/job.yaml'] = "spec:\n  command: psql -c 'DELETE FROM task WHERE id IN {{ .Values.picker }}'\n";
+  const passing = { 'scripts/ok.mjs': `spawnSync('psql', ['-X', '-d', database, '-c', ${JSON.stringify(SAFE)}]);` };
+  inShells(passing, 'ok', `psql -d mydb -c '${SAFE}'\npsql -X <<'SQL'\n\\set ON_ERROR_STOP on\n\\if :flag\n${SAFE};\n\\endif\n\\echo done :rows\nSQL`);
+  assertUnresolved(refused, passing, { 'fixtures/set.sql': '\\set q :input\n:q\n' });
+  // A listed here-document is listed with its text: another text is another site.
+  const doc = 'psql <<SQL\nDELETE FROM task WHERE id = $picker;\nSQL';
+  const listed = { 'scripts/opaque-sql-sinks.json': JSON.stringify({ [siteKey('ops/doc.sh', 'cli', doc)]: 'Row id of the caller' }) };
+  assert.deepEqual(claimScan({ 'ops/doc.sh': `# moved\n${doc}`, ...listed }), []);
+  assert.match(claimScan({ 'ops/doc.sh': doc.replace('id =', 'id <>'), ...listed }).join(), /unresolved executable SQL[^]*stale or invalid/);
 });
 
 test('FU-333 a CTE column list is read as PostgreSQL reads it: the picker passes with it, a malformed list refuses', () => {
