@@ -139,7 +139,7 @@ export function parseCommands(text) {
   const unreadable =
     shellTextProblem(text) ?? (NON_ASCII.test(text) ? 'a non-ASCII character' : null);
   if (unreadable) out.problems.push(unreadable);
-  scan(String(text), 0, 0, 'top', out, { path: [], opened: 0, frozen: false });
+  scan(String(text), 0, 0, 'top', out, { path: [], opened: 0, frozen: false, list: 1, lists: 1 });
   return out;
 }
 
@@ -148,6 +148,12 @@ export function parseCommands(text) {
  * FU-334: `scopes` names the subshell each command runs in (`( )`, `$( )`, backticks), as the path of the
  * ones open around it: a `cd` or an assignment in one does not reach a command outside it. A `case`
  * pattern closes with a `)` that opens nothing, so after a `case` no scope is closed any more.
+ * FU-340: `list` numbers the and-list a command stands in: two commands of one scope and one list are
+ * joined by `&&` alone, so the later one runs only if the earlier one succeeded. Every other operator
+ * that ends a command starts another list; after `|`, `|&` and `||` (a pipeline's part runs in a subshell,
+ * and `a || b && c` runs `c` without `b`) the list is 0: no list. The command that holds a `$( )` keeps its list. A `( )`
+ * inside a `$( )` is counted, so its `)` does not end the substitution and hide the rest of it in a
+ * quoted word; a `case` there, whose patterns close what nothing opened, is refused.
  */
 function scan(text, from, depth, mode, out, scopes) {
   const { commands, problems } = out;
@@ -161,6 +167,7 @@ function scan(text, from, depth, mode, out, scopes) {
   let start = from; // where the word being read began, and one past its last character
   let end = from;
   let redirect = null; // FU-334 r1 F1: the operator just read; the next word is its target
+  let subshells = 0; // FU-340: the `(` open inside this `$( )`: a `)` closes one before it ends the `$( )`
   const endWord = () => {
     // FU-334: the text the word was written as, so a reviewed form can be bound to its exact spelling
     if (word)
@@ -168,12 +175,20 @@ function scan(text, from, depth, mode, out, scopes) {
     if (word) redirect = null;
     word = null;
   };
-  const endCommand = () => {
+  const endCommand = (operator = '') => {
     endWord();
     if (redirect) refuse('a redirection without a target word');
     redirect = null;
-    if (words.length) commands.push({ words, depth, scope: scopes.path.join('/') });
-    if (words.some((item) => item.value === 'case')) scopes.frozen = true;
+    if (words.length)
+      commands.push({ words, depth, scope: scopes.path.join('/'), list: scopes.list });
+    // a line break after an operator goes on with its list: `a ||⏎b` is `a || b`
+    if (operator ? operator !== '&&' : words.length > 0)
+      scopes.list = operator === '|' ? 0 : ++scopes.lists;
+    if (words.some((item) => item.value === 'case')) {
+      scopes.frozen = true;
+      // FU-340: a pattern's `)` opens nothing, so it would end the `$( )` and hide what follows it
+      if (mode === 'paren') refuse('a case statement inside a command substitution');
+    }
     words = [];
   };
   const leave = () => {
@@ -196,9 +211,11 @@ function scan(text, from, depth, mode, out, scopes) {
       return text.length;
     }
     scopes.path.push(++scopes.opened);
+    const list = scopes.list; // FU-340: the command that holds the substitution stays in its list
     if (nestedMode === 'paren') {
       const end = scan(text, start, depth + 1, 'paren', out, scopes);
       leave();
+      scopes.list = list;
       if (end >= text.length) refuse('unterminated command substitution');
       return end;
     }
@@ -211,6 +228,7 @@ function scan(text, from, depth, mode, out, scopes) {
     // The body is cut out first, then read as a command line of its own.
     scan(text.slice(start, end), 0, depth + 1, 'tick', out, scopes);
     leave();
+    scopes.list = list;
     return end;
   };
   const dollar = (at) => {
@@ -227,6 +245,10 @@ function scan(text, from, depth, mode, out, scopes) {
       const plain = PLAIN_EXPANSION.exec(rest);
       if (plain) return at + plain[0].length;
       refuse('a parameter expansion with an operator, subscript or nested text');
+      // FU-340: its text is scanned on as words, which is bash's reading of plain characters only:
+      // `${x:- #}` holds no comment and `${x:-)}` ends no `$( )`
+      if (!/^\{[^\s'"\\$`(){};&|<>]*\}/.test(rest))
+        refuse('a parameter expansion whose text holds more than plain characters');
       // FU-334 r1 F3: `${!x}` reads a name the text computes, `${x:=v}` and `${x=v}` assign one
       if (/^\{(?:!|[A-Za-z_]\w*(?:\[[^\]]*\])?:?=)/.test(rest))
         refuse('a parameter expansion that is indirect or assigns');
@@ -249,6 +271,9 @@ function scan(text, from, depth, mode, out, scopes) {
       if (text[at + 1] === '\n') {
         // Bash deletes it before it reads tokens, so inside a word it can join `$` and `(`.
         if (word) refuse('a line continuation inside a word');
+        // FU-340: and between two operator characters it makes one operator: `&\⏎>` is `&>`
+        else if (/[&|;<>]/.test(text[at - 1] ?? '') && /^(?:\\\n)+[&|;<>]/.test(text.slice(at)))
+          refuse('a line continuation inside an operator');
         at++;
       } else if (at + 1 < text.length) add(text[++at]);
       else refuse('a backslash at the end of the text');
@@ -290,7 +315,14 @@ function scan(text, from, depth, mode, out, scopes) {
       // FU-334 r1 F1: the operator ends the word before it (digits alone are its descriptor, not
       // a word) and makes the next word its target: `>echo env x` runs `env`, `ech>o x` runs `ech`
       refuse(text.startsWith('<<', at) ? 'a here-document' : 'redirection');
-      const fd = word && /^\d+$/.test(text.slice(start, at)) ? text.slice(start, at) : '';
+      // FU-340: `&>` and `&>>` take no descriptor (`set -e 1&>f` gives `set` the 1), and only bash
+      // reads them as one operator: to sh they are `&` and `>`, so what follows is another command
+      if (char === '&') refuse('an &> redirection, which sh reads as & and >');
+      const digits = char !== '&' && word && /^\d+$/.test(text.slice(start, at));
+      // one digit is a descriptor to every shell; more are a word to dash, and to bash past its limit
+      if (digits && at - start > 1)
+        refuse('a descriptor of more than one digit, which sh reads as a word');
+      const fd = digits ? text.slice(start, at) : '';
       if (fd) word = null;
       endWord();
       if (redirect) refuse('a redirection without a target word');
@@ -301,17 +333,20 @@ function scan(text, from, depth, mode, out, scopes) {
       refuse('a subshell or an arithmetic command');
       endCommand();
       scopes.path.push(++scopes.opened);
+      if (mode === 'paren') subshells += 1;
     } else if (char === ')') {
       endCommand();
-      if (mode === 'paren') return at;
+      if (mode === 'paren' && subshells === 0) return at;
       leave();
-      refuse('an unbalanced closing parenthesis');
+      if (subshells > 0) subshells -= 1;
+      else refuse('an unbalanced closing parenthesis');
     } else if (char === '&' && text[at + 1] === '&') {
       at++;
-      endCommand();
+      endCommand('&&');
     } else if (char === '|' || char === '&') {
       refuse('a pipeline, an || list or a background command');
-      endCommand();
+      if (char === '|' && '|&'.includes(text[at + 1] ?? ' ')) at++; // `||` and `|&` are one operator
+      endCommand(char);
     } else if (char === '\n' || char === ';') {
       endCommand();
     } else if (char === ' ' || char === '\t') {

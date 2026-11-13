@@ -10,7 +10,7 @@ import { dockerRun, effectiveShell, readOptions, readShell } from './ci-shell-po
 import { parseCommands } from './ci-shell-text-lib.mjs';
 import * as lifecycleLib from './prisma-lifecycle-suppression-lib.mjs';
 
-const { CONTAINER_SCRIPTS, MATRIX, MOUNTS, lifecycleFileKind } = lifecycleLib;
+const { CONTAINER_SCRIPTS, ENV_PAIRS, MATRIX, MOUNTS, lifecycleFileKind } = lifecycleLib;
 // FU-334: every file a step runs, uses or builds is a member of this inventory, read once.
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const FILES = new Set(
@@ -541,7 +541,7 @@ test('shell text that could drop the suppression is refused wherever it runs', (
   for (const script of [
     'export PGHOST=localhost PGPORT="$port"\nunset KAFKA_SECRETS_DIR',
     'x_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"\neval "${x_credentials}"',
-    'echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"',
+    'echo "dir=$RUNNER_TEMP/trivy-db" >> "$GITHUB_OUTPUT"',
     'if ! command -v gitleaks >/dev/null 2>&1; then pnpm exec turbo run build | tee out.log; fi',
     "docker run --rm --entrypoint sh image@sha256:0 -c 'clamd --version; ls -l /var/lib/clamav/'",
   ])
@@ -789,6 +789,233 @@ test('r1 probes: redirections, npm options, bound names and unreviewed lines are
     'for attempt in $(seq 1 60); do psql -U rasta -d postgres -c "SELECT 1" >/dev/null && break; done',
   ])
     everywhere(script, null, true);
+});
+
+// FU-340 part A: the residuals of PR #1099 r2 (F1, F3, F4) and what PR #1100 r1 left open (a
+// protected name in an `env`, a `cd` that may not have run). The refused rows were accepted at 05ffe9573,
+// but for the pins of what was refused before: `">" echo`, the delimiter line, `BASH_ENV`/`ENV`/`PATH`
+// in an `env`, `( cd … ) && node`.
+test('descriptors, syntax words, records, env names and an unproven cd are refused (FU-340)', () => {
+  const line = /only the lines reviewed in REVIEWED are read/;
+  // F1: `&>` and `&>>` take no descriptor, so the digits are an argument; and sh reads `&`, then `>`.
+  for (const digits of ['1', '2', '0', '10', '255'])
+    for (const to of ['&>', '&>>']) {
+      everywhere(`set -euo pipefail ${digits}${to}/dev/null`, line);
+      everywhere(`pnpm exec ${digits}${to}/dev/null turbo`, form('pnpm'));
+    }
+  everywhere('echo ok &>/dev/null env -i pnpm deploy /out', /an &> redirection, which sh reads/);
+  everywhere('">" echo pnpm install', /not an assignment to a written-out name/);
+  // one digit is a descriptor to every shell; `10>` is the word 10 to dash, as 2147483648> is to bash
+  for (const digits of ['10', '255', '007', '99999999999'])
+    everywhere(`pnpm exec ${digits}>/dev/null turbo`, /a descriptor of more than one digit, which/);
+  for (const to of ['>', '>>', '<', '<>', '>|', '>&', '<&'])
+    everywhere(`echo ok 2${to}/dev/null`, null, true);
+  const read = (text) => parseCommands(text).commands;
+  assert.deepEqual(
+    read('set -e 1&>a 2>b 3&>>c 4>&5 6<&7 8<>d 9>|e 10>>f 11<<<g 12<h 13<<i')[0].words.map(
+      ({ value, redirect }) => (redirect ?? '') + value,
+    ),
+    'set -e 1 &>a 2>b 3 &>>c 4>&5 6<&7 8<>d 9>|e 10>>f 11<<<g 12<h 13<<i'.split(' '),
+  );
+  // F4: a word of the grammar is one only when spelled exactly so, and then its grammar is asked.
+  for (const script of ['$x[ -f a ]', '"$x"{ echo ok; }', '$x! echo ok'])
+    everywhere(script, UNPROVEN);
+  const deny = () => 'DENIED';
+  const programs = { '{': deny, '[': deny, '[[': deny, '}': true, echo: true };
+  for (const script of ['{ echo ok; }', '[ -f missing ]', '[[ -f missing ]]'])
+    assert.match(readShell(script, { programs }).problems.join(), /DENIED/, script);
+  assert.equal(
+    readShell('{ echo ok; }', { programs: { ...programs, '{': true } }).problems.length,
+    0,
+  );
+
+  // Found in the sweep (on main since #1099): what ends a `$( )` or starts a comment for this reader
+  // does so for bash. A `( )` inside a `$( )` is counted; a `case` there and an expansion whose
+  // text is more than plain characters are refused. Each refused row ran `env` unread before.
+  for (const script of ['( true ) ;', '( ( true ) ) &&', '(( 1 )) ;'])
+    everywhere(`echo "$( ${script} env -i pnpm install )"`, UNPROVEN);
+  for (const script of ['echo ${x:- #}; env -i pnpm install', 'echo "$(echo ${x:-)} ; env x)"'])
+    everywhere(script, /a parameter expansion whose text holds more than plain characters is not/);
+  everywhere(
+    'x="$(case a in a) env -i pnpm install;; esac)"',
+    /a case statement inside a command substitution is not read/,
+  );
+  for (const script of ['echo "$( ( true ) )"; echo ok', 'echo "${A:-127.0.0.1}" "${dir:?}"'])
+    everywhere(script, null, true);
+  assert.deepEqual(
+    read('a "$( ( b ) ; c )" d; ( e )').map(({ words, scope }) => words[0].value + scope),
+    ['b1/2', 'c1', 'a', 'e3'],
+  );
+
+  // F3: a write to an environment file is one record: a line with no value of the text's own, or
+  // the whole text that was read with its producers (here the e2e job's "Generate run secrets").
+  const steps = (script) =>
+    [runs.workflow(script), runs.action(script)].map(({ errors }) => errors.join('\n'));
+  const names = [
+    ['KEYCLOAK_ADMIN_PASSWORD', 'keycloak_password', 24],
+    ['INTERNAL_TOKEN_SECRET', 'internal_secret', 32],
+  ];
+  const write = (variable, name) => `echo "${variable}=\${${name}}" >> "$GITHUB_ENV"`;
+  const secrets = [
+    'set -euo pipefail',
+    ...names.map(([, name, bytes]) => `${name}="$(openssl rand -hex ${bytes})"`),
+    ...names.map(([, name]) => `echo "::add-mask::\${${name}}"`),
+    ...names.map(([variable, name]) => write(variable, name)),
+  ].join('\n');
+  assert.deepEqual(steps(secrets), ['', '']);
+  // F1, the sweep: bash joins what a line continuation stands between, `&\⏎>` is `&>`
+  for (const script of [
+    'pnpm install &\\\n>/dev/null echo --config.ignore-scripts=false',
+    'echo ok >\\\n>log',
+    'echo ok |\\\n| echo ok',
+  ])
+    for (const errors of steps(script))
+      assert.match(errors, /a line continuation inside an operator is not read/, script);
+  for (const script of ['echo ok &&\\\necho ok', 'echo ok \\\n&& echo ok', 'echo ok >\\\nlog'])
+    assert.deepEqual(steps(script), ['', ''], script);
+  const unreviewed = /writes the environment of later steps in a line this check has not reviewed/;
+  for (const script of [
+    // the reviewer's six: the reviewed line after a value of two lines, in a workflow and an action
+    ...[...names, ['WEB_SESSION_SECRET', 'web_session_secret']].flatMap(([variable, name]) => [
+      `${name}="safe\nPNPM_CONFIG_SHELL_MODE=true"\n${write(variable, name)}`,
+      write(variable, name),
+    ]),
+    `${secrets}\necho ok`,
+    secrets.replace('-hex 32', '-base64 48'),
+    `openssl() { printf 'a\\nB=1'; }\n${secrets}`,
+    'echo "key=${value}" >> "$GITHUB_OUTPUT"',
+    'echo "x=$RUNNER_TEMP/trivy-db" >> "$GITHUB_OUTPUT"',
+    'echo "a=b" | tee -a "$GITHUB_OUTPUT"',
+    'echo "a=b" >> "$GITHUB_STATE"',
+    'echo "A<<EOF" >> "$GITHUB_ENV"',
+  ])
+    for (const errors of steps(script)) assert.match(errors, unreviewed, script);
+  for (const script of [
+    'echo "$RUNNER_TEMP/trivy-db-check-bin" >> "$GITHUB_PATH"',
+    'echo "archive=$RUNNER_TEMP/trivy-db-artifact" >> "$GITHUB_OUTPUT"',
+    'echo ok | tee -a "${GITHUB_STEP_SUMMARY}"',
+  ])
+    assert.deepEqual(steps(script), ['', ''], script);
+
+  // PM: a protected name in an `env`, at every level and in every kind of file, but as a reviewed pair.
+  const workflow = (top, job, step) =>
+    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n${top}jobs:\n  a:\n    runs-on: x\n${job}    steps:\n      - run: echo ok\n${step}`;
+  const levels = (entry) => [
+    workflow(`  ${entry}\n`, '', ''),
+    workflow('', `    env:\n      ${entry}\n`, ''),
+    workflow('', '', `        env:\n          ${entry}\n`),
+    workflow(
+      '',
+      `    services:\n      db:\n        image: x\n        env:\n          ${entry}\n`,
+      '',
+    ),
+  ];
+  const errors = (text, path = 'new.yml') => workflowLifecycle(path, text).errors.join('\n');
+  const sets = (name) => new RegExp(`env sets ${name}: `);
+  for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV', 'PATH', 'GITHUB_TOKEN'])
+    for (const text of levels(`${name}: x`)) assert.match(errors(text), sets(name), text);
+  for (const text of levels('NODE_ENV: test')) assert.equal(errors(text), '', text);
+  for (const entry of ['<<: { NODE_OPTIONS: x }', 'A: [NODE_OPTIONS]', 'A-B: x'])
+    for (const text of levels(entry)) assert.match(errors(text), /is not a name with one value/);
+  const composite = `${repoText(ENTRY.action)}    - shell: bash\n      env:\n        NODE_OPTIONS: x\n      run: echo ok\n`;
+  assert.match(actionLifecycle(ENTRY.action, composite).errors.join(), sets('NODE_OPTIONS'));
+  for (const instruction of [
+    'ENV NODE_OPTIONS=-r/tmp/x.js',
+    'ARG NODE_PATH=/tmp',
+    'ENV GITHUB_X=1',
+  ])
+    refused(
+      dockerfileLifecycle,
+      ENTRY.docker,
+      swap(
+        repoText(ENTRY.docker),
+        'ENV PNPM_HOME=/pnpm\n',
+        `ENV PNPM_HOME=/pnpm\n${instruction}\n`,
+      ),
+      /what node loads|an environment file is not text's to set/,
+    );
+  everywhere('GITHUB_TOKEN=x echo ok', /sets GITHUB_TOKEN: /);
+  assert.equal(ENV_PAIRS.size, 0, 'the repository sets no protected name in an env today');
+  const memory = 'NODE_OPTIONS: --max-old-space-size=4096';
+  ENV_PAIRS.add('new.yml: NODE_OPTIONS=--max-old-space-size=4096').add('new.yml: NODE_PATH=1');
+  try {
+    for (const text of levels(memory)) assert.equal(errors(text), '', text);
+    for (const text of levels(memory))
+      assert.match(errors(text, 'other.yml'), sets('NODE_OPTIONS'));
+    for (const text of levels(`${memory} -r /tmp/x.js`))
+      assert.match(errors(text), sets('NODE_OPTIONS'));
+    for (const text of levels('NODE_PATH: 1')) assert.match(errors(text), sets('NODE_PATH'));
+    for (const text of levels(memory.replace('OPTIONS', 'PATH')))
+      assert.match(errors(text), sets('NODE_PATH'));
+  } finally {
+    ENV_PAIRS.clear();
+  }
+
+  // After a `cd`, only what `&&` joins to it is read as run there: the `cd` ran, and succeeded.
+  const [cd, node] = ['cd services/api-gateway', 'node dist/main.js'];
+  // A quoted/escaped command named done closes no loop, even inside a substitution before it.
+  for (const close of ["'done'", '"done"', 'd\\one'])
+    for (const prefix of ['', 'for j in 1 2; do\n'])
+      for (const errors of steps(
+        `${prefix}echo "$(${close})"\nfor i in 1 2; do\n${cd} && ${node}\ndone${prefix ? '\ndone' : ''}`,
+      ))
+        assert.match(errors, form('cd'));
+  const unknown = [
+    `if [ -d x ]; then ${cd}; fi\n${node}`,
+    `${cd} || true\n${node}`,
+    `${cd}; ${node}`,
+    `true ||\n${cd} && ${node}`, // a line break after an operator goes on with its list
+    `echo ok |\n${cd} && ${node}`,
+    `echo ok |&\n${cd} && ${node}`,
+    `false && ${cd}; ${node}`,
+    `${cd} || ${node}`,
+    `${cd} && true || ${node}`,
+    `true || ${cd} && ${node}`,
+    `echo ok | ${cd} && ${node}`,
+    `echo ok |& ${cd} && ${node}`,
+    `${cd} & ${node}`,
+    `${cd} && ( true ) || ${node}`,
+    `${cd} && ( true ); ${node}`,
+    `${cd}; ( true ) && ${node}`,
+    `( ${cd} ) && ${node}`,
+    `case q in q) true;; esac; ( ${cd} && true ) && ${node}`,
+    `${cd} && bash -c "${node}"`,
+    `${cd} && x="$(${node})"`,
+  ];
+  const first = [
+    `! ${cd} && ${node}`,
+    `if true; then ${cd} && ${node}; fi`,
+    `X=1 ${cd} && ${node}`,
+    // in a loop a `cd` also moves what stands before it (on main since #1100)
+    `for i in 1 2; do\nnode scripts/container-scope.mjs\n${cd}\ndone`,
+    `while true; do echo ok; ${cd} && ${node}; done`,
+    `until node scripts/container-scope.mjs; ${cd}; do echo ok; done`,
+  ];
+  for (const [pattern, scripts] of [
+    [line, unknown],
+    [form('cd'), first],
+  ])
+    for (const script of scripts) {
+      everywhere(script);
+      for (const errors of steps(script)) assert.match(errors, pattern, script);
+    }
+  for (const errors of steps(`true || # c\n\n${cd} && ${node}`)) assert.match(errors, line);
+  for (const script of [
+    `${cd} && ${node}`,
+    `${cd} 2>/dev/null && echo "$(true; true)" && { ${node} | tee log; }`,
+    // under a condition too: what `&&` joins to the `cd` runs there whenever it runs
+    `if true\nthen\n${cd} && ${node}\nfi`,
+    `for i in 1 2; do echo ok; done\n${cd} &&\n${node}`,
+    `${cd} && # c\n\n${node}`,
+    `( true && ${cd} && PORT=1 ${node} > /tmp/log 2>&1 & )`,
+  ])
+    everywhere(script, null, true);
+  assert.deepEqual(
+    read('a && b; c && d || e && f | g && h |& i && j & k "$(m; n)" && l `o; p` && q').map(
+      ({ list }) => list,
+    ),
+    [1, 1, 2, 2, 0, 0, 0, 0, 0, 0, 3, 4, 3, 3, 6, 3, 3],
+  );
 });
 
 test('the shell that reads a step and the variables it is given are read at every level (FU-334)', () => {
