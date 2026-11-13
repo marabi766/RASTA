@@ -1,3 +1,5 @@
+import { type MeterCertificate } from '@rasta/contracts';
+import { readMeterCertificate, verifyMeterCertificate } from './meter-certificate';
 import { z } from 'zod';
 import {
   createSystemContext,
@@ -18,6 +20,7 @@ import { assessDue, isAnnounceable } from './due';
 import { toRule } from './schedule.service';
 import { formatHundredths, parseHundredths } from './quantity';
 
+const CERTIFICATE_MAX_BYTES = 16 * 1024 * 1024;
 const PAGE_SIZE = 200;
 const MAX_PAGES = 1000;
 const MAX_RECORDS = 20_000;
@@ -48,10 +51,26 @@ const sourcePage = z
   .strict();
 export type MeterUsagePage = z.infer<typeof sourcePage>;
 export interface MeterUsageSource {
+  certificate?(organizationId: string, assetId: string): Promise<MeterCertificate>;
   page(organizationId: string, assetId: string, cursor?: string): Promise<MeterUsagePage>;
 }
 export class MeterUsageClient implements MeterUsageSource {
   constructor(private readonly options: Omit<InternalGetOptions, 'from' | 'to'>) {}
+  async certificate(organizationId: string, assetId: string): Promise<MeterCertificate> {
+    const query = new URLSearchParams({ assetId });
+    const response = await internalGet(
+      {
+        ...this.options,
+        from: 'maintenance-service',
+        to: 'fleet-service',
+        maxBodyBytes: this.options.maxBodyBytes ?? CERTIFICATE_MAX_BYTES,
+      },
+      `/v1/internal/usage-records/certificate?${query}`,
+      organizationId,
+    );
+    if (response.status !== 200) throw new Error('SOURCE_READ_FAILED');
+    return readMeterCertificate(response.body, assetId);
+  }
   async page(organizationId: string, assetId: string, cursor?: string): Promise<MeterUsagePage> {
     const query = new URLSearchParams({ assetId, limit: String(PAGE_SIZE) });
     if (cursor !== undefined) query.set('cursor', cursor);
@@ -74,7 +93,9 @@ export interface MeterReconcileAssetReport {
   schedulesWouldAnnounce: string[];
   recordsRead: number;
   pagesExhausted: boolean;
-  /** A live cursor supplies no snapshot or future-write fence. Always false in PR 7b-1. */
+  snapshotVerified: boolean;
+  sourceSnapshot: string | null;
+  /** A live cursor supplies no snapshot or future-write fence. Still false until the durable live-write handoff and inventory are proven. */
   sourceComplete: false;
   refusal: string;
 }
@@ -127,6 +148,8 @@ export class MeterReconcile {
       schedulesWouldAnnounce: [],
       recordsRead: 0,
       pagesExhausted: false,
+      snapshotVerified: false,
+      sourceSnapshot: null,
       sourceComplete: false,
       refusal: 'CUTOVER_PROOF_REQUIRED',
     };
@@ -135,29 +158,39 @@ export class MeterReconcile {
     if (!(await this.assets(organizationId, '', 1, assetId)).length)
       return { ...report, refusal: 'ASSET_NOT_IN_TENANT' };
     const records: MeterUsagePage['items'] = [];
+    let certificate: MeterCertificate | undefined;
     try {
-      let cursor: string | undefined;
-      const cursors = new Set<string>();
-      const ids = new Set<string>();
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const result = sourcePage.parse(await this.source.page(organizationId, assetId, cursor));
-        for (const row of result.items) {
-          if (ids.has(row.id) || records.length >= MAX_RECORDS)
+      if (this.source.certificate) {
+        certificate = readMeterCertificate(
+          await this.source.certificate(organizationId, assetId),
+          assetId,
+        );
+        records.push(...certificate.facts);
+        report.sourceSnapshot = certificate.snapshot;
+      } else {
+        let cursor: string | undefined;
+        const cursors = new Set<string>();
+        const ids = new Set<string>();
+        for (let page = 0; page < MAX_PAGES; page++) {
+          const result = sourcePage.parse(await this.source.page(organizationId, assetId, cursor));
+          for (const row of result.items) {
+            if (ids.has(row.id) || records.length >= MAX_RECORDS)
+              throw new Error('SOURCE_READ_FAILED');
+            ids.add(row.id);
+            records.push(row);
+          }
+          if (!result.hasMore) {
+            if (result.nextCursor !== null) throw new Error('SOURCE_READ_FAILED');
+            report.pagesExhausted = true;
+            break;
+          }
+          if (!result.nextCursor || cursors.has(result.nextCursor))
             throw new Error('SOURCE_READ_FAILED');
-          ids.add(row.id);
-          records.push(row);
+          cursors.add(result.nextCursor);
+          cursor = result.nextCursor;
         }
-        if (!result.hasMore) {
-          if (result.nextCursor !== null) throw new Error('SOURCE_READ_FAILED');
-          report.pagesExhausted = true;
-          break;
-        }
-        if (!result.nextCursor || cursors.has(result.nextCursor))
-          throw new Error('SOURCE_READ_FAILED');
-        cursors.add(result.nextCursor);
-        cursor = result.nextCursor;
+        if (!report.pagesExhausted) throw new Error('SOURCE_READ_FAILED');
       }
-      if (!report.pagesExhausted) throw new Error('SOURCE_READ_FAILED');
     } catch {
       return { ...report, recordsRead: records.length, refusal: 'SOURCE_READ_FAILED' };
     }
@@ -187,6 +220,10 @@ export class MeterReconcile {
                 });
               const meter = await lockUsageMeter(tx, { assetId, organizationId, now });
               report.M = { hours: meter.hour_meter, kilometres: meter.odometer };
+              if (certificate) {
+                await verifyMeterCertificate(tx, certificate);
+                report.snapshotVerified = true;
+              }
               const ledger = await calculateLedgerMeter(tx, assetId);
               report.L = { hours: ledger.hour_meter, kilometres: ledger.odometer };
               report.diff = {
@@ -223,7 +260,13 @@ export class MeterReconcile {
         L: null,
         diff: null,
         schedulesWouldAnnounce: [],
-        refusal: error instanceof UsageMeterRefusal ? error.code : 'PREVIEW_FAILED',
+        snapshotVerified: false,
+        refusal:
+          error instanceof UsageMeterRefusal
+            ? error.code
+            : error instanceof Error && error.message === 'SOURCE_LEDGER_MISMATCH'
+              ? 'SOURCE_LEDGER_MISMATCH'
+              : 'PREVIEW_FAILED',
       };
     }
     throw new Error('PREVIEW_DID_NOT_ROLL_BACK');

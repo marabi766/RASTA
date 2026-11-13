@@ -1,6 +1,8 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import { AllowService, zodPipe } from '@rasta/nest-common';
+import { meterCertificateQuerySchema, type MeterCertificate } from '@rasta/contracts';
+import { MeterCertificateService } from './meter-certificate';
 import type { ListMeterUsageQuery } from './dto';
 import { METER_USAGE_CALLER, MeterUsageService, type MeterUsagePage } from './meter-usage';
 import {
@@ -35,6 +37,7 @@ export class FleetInternalController {
   constructor(
     private readonly facts: UsageFactService,
     private readonly meter: MeterUsageService,
+    private readonly certificates: MeterCertificateService,
   ) {}
 
   @Get()
@@ -51,6 +54,21 @@ export class FleetInternalController {
   })
   list(@Query() query: ListMeterUsageQuery): Promise<MeterUsagePage> {
     return this.meter.list(query);
+  }
+
+  @Get('certificate')
+  @AllowService(METER_USAGE_CALLER)
+  @ApiOperation({
+    summary: 'Certify one physical asset usage set in one repeatable-read snapshot',
+    description:
+      'Maintenance-service only. Bounded to 20000 facts; overflow refuses. ' +
+      'Includes record identities, canonical SHA-256 digest and PostgreSQL snapshot marker. ' +
+      'No future-write fence, inventory, retirement or cutover claim.',
+  })
+  certificate(
+    @Query(zodPipe(meterCertificateQuerySchema)) query: { assetId: string },
+  ): Promise<MeterCertificate> {
+    return this.certificates.certificate(query);
   }
 
   @Get(':id')

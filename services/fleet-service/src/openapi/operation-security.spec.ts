@@ -40,6 +40,34 @@ describe('published security equals the guard decision (FU-075)', () => {
     expect(field.safeParse('   ').success).toBe(false);
   });
 
+  it('publishes the bounded snapshot certificate projection and required asset', () => {
+    const operation = document.paths['/v1/internal/usage-records/certificate']!.get!;
+    expect(operation.parameters).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'assetId', required: true })]),
+    );
+    const response = JSON.parse(JSON.stringify(operation.responses['200']));
+    const schema = response.content['application/json'].schema;
+    expect(Object.keys(schema.properties).sort()).toEqual([
+      'assetId',
+      'digest',
+      'facts',
+      'snapshot',
+      'version',
+    ]);
+    expect(schema.properties.facts.maxItems).toBe(20000);
+    expect(Object.keys(schema.properties.facts.items.properties).sort()).toEqual([
+      'hourMeter',
+      'hours',
+      'id',
+      'kilometres',
+      'odometer',
+      'organizationId',
+      'periodEnd',
+      'periodStart',
+    ]);
+    expect(operation.responses['400']).toBeDefined();
+  });
+
   it('publishes both usage queries and only the minimal meter response contract', () => {
     const userRead = document.paths['/v1/usage-records']!.get!;
     expect(userRead.parameters).toEqual(
@@ -116,6 +144,6 @@ describe('published security equals the guard decision (FU-075)', () => {
       }
     }
     expect(seen.sort()).toEqual(Object.keys(SERVICE_ROUTES).sort());
-    expect(seen.length).toBe(5);
+    expect(seen.length).toBe(6);
   });
 });

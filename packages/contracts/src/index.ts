@@ -363,3 +363,12 @@ export type {
   AuditTrailSource,
   AuditTrailPayloadV1,
 } from './events/audit-trail';
+
+export {
+  METER_CERTIFICATE_LIMIT,
+  meterCertificateQuerySchema,
+  meterCertificateFactSchema,
+  meterCertificateSchema,
+  canonicalMeterCertificate,
+} from './common/meter-certificate';
+export type { MeterCertificate, MeterCertificateFact } from './common/meter-certificate';

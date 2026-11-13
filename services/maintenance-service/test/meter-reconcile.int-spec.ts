@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { canonicalMeterCertificate, type MeterCertificateFact } from '@rasta/contracts';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { MeterReconcile, type MeterUsageSource } from '../src/maintenance/meter-reconcile';
 import { maintenanceMeterLegacyAssets } from '../src/observability/metrics';
@@ -304,6 +306,107 @@ describe('maintenance-meter-reconcile dry run', () => {
       refusal: 'CUTOVER_PROOF_REQUIRED',
     });
     expect((await repository.findMeter(assetId))!.hourMeter.toString()).toBe('102');
+  });
+  it('verifies a canonical source snapshot under lock, rolls back staging, and refuses extra/missing-interval facts', async () => {
+    const assetId = await machine();
+    const reading = anchor();
+    const certify = (facts: MeterCertificateFact[]) => {
+      const body = { version: 1 as const, assetId, snapshot: '1:2:', facts };
+      return {
+        ...body,
+        digest: createHash('sha256').update(canonicalMeterCertificate(body)).digest('hex'),
+      };
+    };
+    const page = jest.fn();
+    const certificate = jest.fn(async () => certify([reading]));
+    const run = () => command({ page, certificate }).reportAsset(org.a, assetId);
+    expect(await run()).toMatchObject({
+      snapshotVerified: true,
+      sourceSnapshot: '1:2:',
+      sourceComplete: false,
+      refusal: 'CUTOVER_PROOF_REQUIRED',
+      L: { hours: '100.00' },
+    });
+    expect(page).not.toHaveBeenCalled();
+    expect(
+      await asActor({ organizationId: org.a }, () =>
+        prisma.client.assetUsageEntry.count({ where: { assetId } }),
+      ),
+    ).toBe(0);
+    let locked!: () => void;
+    let release!: () => void;
+    const atLock = new Promise<void>((r) => {
+      locked = r;
+    });
+    const barrier = new Promise<void>((r) => {
+      release = r;
+    });
+    const holder = asActor({ organizationId: org.b }, () =>
+      prisma.transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT asset_id FROM asset_usage_meter WHERE asset_id = ${assetId} FOR UPDATE`;
+          locked();
+          await barrier;
+          await tx.assetUsageEntry.create({
+            data: {
+              usageRecordId: id('USG'),
+              assetId,
+              organizationId: org.b,
+              hours: '2',
+              kilometres: '0',
+              periodStart: new Date(reading.periodStart),
+              periodEnd: new Date(reading.periodEnd),
+            },
+          });
+        },
+        { timeoutMs: 15_000 },
+      ),
+    );
+    await atLock;
+    const pending = run();
+    try {
+      await waitFor(
+        'verification waiting for meter lock',
+        async () => {
+          const [row] = await prisma.client.$queryRaw<{ waiting: boolean }[]>`
+          SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+            AND wait_event_type = 'Lock' AND query LIKE '%FROM asset_usage_meter%FOR UPDATE%') AS waiting`;
+          return row.waiting;
+        },
+        5000,
+        10,
+      );
+    } finally {
+      release();
+    }
+    await holder;
+    expect(await pending).toMatchObject({
+      snapshotVerified: false,
+      L: null,
+      refusal: 'SOURCE_LEDGER_MISMATCH',
+    });
+    expect(await run()).toMatchObject({
+      snapshotVerified: false,
+      L: null,
+      refusal: 'SOURCE_LEDGER_MISMATCH',
+    });
+    await prisma.client
+      .$executeRaw`UPDATE asset_usage_entry SET period_start = NULL WHERE asset_id = ${assetId}`;
+    expect(await run()).toMatchObject({
+      snapshotVerified: false,
+      L: null,
+      refusal: 'SOURCE_LEDGER_MISMATCH',
+    });
+    expect((await repository.findMeter(assetId))!.meterSource).toBe('LEGACY');
+    certificate.mockImplementation(async () => {
+      throw new Error('unavailable');
+    });
+    expect(await run()).toMatchObject({
+      snapshotVerified: false,
+      L: null,
+      refusal: 'SOURCE_READ_FAILED',
+    });
+    expect(page).not.toHaveBeenCalled();
   });
   it('legacy gauge count includes known assets without a meter, excludes LEDGER, and uses the shared registry gauge', async () => {
     const before = await repository.countLegacyMeterAssetsAcrossTenants();
