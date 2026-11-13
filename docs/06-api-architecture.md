@@ -1444,3 +1444,15 @@ X-Organization-Id: <optional; must MATCH the token's signed org_id>
 
 `/health/*` و `/metrics` عمومی‌اند اما **فقط از شبکه داخلی** در دسترس‌اند (NetworkPolicy)
 و هیچ داده کسب‌وکاری فاش نمی‌کنند.
+
+### Maintenance source snapshot certificate (ADR-073 PR 7b-2a)
+
+`GET /v1/internal/usage-records/certificate?assetId=…` is reserved for
+`maintenance-service`, with the same cross-owner physical-meter exception as the
+existing internal collection. It returns `{version:1, assetId, snapshot, facts,
+digest}` from one fleet REPEATABLE READ transaction. `facts` contains the same
+eight minimal fields as that collection, bounded at 20,000; overflow refuses
+rather than truncating. The served OpenAPI carries the exact schemas. This is a
+snapshot equality certificate, not a future-write fence, asset inventory or
+cutover authorization. See the reconciliation runbook for canonicalization and
+fail-closed operational limits.

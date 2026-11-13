@@ -1,6 +1,10 @@
 import type { INestApplication } from '@nestjs/common';
 import type { OpenAPIObject } from '@nestjs/swagger';
-import { apiErrorSchema } from '@rasta/contracts';
+import {
+  meterCertificateQuerySchema,
+  meterCertificateSchema,
+  apiErrorSchema,
+} from '@rasta/contracts';
 import {
   applyOperationSecurity,
   routeAccessByOperation,
@@ -62,6 +66,7 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
   'GET /v1/assignments': toJsonSchema(listAssignmentsQuerySchema),
   'GET /v1/usage-records': toJsonSchema(listUsageQuerySchema),
   'GET /v1/internal/usage-records': toJsonSchema(listMeterUsageQuerySchema),
+  'GET /v1/internal/usage-records/certificate': toJsonSchema(meterCertificateQuerySchema),
   'GET /v1/fleet/availability': toJsonSchema(availabilityQuerySchema),
   'GET /v1/fleet/availability/windows': toJsonSchema(listAvailabilityWindowsQuerySchema),
   'GET /v1/fleet/utilization': toJsonSchema(utilizationQuerySchema),
@@ -95,6 +100,7 @@ const ERRORS: Record<string, readonly number[]> = {
   'DELETE /v1/assignments/{id}': WRITE,
   'GET /v1/usage-records': [...COMMON, 400],
   'GET /v1/internal/usage-records': [...COMMON, 400],
+  'GET /v1/internal/usage-records/certificate': [...COMMON, 400],
   'GET /v1/usage-records/{id}': READ_ONE,
   // A tenant claim the token does not carry is a 403; a record outside it, 404.
   'GET /v1/internal/usage-records/{id}': READ_ONE,
@@ -131,6 +137,7 @@ const STATUS_TEXT: Record<number, string> = {
  */
 export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
   'GET /v1/internal/usage-records': 'users-refused',
+  'GET /v1/internal/usage-records/certificate': 'users-refused',
   'GET /v1/internal/usage-records/{id}': 'users-refused',
   'GET /v1/internal/assets/{assetId}/assignment-state': 'users-refused',
   'POST /v1/internal/assets/{assetId}/transfer-clearance': 'users-refused',
@@ -179,7 +186,11 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         content: {
           'application/json': {
             schema:
-              key === 'GET /v1/internal/usage-records' ? toJsonSchema(meterUsagePageSchema) : {},
+              key === 'GET /v1/internal/usage-records'
+                ? toJsonSchema(meterUsagePageSchema)
+                : key === 'GET /v1/internal/usage-records/certificate'
+                  ? toJsonSchema(meterCertificateSchema)
+                  : {},
           },
         },
       };
