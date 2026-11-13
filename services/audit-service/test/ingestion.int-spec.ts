@@ -93,6 +93,50 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
     await migrator.onModuleDestroy();
   }, 60_000);
 
+  it('persists global full-run state and inventory evidence once with no tenant', async () => {
+    const { DomainProjectorConsumer } = await import('../src/consumers/domain-projector.consumer');
+    const source = envelope({
+      eventName: 'MAINTENANCE_METER_FULL_RUN_ACTIVATED',
+      producer: 'maintenance-service',
+      aggregateType: 'MeterFullRun',
+      tenantId: undefined,
+      actor: { type: 'USER', id: 'USR_OPERATOR' },
+    });
+    source.aggregateId = source.correlationId;
+    source.payload = {
+      runId: source.correlationId,
+      operatorId: 'USR_OPERATOR',
+      before: 'INACTIVE',
+      after: 'ACTIVE',
+      inventoryDigest: 'b'.repeat(64),
+      sourceBoundary: 'OWNER_SEAL',
+      assetCount: 2,
+      refusedCount: 1,
+    };
+    const consumer = new DomainProjectorConsumer(jest.fn(), repository, {
+      error: jest.fn(),
+      debug: jest.fn(),
+    } as never);
+    await consumer.handle(source, delivery('rasta.maintenance.v1'));
+    await consumer.handle(source, delivery('rasta.maintenance.v1'));
+    const rows = await prisma.client.auditEvent.findMany({
+      where: { sourceEventId: source.eventId },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      actorType: 'USER',
+      actorId: 'USR_OPERATOR',
+      organizationId: null,
+    });
+    expect(rows[0].changes).toEqual(
+      expect.arrayContaining([
+        { field: 'state', from: 'INACTIVE', to: 'ACTIVE' },
+        { field: 'inventoryDigest', from: null, to: 'b'.repeat(64) },
+        { field: 'refusedCount', from: null, to: 1 },
+      ]),
+    );
+  });
+
   it('stores meter before/after, operator and certificate evidence once through the domain consumer', async () => {
     const { DomainProjectorConsumer } = await import('../src/consumers/domain-projector.consumer');
     const source = envelope({

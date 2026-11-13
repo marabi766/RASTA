@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   maintenanceMeterReconciledPayloadV1,
+  maintenanceMeterFullRunPayloadV1,
   isoDateTime,
   describeLegacyRefusal,
   legacyParse,
@@ -56,6 +57,7 @@ import {
  */
 
 export const MAINTENANCE_EVENTS = {
+  MAINTENANCE_METER_FULL_RUN_ACTIVATED: 'MAINTENANCE_METER_FULL_RUN_ACTIVATED',
   MAINTENANCE_METER_RECONCILED: 'MAINTENANCE_METER_RECONCILED',
   MAINTENANCE_DUE: 'MAINTENANCE_DUE',
   BREAKDOWN_REPORTED: 'BREAKDOWN_REPORTED',
@@ -379,6 +381,7 @@ export const repairCostRecordedPayload = z.object({
 });
 
 export const MAINTENANCE_EVENT_SCHEMAS = {
+  MAINTENANCE_METER_FULL_RUN_ACTIVATED: maintenanceMeterFullRunPayloadV1,
   MAINTENANCE_METER_RECONCILED: maintenanceMeterReconciledPayloadV1,
   [MAINTENANCE_EVENTS.MAINTENANCE_DUE]: maintenanceDuePayload,
   [MAINTENANCE_EVENTS.BREAKDOWN_REPORTED]: breakdownReportedPayload,
