@@ -25,7 +25,7 @@ import {
   utcClockProblems,
 } from './utc-clock-sites-lib.mjs';
 import { lex } from './eligibility-clock-sql.mjs';
-import { psqlSql, sqlSinkTexts, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
+import { prismaSql, psqlSql, sqlSinkTexts, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
 import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { authoredFiles } from './authored-source-inventory.cjs';
 
@@ -2227,6 +2227,9 @@ for (const [name, path, wrap] of [
     assert.match(found.filter((p) => p.includes(path)).join(), /FU-324/);
   });
 
+// FU-337 refuses SQL built at run time at its site (tests below); these read what FU-324 makes of the pieces.
+const fu324 = (...read) => claimSubqueryProblems(...read).filter((problem) => !problem.startsWith('FU-337'));
+
 test('FU-325 SQL is composed and decoded before it is classified, in every quoting', () => {
   for (const sql of [
     `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $body$${CLAIM}$body$`,
@@ -2254,7 +2257,7 @@ test('FU-325 SQL is composed and decoded before it is classified, in every quoti
     `DO $$BEGIN EXECUTE 'WITH picked AS MATERIALIZED (SELECT id FROM ' || quote_ident(t) || ' LIMIT 1 FOR UPDATE) DELETE FROM task USING picked'; END$$`,
     `WITH picked AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id`,
   ])
-    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+    assert.deepEqual(fu324(sql), [], sql);
 });
 
 test('FU-324 cannot be waived by a matching reviewed DO block', () => {
@@ -2374,7 +2377,7 @@ test('PR #1082 r1 F2: a text is composed through the syntax that leaves it the t
     `SELECT concat('see (the list', x), '(for update)', upper('a (b')::bpchar || 'c)', u & 'x' FROM t WHERE id IN ('a') AND b = ANY (('{a}')::text[])`,
     `DO ${doBody(`'WITH picked AS MATERIALIZED (SELECT id FROM ' || quote_ident(t) || (' LIMIT 1 FOR UPDATE)')::text || ' DELETE FROM task USING picked'`)}`,
   ])
-    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+    assert.deepEqual(fu324(sql), [], sql);
 });
 
 test('PR #1082 r1 F3: a text with more readings than the budget is refused, never read as empty', () => {
@@ -2384,7 +2387,7 @@ test('PR #1082 r1 F3: a text with more readings than the budget is refused, neve
   // Whatever it holds, and through every composition: nothing proves what was not read.
   for (const sql of [`SELECT ${chain(8)}`, `SELECT ${quoted(`a note: ${chain(8)}`)}`, `SELECT CAST((${chain(8)})::text AS text) COLLATE "C" || 'x'`, `DO ${doBody(`a || (${chain(8)})`)}`])
     assert.match(claimSubqueryProblems(sql).join(), /FU-324/, sql);
-  assert.deepEqual(claimSubqueryProblems(`DO ${doBody(`${chain(5)} || x`)}`), []);
+  assert.deepEqual(fu324(`DO ${doBody(`${chain(5)} || x`)}`), []);
 });
 
 // PR #1082 r2 N1: a name's spelling does not prove its binding. PostgreSQL 16 runs each UNPROVEN
@@ -2767,4 +2770,274 @@ test('FU-333 a CTE column list is read as PostgreSQL reads it: the picker passes
   const found = claimScan(Object.fromEntries(heads.map((head, i) =>
     [`ops/head${i}.mjs`, `export const sql = ${JSON.stringify(`${head} AS (SELECT 1) SELECT (1`)};`])));
   assert.deepEqual(found.map((p) => p.split(':')[0]), ['ops/head0.mjs', 'ops/head1.mjs', 'ops/head2.mjs']);
+});
+
+// FU-337, the execution boundary: SQL that a text builds and runs is one complete text of literals
+// and proven constants, or its site is refused unless the inventory lists it (file + digest + reason).
+const PIECES = ['EXPLAIN DELETE FROM task WHERE id = (SEL', 'ECT id FROM task LIMIT 1 F', 'OR UPDATE SKIP LOCKED) AND 1 = 1'];
+const sqlString = (text) => `'${text.replaceAll("'", "''")}'`;
+const dynamicSite = (problems) => problems.filter((p) => /^FU-337: .* \[EXECUTE:sha256:[0-9a-f]{64}\]$/s.test(p));
+const runs = (expression, declare = '') => `DO $do$${declare}BEGIN EXECUTE ${expression}; END$do$;`;
+const boundaryScan = (files, migrations = 'CREATE TABLE task (id text);') =>
+  scanOf('x-service', migrations, '', files).filter((p) => /FU-3(?:24|37)/.test(p));
+
+test('FU-337 PR #1082 r2 N2: the three pieces joined through a form the reader does not follow are refused at the site', () => {
+  const [a, b, c] = PIECES.map(sqlString);
+  const constants = (init) => `DECLARE a CONSTANT text ${init} ${a}; b CONSTANT text ${init} ${b}; c CONSTANT text ${init} ${c}; `;
+  const refused = {
+    concat: runs(`concat(${a}, ${b}, ${c})`),
+    format: runs(`format('%s%s%s', ${a}, ${b}, ${c})`),
+    'format, a piece in the format': runs(`format(${a} || '%s' || ${c}, ${b})`),
+    "typed text '…'": runs(`text ${a} || text ${b} || text ${c}`),
+    'text(…)': runs(`text(${a}) || text(${b}) || text(${c})`),
+    '::varchar(1000)': runs(`${a}::varchar(1000) || ${b}::varchar(1000) || ${c}::varchar(1000)`),
+    '::"text"': runs(`${a}::"text" || ${b}::"text" || ${c}::"text"`),
+    'constants, DEFAULT': runs('a || b || c', constants('DEFAULT')),
+    'constants, =': runs('a || b || c', constants('=')),
+    'two constants, DEFAULT': runs('a || b', `DECLARE a CONSTANT text DEFAULT ${sqlString(PIECES[0] + PIECES[1])}; b CONSTANT text DEFAULT ${c}; `),
+    variables: runs('a || b || c', `DECLARE a text := ${a}; b text := ${b}; c text := ${c}; `),
+    'a parameter': `CREATE FUNCTION f(p text) RETURNS void LANGUAGE plpgsql AS $$BEGIN EXECUTE ${a} || p; END$$;`,
+    'a constant of a nested block': `DO $$BEGIN DECLARE a CONSTANT text := ${a}; BEGIN EXECUTE a || ${b} || ${c}; END; END$$;`,
+    concat_ws: runs(`concat_ws('', ${a}, ${b}, ${c})`),
+    array_to_string: runs(`array_to_string(ARRAY[${a}, ${b}, ${c}], '')`),
+    'a subquery': runs(`(SELECT string_agg(x, '') FROM unnest(ARRAY[${a}, ${b}, ${c}]) x)`),
+    replace: runs(`replace(${a} || 'X' || ${c}, 'X', ${b})`),
+    CASE: runs(`${a} || CASE WHEN true THEN ${b} END || ${c}`),
+    quote_literal: runs(`${a} || quote_literal(x) || ${c}`),
+    quote_ident: runs(`'ALTER ROLE ' || quote_ident(x) || ' NOLOGIN'`),
+    '::bpchar': runs(`${a}::bpchar || ${b} || ${c}`),
+    'a call of the whole': runs(`lower(${a} || ${b} || ${c})`),
+    'a text after the expression': runs(`${a} || ${b} ${c}.x`),
+    'nothing after EXECUTE': runs(''),
+  };
+  for (const [name, sql] of Object.entries(refused)) assert.equal(dynamicSite(claimSubqueryProblems(sql)).length, 1, name);
+  // The expression ends where the statement does, not at a word inside its parentheses.
+  const joined = (tail) => dynamicSite(claimSubqueryProblems(runs(`format('%s%s', (SELECT string_agg(x, '') FROM a JOIN b USING (id)), ${tail})`)));
+  assert.notDeepEqual(joined(a), joined(b));
+  // What the reader composes is one text, read as executed: the picker in it is the FU-324 refusal.
+  for (const sql of [runs(`${a} || ${b} || ${c}`), runs('a || b || c', constants(':=')), runs(`CAST((${a})::text || ${b} AS text) || (${c} COLLATE "C")`)])
+    assert.deepEqual(claimSubqueryProblems(sql).map((p) => p.slice(0, 6)), ['FU-324'], sql);
+  // A text that is only executed as a whole is strict there, whatever its head: `(1` is unclosed.
+  assert.deepEqual(claimSubqueryProblems(runs(`'SET x = ' || '(1'`)).map((p) => p.slice(0, 6)), ['FU-324']);
+  const picked = `WITH picked AS MATERIALIZED ${PICKED} DELETE FROM task USING picked WHERE task.id = picked.id`;
+  const accepted = [
+    runs(sqlString('ALTER TABLE task DISABLE TRIGGER t')), runs(`'ALTER TABLE task ' || 'DISABLE' || ' TRIGGER t'`),
+    runs(`CAST(('ALTER TABLE task ')::text || U&'DISABLE' AS text) || (' TRIGGER t' COLLATE "C")`),
+    runs(`${sqlString(picked.slice(0, 40))} || ${sqlString(picked.slice(40))}`), runs(`E'SELECT \\'x\\''`), runs('$q$SELECT 1$q$ INTO n'),
+    runs(`'SELECT count(*) FROM (' || pending || ') p' INTO n`, `DECLARE pending CONSTANT text := 'SELECT 1'; n int; `),
+    // A proven constant that starts the expression is an operand too (it follows EXECUTE).
+    runs(`pending || ' LIMIT 1' INTO n; EXECUTE pending`, `DECLARE pending CONSTANT text := 'SELECT 1'; n int; `),
+    runs(`'DELETE FROM task WHERE id = $1' USING some.id`),
+  ];
+  for (const sql of accepted) assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+});
+
+test('FU-337 EXECUTE is a site wherever PL/pgSQL runs it, and nowhere else', () => {
+  const built = `concat('SELECT ', '1')`;
+  const sites = [
+    `DO $$BEGIN EXECUTE ${built}; END$$;`, `do $$begin execute /* c */ ${built}; end$$;`, `DO $$BEGIN NULL; EXECUTE ${built}; END$$;`,
+    `DO $$BEGIN IF true THEN EXECUTE ${built}; ELSE NULL; END IF; END$$;`, `DO $$BEGIN IF true THEN NULL; ELSE EXECUTE ${built}; END IF; END$$;`,
+    `DO $$BEGIN LOOP EXECUTE ${built}; END LOOP; END$$;`,
+    `DO $$BEGIN <<l>> EXECUTE ${built}; END$$;`, `DO $$BEGIN NULL; EXCEPTION WHEN others THEN EXECUTE ${built}; END$$;`,
+    `CREATE FUNCTION f() RETURNS SETOF int LANGUAGE plpgsql AS $$BEGIN RETURN QUERY EXECUTE ${built}; END$$;`,
+    `DO $$DECLARE r record; BEGIN FOR r IN EXECUTE ${built} LOOP NULL; END LOOP; END$$;`,
+    `DO $$DECLARE k refcursor; BEGIN OPEN k FOR EXECUTE ${built}; END$$;`,
+    `DO $$BEGIN EXECUTE ${built} USING 1; END$$;`, `DO $$DECLARE n int; BEGIN EXECUTE ${built} INTO n; END$$;`,
+    `DO 'BEGIN EXECUTE concat(''SELECT '', ''1''); END';`, `DO $a$BEGIN EXECUTE $b$DO $c$BEGIN EXECUTE ${built}; END$c$$b$; END$a$;`,
+    // A piece: the statement may start where the text does, or after a part that is not in it.
+    `EXECUTE ${built}`, `EXECUTE ${built} INTO n; END`, `\uE0000\uE001 EXECUTE ${built};`,
+    // A prepared statement is run by name, and these functions execute their argument.
+    `PREPARE p AS SELECT 1; EXECUTE p;`, `SELECT query_to_xml(${built}, true, false, '');`, `SELECT ts_stat('SELECT 1');`,
+    `SELECT "query_to_xmlschema"('SELECT 1', true, false, '');`,
+  ];
+  for (const sql of sites) assert.ok(dynamicSite(claimSubqueryProblems(sql)).length >= 1, sql);
+  for (const sql of sites.slice(0, 13)) assert.deepEqual(claimSubqueryProblems(sql.replaceAll(built, `'SELECT ' || '1'`)), [], sql);
+  const none = [
+    'GRANT EXECUTE ON FUNCTION f() TO r; REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION f() FROM r;',
+    'ALTER DEFAULT PRIVILEGES FOR ROLE m REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;',
+    'CREATE TRIGGER t BEFORE INSERT ON task FOR EACH ROW EXECUTE FUNCTION f(); CREATE TRIGGER u AFTER UPDATE ON task FOR EACH ROW WHEN (true) EXECUTE PROCEDURE f();',
+    `SELECT has_function_privilege('r', 'f()', 'EXECUTE'), privilege_type = 'EXECUTE', ARRAY['SELECT', 'execute'] FROM x;`,
+    'SELECT id, execute FROM job; SELECT j.execute FROM job j;',
+    `SELECT 'they must execute the plan first', 'we execute (a, b) later';`,
+    `SELECT concat('SELECT ', '1');`,
+  ];
+  for (const sql of none) assert.deepEqual(claimSubqueryProblems(sql), [], sql);
+});
+
+test('FU-337 the boundary holds in every file that runs SQL; the inventory lists a site by file and digest; a migration is outside', () => {
+  const body = (expression) => `DO $$BEGIN EXECUTE ${expression}; END$$;`;
+  const built = body(`format('ALTER ROLE %I NOLOGIN', r)`);
+  const files = {
+    'ops/built.sql': built,
+    'ops/heredoc.sh': `psql -X <<'SQL'\n${built}\nSQL`,
+    'ops/expanded.sh': `psql -X <<SQL\n${body("'ALTER ROLE $ROLE NOLOGIN'").replaceAll('$$', '\\$\\$')}\nSQL`,
+    'ops/word.sh': `run_sql "$db" "${built.replaceAll('$$', '\\$\\$')}"`,
+    // An expansion is a part that is not in the text: in a word, in a here-document written to a file.
+    'ops/word-expansion.sh': `run_sql "$db" "${body("'ALTER ROLE $ROLE NOLOGIN'").replaceAll('$$', '\\$\\$')}"`,
+    'ops/written.sh': `cat > /tmp/roles.sql <<SQL\n${body("'ALTER ROLE $ROLE NOLOGIN'").replaceAll('$$', '\\$\\$')}\nSQL`,
+    'ops/option-expansion.sh': `psql -X -c "${body("'ALTER ROLE $ROLE NOLOGIN'").replaceAll('$$', '\\$do\\$')}"`,
+    'ops/option.sh': `psql -X -c ${JSON.stringify(built.replaceAll('$$', '$do$')).replaceAll('$', '\\$')}`,
+    '.github/workflows/ci.yml': `jobs:\n  a:\n    steps:\n      - run: |\n          psql -X <<'SQL'\n          ${built}\n          SQL\n`,
+    'ops/literal.mjs': `export const sql = ${JSON.stringify(built)};`,
+    'ops/template.mjs': `export const toggle = (action) => \`${body("'ALTER TABLE task ${action} TRIGGER t'")}\`;`,
+    'services/x-service/prisma/seed.ts': `db.$executeRawUnsafe(${JSON.stringify(built)});`,
+    'scripts/run.mjs': `db.$executeRawUnsafe(${JSON.stringify(built)});`,
+    // Only the call has the whole text: no literal of the file holds the word.
+    'scripts/split.mjs': `const a = 'SET x = 1; EXEC', b = "UTE format('ALTER ROLE %I NOLOGIN', r)";\ndb.$executeRawUnsafe(a + b);`,
+  };
+  const found = boundaryScan(files, [['1_init', 'CREATE TABLE task (id text);'], ['2_roles', built]]);
+  const key = (problem) => /\[(.*:EXECUTE:sha256:[0-9a-f]{64})\]$/.exec(problem)?.[1];
+  for (const path of Object.keys(files)) assert.ok(found.some((p) => p.startsWith(`${path}:`) && key(p)?.startsWith(`${path}:EXECUTE:`)), `${path}\n${found.join('\n')}`);
+  // Every problem is one of these sites, or (#1109 r1 F3) the CLI site of a text with a shell
+  // expansion in it; the migration's DO block is its own review, not this rule's.
+  const listable = (problem) => /\[(.*:sha256:[0-9a-f]{64})\]$/.exec(problem)?.[1];
+  assert.deepEqual(found.filter((p) => !key(p)).map((p) => listable(p).split(':sha256:')[0]).sort(), ['ops/expanded.sh:cli', 'ops/option-expansion.sh:cli']);
+  assert.ok(!found.some((p) => p.includes('prisma/migrations')));
+  // Listed with a reason: nothing is left. The key is the file and the digest of the expression.
+  const inventory = (entries) => ({ 'scripts/opaque-sql-sinks.json': JSON.stringify(entries) });
+  const reasons = Object.fromEntries([...new Set(found.map(listable))].map((k) => [k, 'role names from the catalogue, sqlString by %I']));
+  assert.deepEqual(boundaryScan({ ...files, ...inventory(reasons) }), []);
+  const one = { 'ops/built.sql': built };
+  const listed = key(boundaryScan(one)[0]);
+  assert.deepEqual(boundaryScan({ ...one, ...inventory({ [listed]: 'reviewed' }) }), []);
+  // The same expression elsewhere in the file, on other lines, spaced differently, is the same site.
+  assert.deepEqual(boundaryScan({ 'ops/built.sql': `SELECT 1;\n\n${built.replace("format('", "format\n  ( '")}\n${built}`, ...inventory({ [listed]: 'reviewed' }) }), []);
+  const stale = /stale or invalid opaque SQL inventory entry/;
+  for (const [what, text] of Object.entries({
+    'another expression': built.replace('NOLOGIN', 'LOGIN'), 'another argument': built.replace(', r)', ', s)'),
+    'the same expression in another file': null, 'a reason of spaces': built,
+  })) {
+    const scan = boundaryScan({ [text === null ? 'ops/other.sql' : 'ops/built.sql']: text ?? built, ...inventory({ [listed]: what === 'a reason of spaces' ? ' ' : 'reviewed' }) });
+    assert.equal(scan.filter(key).length, 1, what);
+    assert.ok(scan.some((p) => stale.test(p)), what);
+  }
+  // Composed now, or gone: the entry is stale. A listed site waives nothing that is readable.
+  assert.match(boundaryScan({ 'ops/built.sql': body("'ALTER ROLE r NOLOGIN'"), ...inventory({ [listed]: 'reviewed' }) }).join(), stale);
+  const beside = boundaryScan({ 'ops/built.sql': `${built}\n${CLAIM};`, ...inventory({ [listed]: 'reviewed' }) });
+  assert.deepEqual(beside.map((p) => p.split(': ')[1]), ['FU-324']);
+  // A part that is not in the text keeps its identity: another hole is another expression.
+  const hole = (name) => boundaryScan({ 'ops/template.mjs': files['ops/template.mjs'].replaceAll('action', name) }).map(key);
+  assert.notDeepEqual(hole('action'), hole('other'));
+  const expansion = (name) => boundaryScan({ 'ops/expanded.sh': files['ops/expanded.sh'].replace('$ROLE', name) }).map(key).filter(Boolean);
+  assert.notDeepEqual(expansion('$ROLE'), expansion('$OTHER'));
+  // Read as the shell's text and as psql's (a here-document, a -c word): one site, one key.
+  assert.equal(new Set(expansion('$ROLE')).size, 1);
+  assert.equal(new Set(found.filter((p) => p.startsWith('ops/option-expansion.sh:')).map(key).filter(Boolean)).size, 1);
+});
+
+test('FU-337 no cut of a picker passes through a join the reader does not follow', () => {
+  const picker = PIECES.join('');
+  const forms = [
+    (a, b, c) => `concat(${a}, ${b}, ${c})`, (a, b, c) => `format('%s%s%s', ${a}, ${b}, ${c})`,
+    (a, b, c) => `text ${a} || text ${b} || text ${c}`, (a, b, c) => `${a}::varchar(1000) || ${b} || ${c}::"text"`,
+    (a, b, c) => `${a} || v || ${b} || ${c}`,
+  ];
+  let passed = 0, total = 0;
+  for (let i = 1; i < picker.length; i += 3) for (let j = i + 1; j < picker.length; j += 3) for (const form of forms) {
+    total += 1;
+    if (claimSubqueryProblems(runs(form(...[picker.slice(0, i), picker.slice(i, j), picker.slice(j)].map(sqlString)))).length === 0) passed += 1;
+  }
+  assert.ok(total > 2000);
+  assert.equal(passed, 0);
+});
+
+// PR #1111 r1 F1, items 2 to 5: every trigger of the review, and the forms beside them.
+const SINK_MEMBERS = ['query', '$queryRawUnsafe', '$executeRawUnsafe', '$queryRaw', '$executeRaw', 'execute'];
+const ESCAPES = {
+  bind: (m) => `const run = client.${m}.bind(client);\nrun(runtimeSql);`,
+  call: (m) => `client.${m}.call(client, runtimeSql);`,
+  apply: (m) => `client.${m}.apply(client, [runtimeSql]);`,
+  assigned: (m) => `const run = client.${m};\nrun(runtimeSql);`,
+  optional: (m) => `const run = (client?.${m})!;\nrun?.(runtimeSql);`,
+  argument: (m) => `invoke(client.${m}, runtimeSql);`,
+  returned: (m) => `export const runner = () => client.${m};`,
+  element: (m) => `const run = client['${m}'];\nrun(runtimeSql);`,
+  destructured: (m) => `const { ${m}: run } = client;\nrun(runtimeSql);`,
+  shorthand: (m) => `const { ${m} } = client;\nlater(${m});`,
+  quoted: (m) => `const { '${m}': run } = client;\nrun(runtimeSql);`,
+  parameter: (m) => `export function f({ ${m}: run }) { return run(runtimeSql); }`,
+  imported: (m) => `import { ${m} as run } from 'driver';\nrun(runtimeSql);`,
+  pattern: (m) => `let run;\n[{ ${m}: run }] = [client];\nrun(runtimeSql);`,
+};
+
+test('PR #1111 r1 item 2: a sink member named where it is not called is an unresolved site', () => {
+  const refused = {}, passing = {};
+  for (const [i, member] of SINK_MEMBERS.entries()) for (const ext of ['js', 'cjs', 'mjs', 'jsx', 'ts', 'cts', 'mts', 'tsx']) {
+    for (const [form, text] of Object.entries(ESCAPES))
+      if (form !== 'optional' || /ts/.test(ext)) refused[`scripts/escaped/${form}${i}.${ext}`] = text(member);
+    // The direct-call controls are what they were: unknown text is refused, a literal is read.
+    refused[`scripts/escaped/direct${i}.${ext}`] = `client.${member}(runtimeSql);`;
+    passing[`scripts/escaped/literal${i}.${ext}`] = `client.${member}('SELECT 1');`;
+  }
+  // Under every root that is read (the web application: once the file names a raw API).
+  for (const dir of ['services/x-service/src', 'services/x-service/prisma', 'packages/p/src', 'tools'])
+    refused[`${dir}/escaped.ts`] = ESCAPES.bind('query');
+  refused['apps/web/src/escaped.ts'] = ESCAPES.assigned('$queryRawUnsafe');
+  // Not a sink: a member whose type is a scalar, a method implemented here (its body is read),
+  // the target of an assignment, an object that is built and not taken apart.
+  Object.assign(passing, {
+    'services/x-service/src/scalar.ts': 'export const f = (request: { query: string; execute?: boolean }) => [request.query, request.execute ? 1 : 0];',
+    'services/x-service/src/command.ts': 'class Command { execute() { return 1; } }\nexport const run = new Command().execute.bind(null);',
+    'scripts/escaped/written.mjs': 'client.query = wrapped;\nexport const built = { query: 1, execute: [{ query: 2 }] };',
+  });
+  assertUnresolved(refused, passing);
+  const production = scanOf('x-service', 'CREATE TABLE task (id text);', `declare const client: any;\nexport const run = client.query.bind(client);`);
+  assert.match(production.join(), /R0 unresolved SQL text passed to query/);
+});
+
+test('PR #1111 r1 item 3: prisma db execute is a CLI of the one registry, read by the rules of psql', () => {
+  const texts = (script, read = (name) => `file ${name}`) => cliSqlSites(script, read).map(({ text }) => text);
+  // What it receives: a file where the directory is proven, its one here-document or here-string.
+  assert.deepEqual(texts('prisma db execute --schema prisma/schema.prisma --file ops/a.sql\nDATABASE_URL=x prisma db execute --file=b.sql --url "$URL"'), ['file ops/a.sql', 'file b.sql']);
+  assert.deepEqual(texts(`prisma db execute --stdin <<'SQL'\nSELECT 1;\nSQL\n./node_modules/.bin/prisma db execute --stdin --schema=s <<< 'SELECT 2'`), ['SELECT 1;', 'SELECT 2']);
+  // A site by its two words, whatever is in front; not read: another program in front, an option
+  // this does not know, an input that is not the one it receives, a directory that is not proven.
+  for (const script of ['prisma db execute --stdin', 'echo "$SQL" | prisma db execute --stdin', 'prisma db execute --stdin < "$FILE"', 'prisma db execute --file "$SQL_FILE"',
+    'prisma db execute --file /tmp/a.sql', 'prisma db execute', 'prisma db execute --stdin --file a.sql', 'prisma db execute --file a.sql --file b.sql', 'prisma db execute $OPTS --stdin',
+    'prisma db execute "$OPTS" --stdin', 'prisma db execute --force --stdin', 'prisma db execute --file', 'pnpm exec prisma db execute --file a.sql', 'npx prisma db execute --file a.sql',
+    'node cli.js db execute --file a.sql', '"$PRISMA" db execute --file a.sql', 'db execute --file a.sql', 'X=1 db execute --stdin <<< "SELECT 1"', 'cd ops && prisma db execute --file a.sql', `bash -c 'prisma db execute --file a.sql'`, '"prisma" "db" \\\n  "execute" --stdin']) {
+    assert.ok(texts(script).length >= 1, script);
+    assert.deepEqual(texts(script).filter((text) => text !== null), [], script);
+  }
+  assert.deepEqual(texts('prisma db execute --file a.sql', null), [null]);
+  assert.deepEqual(texts('prisma migrate deploy && prisma format && prisma db push && echo execute db'), []);
+  assert.deepEqual([['--stdin'], ['--file', 'a'], ['--file=a', '--url=u', '--schema', 's'], ['--stdin', '--file', 'a'], [], ['--stdin=1'], [undefined, '--stdin']].map(prismaSql),
+    [[], [{ at: 1, file: 'a' }], [{ at: 0, file: 'a' }], null, null, null, null]);
+  // The review's triggers and the five shapes of this repository's own sites.
+  const refused = { 'scripts/argv.mjs': `spawnSync('prisma', ['db', 'execute', '--stdin'], { input: runtimeSql, shell: true });`,
+    'scripts/wrapper.mjs': `const sql = (script) => prisma(['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'], { stdin: script });`,
+    'scripts/led.ts': `spawnSync('pnpm', ['exec', 'prisma', 'db', 'execute', '--file', sqlFile]);`, 'scripts/variadic.cjs': `run('prisma', 'db', 'execute', '--stdin');`,
+    'scripts/command.mjs': 'execSync(`prisma db execute --file ${sqlFile}`);', 'scripts/input.mjs': `execSync('prisma db execute --stdin', { input: runtimeSql });`,
+    'tools/argv.mjs': `spawnSync(process.execPath, [cli, 'db', 'execute', '--stdin'], { input: runtimeSql });`, 'services/x-service/prisma/seed.ts': `run(['db', 'execute', '--stdin']);` };
+  inShells(refused, 'stdin', 'echo "$SQL" | prisma db execute --stdin');
+  inShells(refused, 'file', 'prisma db execute --file "$SQL_FILE"');
+  inShells(refused, 'unknown', 'prisma db execute --stdin <<SQL\nDELETE FROM task WHERE id = $picker;\nSQL');
+  const passing = { 'scripts/migrate.mjs': `spawnSync('prisma', ['migrate', 'deploy']);\nspawnSync('prisma', ['db', 'push']);\nexport const words = ['execute', 'db'];` };
+  inShells(passing, 'ok', `prisma db execute --stdin <<'SQL'\n${SAFE};\nSQL\nprisma migrate deploy`);
+  assertUnresolved(refused, passing);
+  // Read as executed where it is read; a file type this does not read is refused as for psql.
+  const other = claimScan({ 'ops/claim.sh': `prisma db execute --stdin <<'SQL'\n${UNSAFE};\nSQL`,
+    'services/x-service/package.json': JSON.stringify({ scripts: { sql: 'prisma db execute --stdin' } }), 'services/x-service/Dockerfile': 'RUN prisma db execute --file "$SQL_FILE"\n' });
+  assert.deepEqual([...new Set(other.map((p) => p.replace(/:\d+: /, ': ').slice(0, 58)))], ['ops/claim.sh: FU-324: locking subquery or unreadable SQL; ',
+    'services/x-service/Dockerfile: FU-324: a SQL CLI in a file', 'services/x-service/package.json: FU-324: a SQL CLI in a fi']);
+});
+
+test('PR #1111 r1 items 4, 5: an extension executor and EXPLAIN … EXECUTE are execution sites in every file', () => {
+  const executors = ['dblink', 'dblink_exec', 'dblink_send_query', 'dblink_open', 'pg_background_launch', 'cron.schedule', 'cron.schedule_in_database', 'cron.alter_job',
+    'public.dblink_exec', '"public"."dblink_exec"', '"cron"."schedule"', 'schedule', 'jobs.schedule_in_database', 'alter_job', 'pg_catalog.query_to_xml'];
+  const heads = ['EXPLAIN ANALYZE', 'EXPLAIN (ANALYZE, BUFFERS)', 'EXPLAIN', 'explain analyse verbose', 'EXPLAIN (FORMAT JSON, ANALYZE (true))', 'CREATE TABLE t AS', 'EXPLAIN ANALYZE CREATE TEMP TABLE t AS'];
+  const sites = [...executors.map((name) => `SELECT ${name}('c', cmd) FROM jobs`), `SELECT * FROM dblink('dbname=x', $1) AS t(id text)`, `SELECT cron.alter_job(1, command := cmd) FROM jobs`,
+    `DO $$BEGIN PERFORM dblink_exec('c', cmd); END$$`, `DO $$BEGIN FOR r IN SELECT a AS b FROM x LOOP CREATE TABLE t (a) ON COMMIT DROP AS EXECUTE p; END LOOP; END$$`, ...heads.flatMap((head) => [`${head} EXECUTE p`, `PREPARE p AS SELECT 1; ${head} EXECUTE p(1)`])];
+  for (const sql of sites) assert.equal(dynamicSite(claimSubqueryProblems(sql)).length, 1, sql);
+  // In every file that runs SQL: an operational .sql (whatever CREATE EXTENSION stands before), psql, a raw API.
+  const files = {};
+  sites.forEach((sql, i) => Object.assign(files, { [`ops/s${i}.sql`]: `CREATE EXTENSION IF NOT EXISTS dblink;\n${sql};`,
+    [`ops/s${i}.sh`]: `psql -X <<'SQL'\n${sql};\nSQL`, [`scripts/s${i}.mjs`]: `db.$executeRawUnsafe(${JSON.stringify(sql)});` }));
+  const found = boundaryScan(files);
+  for (const path of Object.keys(files)) assert.ok(found.some((p) => p.startsWith(`${path}:`) && p.includes(`[${path}:EXECUTE:`)), path);
+  // The migration replay knows the same calls (one test for both), and nothing else became a site.
+  for (const name of executors) migrationRefused(`SELECT ${name}('c', 'DELETE FROM task');`);
+  for (const sql of ['EXPLAIN ANALYZE SELECT 1', 'EXPLAIN (ANALYZE) DELETE FROM task', 'CREATE TABLE t AS SELECT 1 AS execute; ANALYZE VERBOSE t', 'SELECT lower(cmd), reschedule(cmd), cron_schedule(cmd) FROM jobs',
+    'CREATE TRIGGER u AFTER UPDATE ON task FOR EACH ROW WHEN (explain (1)) EXECUTE PROCEDURE f()', 'CREATE TABLE t (id int); CREATE VIEW v AS SELECT 1 AS execute FROM t AS execute'])
+    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
 });

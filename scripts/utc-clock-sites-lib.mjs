@@ -73,16 +73,15 @@ import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { productionFiles, readSchemas, sqlLiterals, SOURCE } from './eligibility-clock-derive.mjs';
 import { isMap, LineCounter, parseDocument, visit } from 'yaml';
-import { psqlSql, sqlSinkTexts, SQL_CLI, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
+import { cliAt, prismaSql, psqlSql, sqlSinkTexts, SQL_CLI, SQL_CLI_WORD, UNKNOWN_SQL, UNKNOWN_WORD } from './utc-clock-sinks.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
 import { tokenizeShell } from './check-dockerfile-pins-lib.mjs';
 import { lex as lexSql, PLACEHOLDER, stripComments } from './eligibility-clock-sql.mjs';
 
-const SQL_CLI_WORD = /\b(?:psql|pgbench)\b/;
 const INVENTORY = 'scripts/opaque-sql-sinks.json';
-/** What a file holds when it can execute SQL: a raw API, the pg driver, a SQL CLI; or a call of the name. */
-const SINK_WORD = /(?:query|execute)Raw|['"]pg['"]|\b(?:psql|pgbench)\b/;
-const SINK_CALL = /\b(?:query|execute)['"\]]*\s*(?:<[^>\n]*>)?\s*[(`]/;
+/** What a file holds when it can execute SQL: a raw API, the pg driver, a SQL CLI; or the name of a sink member (called or not: PR #1111 r1 item 2). */
+const SINK_WORD = new RegExp(`(?:query|execute)Raw|['"]pg['"]|${SQL_CLI_WORD.source}`);
+const SINK_CALL = /\b(?:query|execute)\b/;
 
 const CALLS = new Set(['now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp']);
 const KEYWORD_CLOCK = 'current_timestamp';
@@ -1296,18 +1295,20 @@ const SQL_TEXT_EXECUTORS = new Set([
   'ts_stat',
   'ts_rewrite', // both overloads refused; no argument-type inference
 ]);
+/**
+ * PR #1111 r1 item 4: ONE test of a call that executes SQL text, for the migration replay and
+ * for every text read as executed (dynamicSites): a name above, under any schema or none; what
+ * dblink and pg_background run; every function of schema `cron`, and pg_cron's three that take
+ * a command by their own name (a search_path may reach them unqualified).
+ */
+const executorAt = (tokens, i) => {
+  const name = nameOf(tokens[i]);
+  return name !== null && isOp(tokens[i + 1], '(') &&
+    (SQL_TEXT_EXECUTORS.has(name) || /^(?:dblink|pg_background_)|^(?:schedule|schedule_in_database|alter_job)$/.test(name) ||
+      (isOp(tokens[i - 1], '.') && nameOf(tokens[i - 2]) === 'cron'));
+};
 function sqlTextExecutor(tokens) {
-  const executor = tokens.find((t, i) => {
-    const name = nameOf(t);
-    return (
-      name !== null &&
-      isOp(tokens[i + 1], '(') &&
-      (SQL_TEXT_EXECUTORS.has(name) ||
-        /^(?:dblink|pg_background_)/.test(name) ||
-        (isOp(tokens[i - 1], '.') && nameOf(tokens[i - 2]) === 'cron'))
-    );
-  });
-  return executor?.value ?? null;
+  return tokens.find((_, i) => executorAt(tokens, i))?.value ?? null;
 }
 
 function opaqueStringCall(tokens, i) {
@@ -1894,7 +1895,13 @@ export function schemaDisagreements(repository, perService) {
 
 // One claim policy, independent of clocks, replay lifetime and reviewed exemptions.
 const [CONFLICT, CONFLICT_NAMED] = [Symbol('variable_conflict'), /variable_conflict/i];
-const unknownAt = (t) => (t?.type === 'placeholder' && t.value === 'text') || t?.unterminated === true;
+const unknownAt = (t) => (t?.type === 'placeholder' && /^text(?::|$)/.test(t.value)) || t?.unterminated === true;
+const MIGRATION = Symbol('migration');
+// FU-337: a part of a text that is not in it keeps the identity of what was written there (the
+// digest of its source), so the digest of a listed expression is the digest of that expression.
+const digest12 = (source) => createHash('sha256').update(source).digest('hex').slice(0, 12);
+const unknownText = (source) => PLACEHOLDER(`text:${digest12(source)}`);
+const valueHole = (source) => PLACEHOLDER(`0:${digest12(source)}`);
 const lockAt = (tokens, i) => isWord(tokens[i], 'for') && isWord(tokens[i + 1], 'update', 'no', 'share', 'key');
 const STATEMENT = /^(?:select|update|delete|insert|merge|create|alter|drop|do|begin|declare)\b|^values\s*\(/i;
 /**
@@ -1948,7 +1955,9 @@ function textOperand(tokens, p, constants) {
   // r2 N1: the constant alone only where the token is proven to read that binding: past its
   // declaration, as an operand `||` joins (after `.`, `::` or COLLATE, or before a string, the
   // name is a field, a type or a collation). Elsewhere also any other text.
-  const read = t?.start > constant?.from && isOp(tokens[p - 1], '||') && tokens[p + 1]?.type !== 'string';
+  // FU-337: so is the name that starts the expression EXECUTE runs.
+  const operand = isOp(tokens[p - 1], '||') || isWord(tokens[p - 1], 'execute');
+  const read = t?.start > constant?.from && operand && tokens[p + 1]?.type !== 'string';
   const known = !constant?.values || read ? constant?.values : [...new Set([...constant.values, UNKNOWN_SQL])];
   let found = null;
   if (tokens[at]?.type === 'string' && !tokens[at].unterminated)
@@ -2034,7 +2043,7 @@ function textConstants(tokens, block) {
     while (tokens[at] && !isOp(tokens[at], ';') && !(isOp(tokens[at], ':') && isOp(tokens[at + 1], '='))) at += 1;
     const found = isOp(tokens[at], ':') ? textExpression(tokens, at + 2, constants) : null;
     const onlyRead = tokens.every((u, j) => identity(u) !== name || j === k - 1 ||
-      (nameOf(tokens[j + 1]) === null && !isOp(tokens[j + 1], ':')));
+      ((nameOf(tokens[j + 1]) === null || isWord(tokens[j + 1], ...AFTER_DYNAMIC)) && !isOp(tokens[j + 1], ':')));
     if (!found || !isOp(tokens[found.end + 1], ';') || !onlyRead) return;
     // Its text as written only as text: a `name` cuts it at 63 bytes, a char(n) drops its spaces.
     const proven = k < begin && !VALUE_WORD.test(name) && at === textType(tokens, k + 1) + 1;
@@ -2042,6 +2051,55 @@ function textConstants(tokens, block) {
   });
   return constants;
 }
+
+// PL/pgSQL runs EXECUTE where a statement starts, after RETURN QUERY, FOR … IN and OPEN … FOR.
+const BEFORE_EXECUTE = ['begin', 'then', 'else', 'loop', 'in', 'for', 'query'];
+/**
+ * PR #1111 r1 item 5: what stands in front of tokens[i] runs the statement that starts there:
+ * EXPLAIN [ANALYZE] [VERBOSE], EXPLAIN (options), or the AS of a statement that creates a table.
+ */
+const runsNext = (tokens, i) => {
+  let at = i - 1;
+  if (isWord(tokens[at], 'as')) {
+    // The first AS after CREATE … TABLE: a later one names a column or a table of its query.
+    for (let table = false; (at -= 1) >= 0 && !isOp(tokens[at], ';') && !isWord(tokens[at], 'as'); table ||= isWord(tokens[at], 'table'))
+      if (isWord(tokens[at], 'create')) return table;
+    return false;
+  }
+  if (isOp(tokens[at], ')')) for (let depth = 0; at >= 0 && (depth += isOp(tokens[at], ')') - isOp(tokens[at], '(')) > 0;) at -= 1;
+  else while (isWord(tokens[at], 'analyze', 'analyse', 'verbose')) at -= 1;
+  return isWord(tokens[isOp(tokens[at], '(') ? at - 1 : at], 'explain');
+};
+const AFTER_DYNAMIC = ['into', 'using', 'loop'];
+/**
+ * FU-337: where a text runs SQL it builds, as token ranges `[start, end)` of the expression that
+ * is run: PL/pgSQL EXECUTE, and a call of a function that executes its argument (executorAt: its
+ * whole argument list, so a call with more than the one text is a site to list). EXECUTE is the
+ * statement where one can start: at the start of the text, after `;`, a label, a hole, one of
+ * BEFORE_EXECUTE, or what runsNext knows. Elsewhere (GRANT EXECUTE ON, a trigger's EXECUTE FUNCTION, prose) it runs
+ * nothing; the one word 'EXECUTE' is the name of the privilege.
+ */
+function dynamicSites(tokens) {
+  const sites = [];
+  tokens.forEach((t, i) => {
+    if (executorAt(tokens, i)) return sites.push({ start: i + 1, end: closing(tokens, i + 1) + 1 });
+    const before = tokens[i - 1];
+    const starts = !before || isOp(before, ';') || (isOp(before, '>') && isOp(tokens[i - 2], '>')) ||
+      before.type === 'placeholder' || isWord(before, ...BEFORE_EXECUTE) || runsNext(tokens, i);
+    if (!isWord(t, 'execute') || tokens.length === 1 || !starts || isWord(tokens[i + 1], 'on')) return;
+    let end = i + 1;
+    for (let depth = 0; end < tokens.length; end += 1) {
+      if (isOp(tokens[end], '(')) depth += 1;
+      else if (isOp(tokens[end], ')') && (depth -= 1) < 0) break;
+      else if (depth === 0 && (isOp(tokens[end], ';') || isWord(tokens[end], ...AFTER_DYNAMIC))) break;
+    }
+    sites.push({ start: i + 1, end });
+  });
+  return sites;
+}
+
+const DYNAMIC = /^FU-337: .* \[EXECUTE:sha256:([0-9a-f]{64})\]$/s;
+const written = (t) => (t.type === 'placeholder' ? PLACEHOLDER(t.value) : t.type === 'quoted' ? `"${t.value}"` : t.value);
 
 /**
  * `strict`: the text is executed. Otherwise nothing proves what it is: it is read for the
@@ -2051,23 +2109,47 @@ function textConstants(tokens, block) {
  * `block`: the text is the string of DO or of CREATE FUNCTION … AS (r2 N1, see textConstants).
  */
 export function claimSubqueryProblems(sql, seen = new Set(), strict = true, block = false) {
+  const dynamic = new Set();
+  const refused = claimRefused(sql, seen, strict, block, dynamic);
+  return [
+    ...(refused ? ['FU-324: locking subquery or unreadable SQL; use WITH picked AS MATERIALIZED (...) UPDATE ... FROM picked (DELETE ... USING picked)'] : []),
+    ...dynamic,
+  ];
+}
+
+/**
+ * FU-337, the execution boundary: SQL that a text builds and runs is ONE complete text, composed
+ * here from literals and proven constants and then read as executed, or the site is refused (in
+ * `dynamic`, with the digest of its exact expression: the caller's inventory may list it). A
+ * call, a cast this reader does not follow, a variable, a hole, a constant that is not proven:
+ * each makes the text unknown, whatever the pieces around it look like. Not in a migration.
+ */
+function claimRefused(sql, seen, strict, block, dynamic) {
   const key = `${strict}${block}${sql}`;
-  if (seen.has(key)) return [];
+  if (seen.has(key)) return false;
   seen.add(key);
   const tokens = lex(sql);
   // FU-325: compose BEFORE classifying. A split keyword is one keyword again. r2 N1: where this
   // text, one it is quoted in, or its file names variable_conflict, a name may be a column instead.
   if (CONFLICT_NAMED.test(sql)) seen.add(CONFLICT);
   const constants = textConstants(tokens, block && !seen.has(CONFLICT));
+  for (const { start, end } of seen.has(MIGRATION) ? [] : dynamicSites(tokens)) {
+    const found = textExpression(tokens, start, constants);
+    // Whole: nothing follows what was composed, and no part of it is a hole or unknown text.
+    const whole = found?.end === end - 1 && found.values?.every((value) => !value.includes('\uE000'));
+    // One site, one digest, whether its file read a part as a value or as unknown text.
+    const expression = tokens.slice(start, end).map(written).join(' ').replace(/\uE000(?:0|text)(?=[:\uE001])/g, '\uE000');
+    if (!whole) dynamic.add(`FU-337: SQL built at run time is not one text of literals and proven constants: ${
+      expression.replace(/\uE000[^\uE001]*\uE001?/g, '…').replace(/\s+/g, ' ').slice(0, 80)} [EXECUTE:sha256:${sha256(expression)}]`);
+    else if (found.values.some((value) => claimRefused(value, seen, true, false, dynamic))) return true;
+  }
   for (let i = 0; i < tokens.length; i++) {
     const found = textExpression(tokens, i, constants);
     if (found && found.end > i)
       tokens.splice(i, found.end - i + 1, { type: 'string', value: '', composed: found.values }, ...found.kept);
   }
   const valuesAt = (i) => ('composed' in tokens[i] ? tokens[i].composed : stringValues(tokens, i));
-  const refuse = [
-    'FU-324: locking subquery or unreadable SQL; use WITH picked AS MATERIALIZED (...) UPDATE ... FROM picked (DELETE ... USING picked)',
-  ];
+  const refuse = true;
   let depth = 0;
   for (const [i, t] of tokens.entries()) {
     if (isOp(t, '(')) depth += 1;
@@ -2086,7 +2168,7 @@ export function claimSubqueryProblems(sql, seen = new Set(), strict = true, bloc
       const body = /^\$/.test(tokens[i].value) || (values ?? []).some(executed);
       // The string of DO, or of CREATE FUNCTION … AS, is run as one block or not at all.
       for (const value of values ?? [])
-        if (claimSubqueryProblems(value, seen, body, isWord(tokens[i - 1], 'do', 'as')).length) return refuse;
+        if (claimRefused(value, seen, body, isWord(tokens[i - 1], 'do', 'as'), dynamic)) return refuse;
     }
     if (!isOp(tokens[i], '(')) continue;
     const end = closing(tokens, i);
@@ -2104,7 +2186,21 @@ export function claimSubqueryProblems(sql, seen = new Set(), strict = true, bloc
     const as = isWord(tokens[i - 1], 'materialized') ? i - 2 : i - 1;
     if (cteName(tokens, as) < 0) return refuse;
   }
-  return [];
+  return false;
+}
+
+/**
+ * The problems of one text of a file. FU-337: a site that runs SQL it builds is listed in the
+ * inventory by file + the digest of its exact expression, with a reason, or it is a problem.
+ */
+function claimProblems(local, text, seen, strict, opaque, opaqueUsed) {
+  return claimSubqueryProblems(text, seen, strict).flatMap((problem) => {
+    const digest = DYNAMIC.exec(problem)?.[1];
+    const key = `${local}:EXECUTE:sha256:${digest}`;
+    if (digest && typeof opaque[key] === 'string' && opaque[key].trim()) opaqueUsed.add(key);
+    else return [digest ? problem.replace(/\[EXECUTE:sha256:[0-9a-f]{64}\]$/, `[${key}]`) : problem];
+    return [];
+  });
 }
 
 /**
@@ -2117,14 +2213,29 @@ export const siteKey = (file, sink, expression) =>
 
 const TEST_PATH = /(?:^|\/)(?:test|tests|__tests__|e2e|fixtures)\/|\.(?:spec|test|int-spec|e2e-spec)\./;
 const EXPANSION = /\\([\\"$`])|\\\n|\$\{[^}]*\}|\$\w+|\$[@*#?!$-]|\$(?=\()|`/g;
-const expanded = (raw) => raw.replace(EXPANSION, (m, kept) => kept ?? (m === '\\\n' ? '' : UNKNOWN_SQL));
-/** A shell word as its command receives it: every expansion is unknown text. */
-const shellText = (word) =>
+const expanded = (raw, mark = unknownText) => raw.replace(EXPANSION, (m, kept) => kept ?? (m === '\\\n' ? '' : mark(m)));
+/** A shell word as its command receives it: every expansion is unknown text (or what `mark` makes of it). */
+const shellText = (word, mark = unknownText) =>
   word.segments
     .map(({ kind, raw }) =>
-      kind === 'sq' ? raw : kind === 'esc' ? raw.slice(1) : kind === 'dq' || kind === 'bare' ? expanded(raw) : UNKNOWN_SQL,
+      kind === 'sq' ? raw : kind === 'esc' ? raw.slice(1) : kind === 'dq' || kind === 'bare' ? expanded(raw, mark) : mark(raw),
     )
     .join('');
+/**
+ * FU-337: a word of a shell file as written. An expansion is a value that is not in the text, as
+ * a part of a JS template is. main read it as nothing: a dollar-quoted string that held only an
+ * expansion and a tail was one literal to it.
+ */
+function received({ value, dynamic, source }) {
+  if (!dynamic) return value;
+  try {
+    const [command, ...more] = tokenizeShell(source).commands;
+    if (more.length === 0 && command?.words.length === 1) return shellText(command.words[0], valueHole);
+  } catch {
+    // Not one word to this tokenizer: what was read of it, and unknown text.
+  }
+  return value + unknownText(source);
+}
 
 /** What changes the directory a relative path is read from, or runs text that may: a script naming one proves no directory. */
 const MOVES = /(?<![\w$./-])(?:cd|pushd|popd|chroot|eval|source|\.)(?![\w./-])/;
@@ -2156,7 +2267,7 @@ export function cliSqlSites(script, read = null, line = 0, depth = 0) {
     .filter((inner) => mentions(inner.script))
     .flatMap((inner) => cliSqlSites(inner.script, inner.shell ? null : here, line + inner.line, depth + 1));
   for (const { words, input, startLine, endLine } of parsed.commands) {
-    const at = words.findIndex(({ value }) => SQL_CLI.test(value));
+    const at = cliAt(words.map(({ value }) => value));
     let command = lines.slice(startLine, endLine + 1).join('\n');
     if (at < 0) {
       // `bash -c "psql …"`, `ssh host "psql …"`: a word that is shell text of its own, run from
@@ -2168,8 +2279,10 @@ export function cliSqlSites(script, read = null, line = 0, depth = 0) {
       continue;
     }
     const argv = words.slice(at + 1).map((word) => (word.split ? undefined : shellText(word)));
-    const first = words.slice(0, at).every(({ value }) => /^(?:[A-Za-z_]\w*=.*|if|then|else|elif|do|while|until|!|\{)$/s.test(value));
-    const found = first && SQL_CLI.exec(words[at].value)[1] ? psqlSql(argv) : null;
+    // Item 3: Prisma's `db execute` is read where the word in front of it is the program `prisma`.
+    const prisma = !SQL_CLI.test(words[at].value), program = prisma && /(?:^|\/)prisma$/.test(words[at - 1]?.value) ? at - 1 : at;
+    const first = words.slice(0, program).every(({ value }) => /^(?:[A-Za-z_]\w*=.*|if|then|else|elif|do|while|until|!|\{)$/s.test(value));
+    const found = !first || (prisma && program === at) ? null : prisma ? prismaSql(argv.slice(1)) : SQL_CLI.exec(words[at].value)[1] ? psqlSql(argv) : null;
     const runs = [...command.matchAll(/(^|[^<])(<+)/g)];
     const stdin = () => {
       // `0>&3` makes descriptor 3 the standard input as `<&3` does.
@@ -2242,9 +2355,11 @@ export function psqlText(text) {
   });
   const raw = lexSql(sql);
   for (let i = raw.length - 2; i >= 0; i--)
-    if (isOp(raw[i], ':') && ['word', 'string', 'quoted'].includes(raw[i + 1].type) && raw[i + 1].start === raw[i].start + 1)
-      sql = sql.slice(0, raw[i].start) + UNKNOWN_SQL + sql.slice(raw[i + 2]?.start ?? sql.length);
-  return { sql, whole: whole && !sql.includes(UNKNOWN_SQL) };
+    if (isOp(raw[i], ':') && ['word', 'string', 'quoted'].includes(raw[i + 1].type) && raw[i + 1].start === raw[i].start + 1) {
+      const end = raw[i + 2]?.start ?? sql.length;
+      sql = sql.slice(0, raw[i].start) + unknownText(sql.slice(raw[i].start, end).trim()) + sql.slice(end);
+    }
+  return { sql, whole: whole && !UNKNOWN_WORD.test(sql) };
 }
 
 function claimFileProblems(repository, opaque, opaqueUsed) {
@@ -2281,12 +2396,12 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
       // PR #1082 r1 F2: syntax that leaves its operand the text it is.
       const transparent = (n) => ts.isParenthesizedExpression(n) || ts.isAsExpression(n) ||
         ts.isSatisfiesExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
-      const textOf = (n, hole = PLACEHOLDER(0)) =>
+      const textOf = (n, hole = (part) => valueHole(part.getText())) =>
         transparent(n) ? textOf(n.expression, hole)
           : concat(n) ? textOf(n.left, hole) + textOf(n.right, hole)
             : ts.isTemplateExpression(n)
               ? n.head.text + n.templateSpans.map((s) => textOf(s.expression, hole) + s.literal.text).join('')
-              : ts.isStringLiteralLike(n) ? n.text : hole;
+              : ts.isStringLiteralLike(n) ? n.text : hole(n);
       const composed = new Map();
       for (const { node } of sqlLiterals(ast)) {
         let top = node;
@@ -2301,7 +2416,7 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
       // part that is not a literal is unknown text in it. r1 F1: whatever follows the name; the
       // name alone, as ONE literal, is the argv site of utc-clock-sinks.mjs (a composed name is not).
       for (const { node, text } of composed.values())
-        if (SQL_CLI_WORD.test(text) && !(ts.isStringLiteralLike(node) && SQL_CLI.test(text))) sites(textOf(node, UNKNOWN_SQL), ast.getLineAndCharacterOfPosition(node.getStart()).line, null);
+        if (SQL_CLI_WORD.test(text) && !(ts.isStringLiteralLike(node) && SQL_CLI.test(text))) sites(textOf(node, (n) => unknownText(n.getText())), ast.getLineAndCharacterOfPosition(node.getStart()).line, null);
     } else if (/\.sql$/.test(local)) texts.push({ text: source, strict: true });
     else if (/\.(?:sh|bash|ya?ml)$/.test(local)) {
       const scripts = /\.ya?ml$/.test(local) && !SQL_CLI_WORD.test(source) ? [] : shellScripts(local, source);
@@ -2309,9 +2424,9 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
       for (const { script, line, moved } of scripts) {
         // Whatever reads them: every here-document (executed), and every word (r1 F1: a piece).
         texts.push(
-          ...[...script.matchAll(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$/gm)].map((m) => ({ text: m[3], strict: true })),
+          ...[...script.matchAll(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$/gm)].map((m) => ({ text: m[1] ? m[3] : expanded(m[3]), strict: true })),
           ...parseCommands(script).commands.flatMap(({ words }) => words)
-            .map(({ value }) => ({ text: value.replace(/^[A-Za-z_]\w*=/, '') })),
+            .map((word) => ({ text: received(word).replace(/^[A-Za-z_]\w*=/, '') })),
         );
         // A workflow puts `${{ … }}` into the text, also inside quotes; what reads any other YAML is not known.
         if (SQL_CLI_WORD.test(script))
@@ -2323,7 +2438,9 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
         ? node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1
         : (at ?? 1);
       const seen = new Set(CONFLICT_NAMED.test(source) ? [CONFLICT] : []);
-      for (const problem of claimSubqueryProblems(text, seen, strict || executed(text)))
+      // FU-337 is the rule of what runs outside migrations: theirs are reviewed as DO blocks and routines.
+      if (/(?:^|\/)prisma\/migrations\//.test(local)) seen.add(MIGRATION);
+      for (const problem of claimProblems(local, text, seen, strict || executed(text), opaque, opaqueUsed))
         problems.push(`${local}:${line}: ${problem}`);
     }
   }
@@ -2369,7 +2486,7 @@ export function utcClockProblems(repository) {
     if (listed) opaqueUsed.add(key);
     const found = [
       ...(read.whole || listed ? [] : [`FU-324: unresolved executable SQL [${key}]`]),
-      ...(read.sql === null ? [] : claimSubqueryProblems(read.sql)),
+      ...(read.sql === null ? [] : claimProblems(relative(repository, path), read.sql, new Set(), true, opaque, opaqueUsed)),
     ];
     for (const problem of found) problems.push(`${relative(repository, path)}:${sink.node.getSourceFile().getLineAndCharacterOfPosition(sink.node.getStart()).line + 1}: ${problem}`);
   }
