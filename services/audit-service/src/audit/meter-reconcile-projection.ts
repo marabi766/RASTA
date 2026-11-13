@@ -1,4 +1,6 @@
 import {
+  FLEET_METER_INVENTORY_SEALED,
+  fleetMeterInventorySealedPayloadV1,
   auditChangesSchema,
   MAINTENANCE_METER_FULL_RUN_ACTIVATED,
   MAINTENANCE_METER_FULL_RUN_ACTIVATED_VERSION,
@@ -17,6 +19,28 @@ export function toMeterReconcileChanges(
   envelope: EventEnvelope,
   delivery: EventDelivery,
 ): AuditChange[] | null {
+  if (envelope.eventName === FLEET_METER_INVENTORY_SEALED) {
+    const parsed = fleetMeterInventorySealedPayloadV1.safeParse(envelope.payload);
+    if (
+      !parsed.success ||
+      delivery.topic !== 'rasta.fleet.v1' ||
+      envelope.producer !== 'fleet-service' ||
+      envelope.eventVersion !== 1 ||
+      envelope.aggregateType !== 'MeterInventorySeal' ||
+      envelope.tenantId !== undefined ||
+      parsed.data.runId !== envelope.aggregateId ||
+      parsed.data.runId !== envelope.correlationId ||
+      envelope.actor?.type !== 'USER' ||
+      parsed.data.operatorId !== envelope.actor.id
+    )
+      throw new UnprocessableEventError(
+        DLQ_REASONS.VALIDATION_FAILED,
+        'Source seal evidence refused',
+      );
+    return auditChangesSchema.parse(
+      Object.entries(parsed.data).map(([field, to]) => ({ field, from: null, to })),
+    );
+  }
   if (envelope.eventName === MAINTENANCE_METER_FULL_RUN_ACTIVATED) {
     const parsed = maintenanceMeterFullRunPayloadV1.safeParse(envelope.payload);
     if (

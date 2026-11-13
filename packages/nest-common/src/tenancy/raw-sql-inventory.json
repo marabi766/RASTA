@@ -1344,6 +1344,34 @@
     "decision": "has bound organization predicate"
   },
   {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 53,
+    "hash": "4665685cf38f881249019796d993b1fda2b1f2782e7c27a81d3be00dcf897de5",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 55,
+    "hash": "078b0485963adf0f0d31ecc609b8af4d1c1734cdd74ad80ae611816140bfda59",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 82,
+    "hash": "d294b434b1e406d3d1aeb0ccf53a2337f818143ac5766b5571f4ac4be623ebe9",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 119,
+    "hash": "96dc57af4217d6b5ff78aca07d302a0b002da0f692ab2daf9b56d63159b07179",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
     "file": "services/fleet-service/src/prisma/prisma.service.ts",
     "line": 129,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
@@ -3144,49 +3172,49 @@
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 52,
+    "line": 57,
     "hash": "535e7f3addffbb783f60820ec184f39357068ac54e9378ab420798929e465ad6",
     "occurrence": 0,
     "decision": "platform-wide: insertUsageEntry explicitly binds the validated envelope organization into each immutable quantity fact; no implicit tenant default"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 65,
+    "line": 70,
     "hash": "e5b93ed147ab653a54492de8490748cdc139c705e617e57664344f6f101f6194",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 93,
+    "line": 98,
     "hash": "2a15ae9f18702fdcf26e3ec40708c2b8d4e6f2515db312c071b3c6d1746f01d0",
     "occurrence": 0,
     "decision": "platform-wide: physical asset meter across historical owners; INSERT trigger determines mode under gate; never used for authorization"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 98,
+    "line": 103,
     "hash": "42e58ec22ca7ccd7e84c65c16d236ef49b063c66d0c9f04ac61d5566d98c2625",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 123,
+    "line": 128,
     "hash": "1e7f1260f602881d5c4413e6808c4ccbef71c3a98486ed631c76da8afb951a91",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 157,
+    "line": 162,
     "hash": "9685de3810212cfc8dad2935f95a7772a83e5a7b3d66dc2a66126c1bc1589742",
     "occurrence": 0,
     "decision": "platform-wide: calculateLegacyMeter computes numeric constants from the already locked physical meter; no database rows read"
   },
   {
     "file": "services/maintenance-service/src/maintenance/meter-reconcile.ts",
-    "line": 241,
+    "line": 387,
     "hash": "82bbdc127540f299a36cd166966b2a85dfd702a94122b6a0d970dfb0d6ce5373",
     "occurrence": 0,
     "decision": "has bound organization predicate"
@@ -3214,7 +3242,7 @@
   },
   {
     "file": "services/maintenance-service/src/maintenance/meter-reconcile.ts",
-    "line": 268,
+    "line": 323,
     "hash": "1601ab0120aeb71d6a1bf0bd8d7057fac5fd9200e9bfbcce10b7f610019c9b17",
     "occurrence": 0,
     "decision": "platform-wide: verified physical asset meter cutover under shared lock spans historical owners; tenant partition checked before source read"

@@ -70,6 +70,49 @@ const fullRun = {
     refusedCount: 1,
   },
 } as EventEnvelope;
+const sourceSeal = {
+  ...fullRun,
+  eventName: 'FLEET_METER_INVENTORY_SEALED',
+  producer: 'fleet-service',
+  aggregateType: 'MeterInventorySeal',
+  payload: {
+    runId: 'RUN_1',
+    operatorId: 'USR_OPERATOR',
+    inventoryDigest: 'a'.repeat(64),
+    sourceBoundary: 'fleet:RUN_1:digest',
+    assetCount: 2,
+  },
+} as EventEnvelope;
+it('preserves source-seal evidence without per-asset disclosure', () => {
+  const row = toAuditEventRecord(sourceSeal, { topic: 'rasta.fleet.v1', partition: 0 });
+  expect(row.organizationId).toBeNull();
+  expect(row.changes).toHaveLength(5);
+  expect(row.changes).toContainEqual({ field: 'assetCount', from: null, to: 2 });
+});
+it.each([
+  { tenantId: 'ORG_A' },
+  { tenantId: null },
+  { aggregateId: 'OTHER' },
+  { actor: undefined },
+  { actor: { type: 'USER', id: 'OTHER' } },
+  { producer: 'maintenance-service' },
+  { eventVersion: 2 },
+  { aggregateType: 'Asset' },
+  { correlationId: 'OTHER' },
+  { payload: { ...(sourceSeal.payload as object), assets: [] } },
+])('refuses inconsistent source seal evidence %#', (override) => {
+  expect(() =>
+    toAuditEventRecord({ ...sourceSeal, ...override } as EventEnvelope, {
+      topic: 'rasta.fleet.v1',
+      partition: 0,
+    }),
+  ).toThrow('Source seal evidence refused');
+});
+it('refuses source-seal evidence on the wrong topic', () => {
+  expect(() =>
+    toAuditEventRecord(sourceSeal, { topic: 'rasta.maintenance.v1', partition: 0 }),
+  ).toThrow('Source seal evidence refused');
+});
 it('preserves global activation state and bounded inventory evidence in the audit path', () => {
   const row = toAuditEventRecord(fullRun, { topic: 'rasta.maintenance.v1', partition: 0 });
   expect(row.organizationId).toBeNull();

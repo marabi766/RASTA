@@ -102,6 +102,8 @@ const pins = {
   'packages/contracts/src/common/text.ts':
     '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
   'packages/contracts/src/index.ts': [
+    // Fleet source-seal event exports only; existing callback helper implementations unchanged.
+    '0fa1eef220ab0d913bf6fe3f9b4c45c761a6fc10816b003c93091f44300551b7',
     // Full-run event exports only; existing callback helper implementations unchanged.
     '680b32f992d4bb10cf89e3f9805f93fa885ef17acf84da32988423199cf4941c',
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',

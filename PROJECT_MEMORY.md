@@ -2076,6 +2076,18 @@ Implemented + Tested + Live Verified هستند (بخش ۳).
 | Topic مصرفی    | `rasta.asset.v1` · `rasta.insurance.v1` · `rasta.maintenance.v1`       |
 | Consumer Group | `fleet-service.asset-sync` (از Offset صفر)                             |
 
+### EXP-007 source inventory foundation (2026-11-13)
+
+Fleet now owns an immutable operator inventory seal across its seven physical
+asset identity tables. Database triggers fence future identities, including old
+images and direct SQL. The source seal and bounded global
+`FLEET_METER_INVENTORY_SEALED` audit evidence share one outbox transaction.
+This primitive has no production endpoint, CLI, expiry or release path.
+Activation remains disabled: cross-service source completeness, the REST authority
+adapter, durable pre-activation progress/refusals and activation CLI are follow-ups.
+Local evidence is the real PostgreSQL `meter-inventory.int-spec.ts` suite and
+`meter-reconcile-projection.spec.ts`; no live Kafka/production rollout claim.
+
 ### مالکیت دامنه
 
 **مالک است:** `Driver` · `Assignment` · `UsageRecord` · `AvailabilityWindow`

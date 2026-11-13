@@ -8,6 +8,11 @@
 // ---------------------------------------------------------------------------
 
 export {
+  FLEET_METER_INVENTORY_SEALED,
+  fleetMeterInventorySealedPayloadV1,
+} from './events/fleet-meter';
+
+export {
   ID_PREFIXES,
   ULID_REGEX,
   prefixedIdSchema,
