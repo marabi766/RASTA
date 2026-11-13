@@ -151,8 +151,13 @@ never authority to activate or erase the marker.
 
 The `MeterFullRun` operator primitive persists the sealed inventory, explicit
 refusals, marker and `MAINTENANCE_METER_FULL_RUN_ACTIVATED` outbox evidence in one
-transaction. The shared `meter_full_run` row fences every production first-meter
-path; activation takes its exclusive lock before the final completeness check.
+transaction. A PostgreSQL `BEFORE INSERT` trigger on `asset_usage_meter` takes
+`FOR SHARE` on the `meter_full_run` row and assigns the first mode, overriding
+explicit modes as well as omitted values. There is no LEGACY column default.
+This covers old images, seeds, model API and future inserts; missing gate state
+raises `FULL_RUN_GATE_MISSING`. Activation takes the exclusive gate lock before
+the final check of locally visible facts/meters/replicas. `asset_ref` replication
+itself is not fenced; the owner seal must prove full source completeness.
 Refused physical assets remain LEGACY on first creation even after an ownership
 change. Unseen assets start LEDGER only after the durable marker commits.
 Missing fence state refuses processing; gauge zero never activates anything.
@@ -160,7 +165,9 @@ Missing fence state refuses processing; gauge zero never activates anything.
 This slice has **no production inventory authority or CLI activation path**.
 The constructor without an authority refuses `AUTHORITATIVE_INVENTORY_REQUIRED`.
 The stacked follow-up must implement the trusted owner adapter's
-`withSealedInventory` contract: all physical assets, historical/transferred fleet
+`withSealedInventory(runId, commit)` contract: durably retain and re-serve the
+same seal for each run, including its original boundary and ownership rows;
+all physical assets, historical/transferred fleet
 usage and a fenced future-creation boundary held through maintenance commit.
 A caller manifest, replica pagination or per-asset certificates cannot implement
 that contract. The PostgreSQL tests inject a synthetic sealed inventory to test
@@ -178,3 +185,20 @@ per-asset inventory. No tenant request may invoke the global primitive.
 After activation, schema-down refuses `ACTIVE_METER_FULL_RUN_ROLLBACK_REFUSED`.
 Retain the marker, refusal inventory, facts, processed markers and outbox;
 rollback only to an image honoring the creation fence and refusals.
+
+After a lost response, use `MeterFullRun.status(runId, operatorId)` without an
+authority to read the stored digest, source boundary, asset count and refusal
+count. It rejects ambient tenant contexts and mismatched run/operator IDs.
+A replay with the same run/operator but a changed seal or refusals returns
+`ALREADY_ACTIVE_INVENTORY_DRIFT`; reconcile the stored evidence instead of
+starting a new run. Definite failures before the Prisma transaction callback
+returns (pool acquisition, statement failure or callback timeout) refuse with
+`FULL_RUN_PRECOMMIT_FAILED`. Failures once commit is possible remain
+`FULL_RUN_UNCONFIRMED`, including loss of the owner-fence release response.
+
+The singleton share lock remains held until each inserting fold commits,
+including `ON CONFLICT` on an existing meter. The concurrent-fold race test
+records a bounded synthetic measurement, not a production throughput guarantee
+or starvation proof. Schedule eventual activation in a maintenance window with
+usage consumers paused/drained; resume only after status confirms the marker.
+Active schema-down refuses to remove this database fence.
