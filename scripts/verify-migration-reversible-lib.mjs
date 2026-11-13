@@ -685,6 +685,9 @@ const HOLD_FUNDED_AT_COMMIT = '20261107120000_hold_funded_at_commit';
 // FU-268: it redefines guards of 20261016120000, 20261105120000 and 20261107120000 (each now locks
 // through the READ COMMITTED gate), so any rollback below one of them takes it down first.
 const GUARDS_READ_COMMITTED = '20261109120000_guards_read_committed';
+// FU-308 B: it redefines 20261104120000's `trg_ledger_account_identity_fixed` (the same condition,
+// in the form a restore prints), so a rollback of 20261104120000 takes it down first.
+const LEDGER_IDENTITY_RESTORE_STABLE = '20261109200000_ledger_account_identity_restore_stable';
 
 /**
  * The `held_at` of every probe row with no hold of its own, cleared with its stamp lifted: what an
@@ -1677,7 +1680,7 @@ const SETTLEMENT_REVERSAL_STEPS = [
   },
   {
     label: 'settlement reversal: with no case, the rollback rebuilds both enums under the rows',
-    runDownScript: [SETTLEMENT_REVERSAL],
+    runDownScript: [LEDGER_IDENTITY_RESTORE_STABLE, SETTLEMENT_REVERSAL],
   },
   {
     label: 'settlement reversal: the row keeps its status through the rebuild',
@@ -1956,6 +1959,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
 ];
 
 const HOLD_DECISION_DOWNS = [
+  LEDGER_IDENTITY_RESTORE_STABLE,
   GUARDS_READ_COMMITTED,
   HOLD_FUNDED_AT_COMMIT,
   UTC_CLOCK_DEFAULTS,

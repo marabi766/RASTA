@@ -14,6 +14,7 @@ import {
   vector,
   shellTextProblem,
 } from './ci-shell-text-lib.mjs';
+import { DOCKER_RUN_FLAGS, DOCKER_RUN_VALUES } from './ci-shell-policy-lib.mjs';
 
 /**
  * Every Dockerfile's base image is pinned by digest, and all share one (L7-45).
@@ -419,60 +420,8 @@ export const REVIEWED_PROGRAMS = new Map([
 /** The compose file the checker validates; a `docker compose -f` naming any other fails closed. */
 export const COMPOSE_FILES = ['docker-compose.yml'];
 
-// `docker run|create|pull` options: those that take a value, and those that do not.
-const VALUE_FLAGS = new Set([
-  '-e',
-  '--env',
-  '--env-file',
-  '-v',
-  '--volume',
-  '--mount',
-  '--tmpfs',
-  '--name',
-  '--network',
-  '--net',
-  '-w',
-  '--workdir',
-  '-u',
-  '--user',
-  '--entrypoint',
-  '-h',
-  '--hostname',
-  '-p',
-  '--publish',
-  '--platform',
-  '-l',
-  '--label',
-  '--add-host',
-  '--cap-add',
-  '--cap-drop',
-  '-m',
-  '--memory',
-  '--cpus',
-  '--shm-size',
-  '--ulimit',
-  '--restart',
-  '--pull',
-  '--security-opt',
-  '--device',
-  '--health-cmd',
-]);
-const BOOL_FLAGS = new Set([
-  '--rm',
-  '-d',
-  '--detach',
-  '-i',
-  '--interactive',
-  '-t',
-  '--tty',
-  '-it',
-  '--init',
-  '--read-only',
-  '-q',
-  '--quiet',
-  '-a',
-  '--all-tags',
-]);
+// `docker run|create|pull` options: the ONE table of ci-shell-policy-lib.mjs (FU-334).
+const [VALUE_FLAGS, BOOL_FLAGS] = [DOCKER_RUN_VALUES, DOCKER_RUN_FLAGS];
 // `docker <global option>` before the verb.
 const GLOBAL_VALUE_FLAGS = new Set([
   '-H',
