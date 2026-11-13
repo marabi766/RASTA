@@ -68,13 +68,14 @@
 // SQL-only tables exist; a type that disagrees with schema.prisma throws.
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, posix, relative } from 'node:path';
 import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { productionFiles, readSchemas, sqlLiterals, SOURCE } from './eligibility-clock-derive.mjs';
-import { isMap, LineCounter, parseDocument, visit } from 'yaml';
+import { isMap, isSeq, LineCounter, parseDocument, visit } from 'yaml';
 import { cliAt, prismaSql, psqlSql, sqlSinkTexts, SQL_CLI, SQL_CLI_WORD, UNKNOWN_SQL, UNKNOWN_WORD } from './utc-clock-sinks.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
+import { jobWrites, stale } from './ci-write-targets-lib.mjs';
 import { tokenizeShell } from './check-dockerfile-pins-lib.mjs';
 import { lex as lexSql, PLACEHOLDER, stripComments } from './eligibility-clock-sql.mjs';
 
@@ -2312,8 +2313,13 @@ export function cliSqlSites(script, read = null, line = 0, depth = 0) {
  * (`working-directory`, `defaults`, a merge key), it or a node above it is anchored (an alias
  * runs it in another place), or a checkout of the document has a `path` (the repository is not
  * at the root). YAML that is no workflow is not read at all (see `rewritten`).
+ * FU-340 part B (PR #1109 r2 F2) `written`: what the step and the steps of its job before it may
+ * have written (ci-write-targets-lib.mjs, the model the shell reader shares): a file one of
+ * those may reach is not the repository's any more. A text that is not the `run` of a step of
+ * `jobs.<id>.steps` (an action's step: its caller's steps are not known) is `moved`.
+ * `action(path)`: the steps of a local action, or null.
  */
-function shellScripts(local, source) {
+function shellScripts(local, source, action = () => null) {
   if (!/\.ya?ml$/.test(local)) return [{ script: source, moved: true, line: 0 }];
   const lineCounter = new LineCounter();
   const doc = parseDocument(source, { lineCounter, uniqueKeys: false });
@@ -2321,14 +2327,21 @@ function shellScripts(local, source) {
   const scripts = [];
   let relocated = false;
   visit(doc, {
-    Map(_, map) { relocated ||= /checkout/.test(String(map.get('uses'))) && isMap(map.get('with')) && map.get('with').has('path'); },
+    // a key written twice: which of the two GitHub runs is not read here
+    Map(_, map) { relocated ||= (/checkout/.test(String(map.get('uses'))) && isMap(map.get('with')) && map.get('with').has('path')) || new Set(map.items.map(({ key }) => String(key?.value ?? key))).size !== map.items.length; },
   });
   visit(doc, {
     Scalar(key, { value, range, type, anchor }, path) {
-      const moved = relocated || anchor || key !== 'value' || path.at(-1).key?.value !== 'run' ||
+      if (typeof value !== 'string' || !SQL_CLI_WORD.test(value)) return;
+      const [, , jobs, , , , list, steps, step] = path;
+      const before = path.length === 10 && jobs?.key?.value === 'jobs' && list?.key?.value === 'steps' && isSeq(steps)
+        ? steps.items.slice(0, steps.items.indexOf(step) + 1) : null;
+      const moved = relocated || anchor || key !== 'value' || path.at(-1).key?.value !== 'run' || !before ||
         path.some((above) => above.anchor || (isMap(above) && ['working-directory', 'defaults', '<<'].some((set) => above.has(set))));
-      if (typeof value === 'string' && SQL_CLI_WORD.test(value))
-        scripts.push({ script: value, moved, line: lineCounter.linePos(range[0]).line - (/^BLOCK/.test(type) ? 0 : 1) });
+      // an alias without its anchor, in the job or in a local action, has no value to read
+      const read = () => { try { return jobWrites(before.map((step) => step.toJS(doc)), action); } catch { return null; } };
+      const written = moved ? null : read();
+      scripts.push({ script: value, moved: !written, written, line: lineCounter.linePos(range[0]).line - (/^BLOCK/.test(type) ? 0 : 1) });
     },
   });
   return scripts;
@@ -2369,6 +2382,12 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
   // starts. Not where another directory may be set (r1 F2): see shellScripts for YAML; a script
   // file runs where its caller stands and a JS command string has a `cwd`: they name no file this reads.
   const read = (file) => (authored.includes(join(repository, file)) ? readFileSync(join(repository, file), 'utf8') : null);
+  const action = (path) => {
+    const doc = parseDocument(read(`${path}/action.yml`) ?? read(`${path}/action.yaml`) ?? '');
+    return doc.errors.length ? null : (doc.toJS()?.runs?.steps ?? null);
+  };
+  // the repository's copy is what `psql -f` reads only at a path of the checkout that no step so far may have written
+  const unwritten = (written) => (file) => (stale(written, posix.normalize(file)) ? null : read(file));
   for (const path of authored) {
     const local = relative(repository, path);
     if (TEST_PATH.test(local) || /\.(?:md|png|jpe?g|ico|woff2?|pdf)$|^docs\//.test(local)) continue;
@@ -2419,9 +2438,9 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
         if (SQL_CLI_WORD.test(text) && !(ts.isStringLiteralLike(node) && SQL_CLI.test(text))) sites(textOf(node, (n) => unknownText(n.getText())), ast.getLineAndCharacterOfPosition(node.getStart()).line, null);
     } else if (/\.sql$/.test(local)) texts.push({ text: source, strict: true });
     else if (/\.(?:sh|bash|ya?ml)$/.test(local)) {
-      const scripts = /\.ya?ml$/.test(local) && !SQL_CLI_WORD.test(source) ? [] : shellScripts(local, source);
+      const scripts = /\.ya?ml$/.test(local) && !SQL_CLI_WORD.test(source) ? [] : shellScripts(local, source, action);
       if (!scripts) { problems.push(`${local}: FU-324: unreadable source`); continue; }
-      for (const { script, line, moved } of scripts) {
+      for (const { script, line, moved, written } of scripts) {
         // Whatever reads them: every here-document (executed), and every word (r1 F1: a piece).
         texts.push(
           ...[...script.matchAll(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$/gm)].map((m) => ({ text: m[1] ? m[3] : expanded(m[3]), strict: true })),
@@ -2430,7 +2449,7 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
         );
         // A workflow puts `${{ … }}` into the text, also inside quotes; what reads any other YAML is not known.
         if (SQL_CLI_WORD.test(script))
-          sites(script, line, moved ? null : read, /\.ya?ml$/.test(local) ? (local.startsWith('.github/') ? /\$\{\{/ : /^/) : undefined);
+          sites(script, line, moved ? null : unwritten(written), /\.ya?ml$/.test(local) ? (local.startsWith('.github/') ? /\$\{\{/ : /^/) : undefined);
       }
     } else if (SQL_CLI_WORD.test(source) && local !== INVENTORY) problems.push(`${local}: FU-324: a SQL CLI in a file this guard does not read`);
     for (const { text, node, strict, line: at } of texts) {

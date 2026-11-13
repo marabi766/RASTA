@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { dockerRun, effectiveShell, readOptions, readShell } from './ci-shell-policy-lib.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
 import * as lifecycleLib from './prisma-lifecycle-suppression-lib.mjs';
+import { jobWrites, shellWrites, stale, stepWrites } from './ci-write-targets-lib.mjs';
 
 const { CONTAINER_SCRIPTS, ENV_PAIRS, MATRIX, MOUNTS, lifecycleFileKind } = lifecycleLib;
 // FU-334: every file a step runs, uses or builds is a member of this inventory, read once.
@@ -1016,6 +1017,304 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
     ),
     [1, 1, 2, 2, 0, 0, 0, 0, 0, 0, 3, 4, 3, 3, 6, 3, 3],
   );
+});
+
+// FU-340 part B (PR #1109 r2 F2): ONE model of what a step may write or restore over the
+// checkout, for every guard that proves a file from the repository's copy. The SQL guard asks
+// it first (utc-clock-sites-lib.test.mjs holds its cases); the shell reader is next.
+test('the write-target model places every write of a step, or it is unknown (FU-340 part B)', () => {
+  const show = ({ path, unknown }) => path ?? `? ${unknown}`;
+  const written = (text, cwd = '') => shellWrites(text, cwd).map(show);
+  for (const [text, expected] of [
+    // a redirection of any command, in every spelling that opens a file to write
+    ['printf %s "$SQL" > fixtures/claim.sql', ['fixtures/claim.sql']],
+    ['echo a >> a/b.conf 2>&1', ['a/b.conf']],
+    ['echo a 2> err.log >&2', ['err.log']],
+    ['echo a >| x; exec 3<> y; echo b >& z', ['x', 'y', 'z']],
+    ['echo "$(echo a > x)" `echo b > y`', ['? a backtick command substitution', 'x', 'y']],
+    ['f() { echo a > x; }', ['x']],
+    // the programs that write their operands
+    // before `--`, a word computed from its start, or inside an option, may be any option
+    ['cp "$src" fixtures/claim.sql', ['? "$src"']],
+    ['cp -- "$src" fixtures/claim.sql', ['? "$src"', 'fixtures/claim.sql']],
+    ['cp fixtures/$n.sql /tmp/x', ['? fixtures/$n.sql']],
+    ['sed "$FLAG" s/a/b/ f.sql', ['? "$FLAG"']],
+    ['sed -n "${n}p" f.sql', ['? "${n}p"']],
+    ['sed -n -- "$expr" f.sql', []],
+    ['curl "$FLAG" out.sql https://h/x', ['? "$FLAG"']],
+    ['curl -"$flags" out.sql', ['? -"$flags"']],
+    ['curl -fsS "$URL"', ['? "$URL"']],
+    ['curl -fsS -o /tmp/x -- "$URL"', []],
+    ['curl -H "X: $TOKEN" https://h/x', []],
+    ['tee -a "${GITHUB_STEP_SUMMARY}" x', ['x']],
+    ['cp -tdest a', ['dest', 'a']],
+    ['mv a b; ln -sf c d; install e bin/e', ['a', 'b', 'c', 'd', 'e', 'bin/e']],
+    ['ln -s /tmp/x', ['']],
+    ['echo x | tee -a log other', ['log', 'other']],
+    ['sed -i s/a/b/ f.sql', ['s/a/b', 'f.sql']],
+    ['sed -ni.bak p f.sql', ['p', 'f.sql']],
+    ['sed -l5i s/a/b/ f.sql', ['s/a/b', 'f.sql']],
+    ['sed --in-place s/a/b/ f.sql', ['s/a/b', 'f.sql']],
+    ['sed -n p f.sql', []],
+    ['tar -xzf a.tgz', ['', 'a.tgz']],
+    ['tar -xzf a.tgz -C out', ['a.tgz', 'out']],
+    ['unzip a.zip', ['', 'a.zip']],
+    ['unzip a.zip -d out', ['a.zip', 'out']],
+    ['truncate -s 0 f', ['0', 'f']],
+    // curl and wget: their operands are addresses; an option names the file
+    ['curl -fsS http://localhost:9000/minio/health/live', []],
+    [`curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/v1`, []],
+    ['curl -sSfo out.sql https://h/x', ['out.sql']],
+    ['curl -oout.sql https://h/x', ['out.sql']],
+    ['curl -#o out.sql https://h/x; curl -4sSo out.sql https://h/x', ['out.sql', 'out.sql']],
+    ["curl -o 'out#1.sql' https://h/x", ['? out#1.sql']],
+    ['curl -{s,o} out.sql https://h/x', ['? -{s,o}']],
+    ['sed {-i,s/a/b/} f.sql', ['? {-i,s/a/b/}']],
+    [`curl -s -w '%output{out.sql}%{json}' https://h/x`, ['? a file its format names']],
+    ['curl -o"$OUT" https://h/x', ['? -o"$OUT"']],
+    ['curl -sSo$OUT https://h/x', ['? -sSo$OUT']],
+    ['curl -H"X: $TOKEN" -d "$BODY" https://h/x', ['? -H"X: $TOKEN"', '? "$BODY"']],
+    ['wget --output-document="$OUT" https://h/x', ['? --output-document="$OUT"']],
+    ['cp --target-directory="$OUT" a', ['? --target-directory="$OUT"']],
+    ['curl --output out.sql https://h/x', ['out.sql']],
+    ['curl --out out.sql https://h/x', ['out.sql']],
+    ['curl -D headers -c jar https://h/x', ['headers', 'jar']],
+    ['curl -sO https://h/x.sql; curl -#O https://h/x.sql', ['', '']],
+    ['curl --remote-name https://h/x.sql', ['']],
+    ['curl -K options https://h/x', ['? its options file']],
+    ['curl $OPTIONS https://h/x', ['? $OPTIONS']],
+    ['wget https://h/x', ['']],
+    ['wget -O out https://h/x', ['out']],
+    ['wget --directory-prefix out https://h/x', ['out']],
+    ['wget -O /tmp/x --save-cookies jar https://h/x', ['jar']],
+    // outside the checkout: no target
+    ['echo a > /tmp/x; echo b 2> /dev/null; echo c >> "$GITHUB_STEP_SUMMARY"', []],
+    ['echo a > "$RUNNER_TEMP/a/b"; echo b | tee "${RUNNER_TEMP}/c" >> "$GITHUB_ENV"', []],
+    // a target that cannot be placed
+    ['echo a > "$OUT"', ['? "$OUT"']],
+    ['echo a > "${dir}/x"', ['? "${dir}/x"']],
+    ['echo a > $RUNNER_TEMP', ['? $RUNNER_TEMP']],
+    ['echo a > "$RUNNER_TEMP/../x"', ['? "$RUNNER_TEMP/../x"']],
+    ['tar -xf /tmp/a.tgz -C "$RUNNER_TEMP/.."', ['? "$RUNNER_TEMP/.."']],
+    ['tar -xf /tmp/a.tgz -C "$RUNNER_TEMP/a"', []],
+    // a name of the runner the text may bind itself
+    ...[
+      'RUNNER_TEMP=.; echo a > "$RUNNER_TEMP/x"',
+      'read -r GITHUB_ENV; echo a >> "$GITHUB_ENV"',
+    ].map((text) => [text, ['? a name of the runner written other than to expand it']]),
+    ['# GITHUB_ENV is set\necho MY_GITHUB_ENV GITHUB_ENV_2 "${GITHUB_OUTPUT}" > /tmp/x', []],
+    [
+      'echo a > /etc/x; echo b > ../x; echo c > x*; echo d > ~/x',
+      ['? /etc/x', '? ../x', '? x*', '? ~/x'],
+    ],
+    ['cd ops && echo a > x', ['? x']],
+    // text that runs in the same shell may hold a `cd`; a wrapper that changes directory, or
+    // that runs the words of one operand
+    ...["eval 'cd ops'", 'trap "rm -f /tmp/x" EXIT', 'source /tmp/e.sh', '. /tmp/e.sh', 'eval'].map(
+      (text) => [`${text}; echo a > x`, ['? x']],
+    ),
+    ['eval "${kafka_credentials}"; echo a > x', ['x']],
+    ...[
+      'env -C ops tee x',
+      'env --chdir=ops tee x',
+      "env -S 'cp /tmp/a x'",
+      'env --split-string=cp',
+    ].map((text) => [text, ['? what `env` runs, and where']]),
+    ['sudo -D ops cp /tmp/a x', ['? what `sudo` runs, and where']],
+    ['env A=1 tee x; sudo -E tee y; env A=1 curl -sS -o /tmp/x http://h/x', ['x', 'y']],
+    ["trap -- 'echo c > z' EXIT; trap - EXIT", ['? z']],
+    // text that is run: read by the same model, or unknown
+    ["bash -c 'echo a > x'; bash -c 'cd ops; echo b > y'", ['x', '? y']],
+    ["eval 'echo b > y'; trap 'echo c > /etc/z' EXIT", ['? y', '? /etc/z']],
+    ['bash -c "$body"', ['? bash -c runs a body this check cannot read']],
+    ['bash', ['? what bash reads as commands']],
+    ['bash scripts/x.sh', []],
+    ['eval "$text"', ['? "$text"']],
+    ['eval "${kafka_credentials}"', []],
+    // a program this cannot place
+    ['xargs cp a', ['? what `xargs` hands on']],
+    ['git checkout -- f; git -C d log; git log --output=x', Array(3).fill('? what `git` writes')],
+    ['git log --ou=x', ['? what `git` writes']],
+    ['git log -1; git diff --stat; git log --oneline; find . -name x', []],
+    [
+      'find . -name x -delete; patch -p1; gunzip a.gz; busybox cp a b',
+      ['find', 'patch', 'gunzip', 'busybox'].map((name) => `? what \`${name}\` writes`),
+    ],
+    ['cat <<EOF > x\nEOF', ['? a here-document, which is not read', 'x']],
+    [
+      'echo a > /tmp/x\r\necho b > /tmp/y',
+      [
+        '? a carriage return, control or invisible blank character (bash reads it as part of a word), which is not read',
+        '? /tmp/x\r',
+      ],
+    ],
+  ])
+    assert.deepEqual(written(text), expected, text);
+  assert.deepEqual(written('echo a > x', 'ops'), ['ops/x']);
+  assert.deepEqual(written('echo a > x', null), ['? x']);
+  // a caller that names no directory gets no relative path placed
+  assert.deepEqual(shellWrites('echo a > x; echo b > /tmp/y').map(show), ['? x']);
+  for (const [text, word] of [
+    ['$cmd a > x', '$cmd'],
+    ['"$cmd" a > x', '"$cmd"'],
+    ['te$e a > x', 'te$e'],
+  ])
+    assert.deepEqual(written(text), ['x', `? what ${word} runs`], text);
+  assert.deepEqual(written('[ -f a ] > x; { echo a; } > y'), ['x', 'y']);
+
+  // what a write may have replaced: the path, everything below it, and the directory it is in
+  const after = (path) => [{ path }];
+  for (const [target, path] of [
+    ['fixtures/claim.sql', 'fixtures/claim.sql'],
+    ['fixtures', 'fixtures/claim.sql'],
+    ['', 'fixtures/claim.sql'],
+    ['fixtures/claim.sql', 'fixtures'],
+    ['x', ''],
+  ])
+    assert.match(stale(after(target), path), /may have replaced it/, `${target} ${path}`);
+  for (const target of ['fixtures/claim.sql2', 'fixtures/other.sql', 'fix', 'claim.sql'])
+    assert.equal(stale(after(target), 'fixtures/claim.sql'), null, target);
+  assert.match(stale([{ unknown: '"$OUT"' }], 'any/path'), /cannot place/);
+  for (const path of ['../repo/fixtures/claim.sql', '..', '/work/fixtures/claim.sql'])
+    assert.match(stale([], path), /leaves the checkout/, path);
+  assert.equal(stale([], '..fixtures/claim.sql'), null);
+  assert.equal(stale([], 'any/path'), null);
+
+  // an action: what it restores, from its inputs as written; an input or an action not read is unknown
+  const uses = (name, inputs, local) =>
+    stepWrites({ uses: name, ...(inputs && { with: inputs }) }, local).map(show);
+  const input = (name, key) => `? what ${name} does with its input ${key}`;
+  for (const [name, inputs, expected] of [
+    ['actions/download-artifact', undefined, ['']],
+    ['actions/download-artifact', { path: 'scripts' }, ['scripts']],
+    ['actions/download-artifact', { path: '${{ runner.temp }}/x', name: 'n' }, []],
+    ['actions/download-artifact', { path: '${{ env.X }}' }, ['? ${{ env.X }}']],
+    [
+      'actions/download-artifact',
+      { path: '${{ runner.temp }}/../x' },
+      ['? ${{ runner.temp }}/../x'],
+    ],
+    ['actions/cache', { key: 'k' }, ['? undefined']],
+    // an empty input is the action's to place; a path is read without the blanks around it
+    ['actions/download-artifact', { path: '' }, ['? an empty path']],
+    ['actions/download-artifact', { path: ' \n' }, ['?  \n']],
+    ['aquasecurity/trivy-action', { 'cache-dir': '' }, ['? an empty path']],
+    ['actions/cache', { key: 'k', path: '~/.cache/.. ' }, ['? ~/.cache/..']],
+    ['actions/cache', { key: 'k', path: '${{ runner.temp }}/..\t' }, ['? ${{ runner.temp }}/..']],
+    ['actions/cache', { key: 'k', path: '~/.cache/x\nnode_modules\n' }, ['node_modules']],
+    ['actions/cache', { key: 'k', path: 7 }, ['? 7']],
+    ['actions/cache/restore', { path: '/tmp/x' }, ['? what actions/cache/restore@v1 writes']],
+    ['actions/checkout', { 'fetch-depth': 0 }, []],
+    ...['path', 'ref', 'repository'].map((key) => [
+      'actions/checkout',
+      { [key]: 'x' },
+      [input('actions/checkout', key)],
+    ]),
+    ['actions/upload-artifact', { name: 'n', path: 'scripts' }, []],
+    ['aquasecurity/trivy-action', { 'image-ref': 'x' }, ['.cache/trivy']],
+    ['aquasecurity/trivy-action', { 'cache-dir': '${{ runner.temp }}/t' }, []],
+    [
+      'aquasecurity/trivy-action',
+      { 'cache-dir': '/tmp/t', output: 'r.sarif' },
+      [input('aquasecurity/trivy-action', 'output')],
+    ],
+    [
+      'docker/build-push-action',
+      { context: '.', 'cache-to': 'type=gha,mode=max,scope=${{ matrix.service }}' },
+      [],
+    ],
+    ['docker/build-push-action', { context: '.' }, []],
+    ['docker/build-push-action', { 'cache-to': 'type=local,dest=.' }, ['? type=local,dest=.']],
+    [
+      'docker/build-push-action',
+      { outputs: 'type=local,dest=out' },
+      [input('docker/build-push-action', 'outputs')],
+    ],
+    ['owner/other', undefined, ['? what owner/other@v1 writes']],
+    ['actions/cache', 'text', ['? what actions/cache@v1 writes']],
+  ])
+    assert.deepEqual(uses(`${name}@v1`, inputs), expected, `${name} ${JSON.stringify(inputs)}`);
+  assert.deepEqual(uses('./.github/actions/x'), ['? what ./.github/actions/x writes']);
+  const inside = (path) =>
+    path === '.github/actions/x' && [{ run: 'echo a > x' }, { uses: './.github/actions/x' }];
+  assert.deepEqual(uses('./.github/actions/x', undefined, inside), [
+    ...Array(4).fill('x'),
+    '? what ./.github/actions/x writes',
+  ]);
+  const step = (run, more) => stepWrites({ run, ...more }).map(show);
+  assert.deepEqual(step('echo a > x', { 'working-directory': 'ops' }), ['ops/x']);
+  for (const directory of ['${{ env.D }}', '/ops', '../ops', 7])
+    assert.deepEqual(step('echo a > x', { 'working-directory': directory }), ['? x']);
+  // GitHub pastes an expression's value into the text before the shell reads it
+  for (const expression of ['"${{ env.IMAGE }}"', '${{ github.sha }}'])
+    assert.deepEqual(step(`echo ${expression} > /tmp/x`).slice(-1), [
+      '? what an expression pastes in',
+    ]);
+  assert.deepEqual(step('echo a > /tmp/x', { env: { RUNNER_TEMP: '.' } }), [
+    '? an `env` that sets a name of the runner',
+  ]);
+  assert.deepEqual(step('echo a > /tmp/x', { env: 'text' }), [
+    '? an `env` that sets a name of the runner',
+  ]);
+  assert.deepEqual(step('echo a > /tmp/x', { env: { RUNNER: '.', TEMP: '.' } }), []);
+  assert.deepEqual(step(['echo a > x']), ['? text this does not read']);
+  assert.deepEqual(stepWrites('echo a > x').map(show), ['? a step that is not a mapping']);
+  assert.deepEqual(stepWrites({ '<<': { run: 'echo a > x' } }).map(show), [
+    '? a step with a merge key',
+  ]);
+  // any shell but bash and sh reads the text as another language
+  for (const shell of ['bash', 'sh']) assert.deepEqual(step('echo a > /tmp/x', { shell }), []);
+  for (const shell of ['python', 'pwsh', 'bash -e {0}', '${{ env.SHELL }}'])
+    assert.deepEqual(step('echo a > /tmp/x', { shell }), [`? what the shell ${shell} runs`]);
+
+  // a job: what its steps wrote, in order; a local action a step before it may have replaced
+  // is not the one that was read
+  const job = (...steps) => jobWrites(steps, inside).map(show);
+  const action = { uses: './.github/actions/x' };
+  const expanded = [...Array(4).fill('x'), '? what ./.github/actions/x writes'];
+  assert.deepEqual(job({ run: 'echo a > /tmp/x' }, action, { run: 'echo a > y' }), [
+    ...expanded,
+    'y',
+  ]);
+  for (const write of [
+    'echo a > .github/actions/x/action.yml',
+    'echo a > .github/actions/x',
+    'echo a > .github',
+    'tar -xzf /tmp/a.tgz',
+    'echo a > "$OUT"',
+  ])
+    assert.deepEqual(
+      job({ run: write }, action).slice(1),
+      ['? what ./.github/actions/x writes'],
+      write,
+    );
+  for (const write of ['echo a > .github/actions/y/action.yml', 'echo a > .github/actions/x2'])
+    assert.deepEqual(job({ run: write }, action).slice(1), expanded, write);
+  assert.deepEqual(job('text', 7).length, 2);
+  // the same for the action that one uses in turn, for a step of the action itself, and for
+  // the path under another spelling
+  const actions = {
+    '.github/actions/x': [{ run: 'echo a > /tmp/x' }],
+    '.github/actions/outer': [{ uses: './.github/actions/x' }],
+    '.github/actions/self': [{ run: 'echo a > .github/actions/x/action.yml' }, action],
+    '': [{ run: 'echo a > /tmp/x' }],
+  };
+  const within = (...steps) => jobWrites(steps, (path) => actions[path] ?? null).map(show);
+  const replace = { run: 'echo a > .github/actions/x/action.yml' };
+  const outer = { uses: './.github/actions/outer' };
+  assert.deepEqual(within(outer), []);
+  assert.deepEqual(within(replace, outer).slice(1), ['? what ./.github/actions/x writes']);
+  assert.deepEqual(within({ uses: './.github/actions/self' }), [
+    '.github/actions/x/action.yml',
+    '? what ./.github/actions/x writes',
+  ]);
+  for (const uses of ['./.github/actions/x/', './.github//actions/x', './']) {
+    assert.deepEqual(within({ uses }), [], uses);
+    assert.deepEqual(within(replace, { uses }).slice(1), [`? what ${uses} writes`], uses);
+  }
+  const climbing = './.github/actions/../actions/x';
+  assert.deepEqual(within({ uses: climbing }), [`? what ${climbing} writes`]);
+  assert.deepEqual(jobWrites({ run: 'echo a > x' }).map(show), ['? steps that are not a list']);
 });
 
 test('the shell that reads a step and the variables it is given are read at every level (FU-334)', () => {
