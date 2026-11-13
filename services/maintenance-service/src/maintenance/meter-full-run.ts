@@ -45,9 +45,18 @@ const refusalsSchema = z
  * No production adapter/CLI is wired in this slice: unavailable authority refuses.
  */
 export interface MeterInventoryAuthority {
-  withSealedInventory<T>(commit: (inventory: unknown) => Promise<T>): Promise<T>;
+  // A run must re-serve its original durable seal, never enumerate a fresh one.
+  withSealedInventory<T>(runId: string, commit: (inventory: unknown) => Promise<T>): Promise<T>;
 }
 export class MeterFullRunRefusal extends Error {}
+
+export interface MeterFullRunStatus {
+  runId: string;
+  inventoryDigest: string;
+  sourceBoundary: string;
+  assetCount: number;
+  refusedCount: number;
+}
 
 /** Global operator command, never callable from an ambient tenant request. */
 export class MeterFullRun {
@@ -55,6 +64,29 @@ export class MeterFullRun {
     private readonly prisma: PrismaService,
     private readonly authority?: MeterInventoryAuthority,
   ) {}
+
+  async status(runId: string, operatorId: string): Promise<MeterFullRunStatus | null> {
+    if (tryGetContext()) throw new MeterFullRunRefusal('OPERATOR_CONTEXT_REQUIRED');
+    identifier.parse(runId);
+    meterReconcileOperatorSchema.parse(operatorId);
+    return runUnscoped(
+      'operator-only activation evidence; no per-asset or tenant output',
+      async () => {
+        const [gate] = await this.prisma.client.$queryRaw<
+          (MeterFullRunStatus & { operatorId: string })[]
+        >`SELECT run_id AS "runId", operator_id AS "operatorId", inventory_digest AS "inventoryDigest",
+        source_boundary AS "sourceBoundary", (SELECT count(*)::int FROM meter_full_run_asset) AS "assetCount",
+        (SELECT count(*)::int FROM meter_full_run_asset WHERE outcome = 'REFUSED') AS "refusedCount"
+        FROM meter_full_run WHERE id = true`;
+        if (!gate) throw new MeterFullRunRefusal('FULL_RUN_GATE_MISSING');
+        if (gate.runId === null) return null;
+        if (gate.runId !== runId || gate.operatorId !== operatorId)
+          throw new MeterFullRunRefusal('FULL_RUN_CONFLICT');
+        const { operatorId: _operator, ...status } = gate;
+        return status;
+      },
+    );
+  }
 
   async activate(runId: string, operatorId: string, explicitRefusals: unknown): Promise<string> {
     if (tryGetContext()) throw new MeterFullRunRefusal('OPERATOR_CONTEXT_REQUIRED');
@@ -64,7 +96,7 @@ export class MeterFullRun {
     if (!this.authority) throw new MeterFullRunRefusal('AUTHORITATIVE_INVENTORY_REQUIRED');
     let confirmed = false;
     return this.authority
-      .withSealedInventory(async (value) => {
+      .withSealedInventory(runId, async (value) => {
         const inventory = inventorySchema.parse(value);
         const assets = [...inventory.assets].sort((a, b) =>
           a.assetId < b.assetId ? -1 : a.assetId > b.assetId ? 1 : 0,
@@ -95,6 +127,7 @@ export class MeterFullRun {
             runUnscoped(
               'global operator rollout inventory; physical assets across owners, no tenant-facing reads',
               async () => {
+                let callbackReturned = false;
                 try {
                   return await this.prisma.transaction(
                     async (tx) => {
@@ -108,16 +141,16 @@ export class MeterFullRun {
                 SELECT run_id, inventory_digest, operator_id FROM meter_full_run WHERE id = true FOR UPDATE`;
                       if (!gate) throw new MeterFullRunRefusal('FULL_RUN_GATE_MISSING');
                       if (gate.run_id !== null) {
-                        if (
-                          gate.run_id !== runId ||
-                          gate.inventory_digest !== digest ||
-                          gate.operator_id !== operatorId
-                        )
+                        if (gate.run_id !== runId || gate.operator_id !== operatorId)
                           throw new MeterFullRunRefusal('FULL_RUN_CONFLICT');
+                        if (gate.inventory_digest !== digest)
+                          throw new MeterFullRunRefusal('ALREADY_ACTIVE_INVENTORY_DRIFT');
+                        callbackReturned = true;
                         return runId;
                       }
-                      // No meter writer can pass its FOR SHARE until this transaction ends.
-                      // Local orphan facts/meters and replica assets must all be in the seal.
+                      // The INSERT trigger holds FOR SHARE until its transaction ends.
+                      // Check locally visible facts/meters/replicas; asset_ref itself is not fenced.
+                      // Source completeness and future creations require the owner seal.
                       const [check] = await tx.$queryRaw<{ invalid: boolean }[]>`
                 WITH inventory AS (SELECT * FROM jsonb_to_recordset(${JSON.stringify(outcomes)}::jsonb)
                   AS x("assetId" text, "organizationId" text, outcome text, refusal text)),
@@ -153,12 +186,16 @@ export class MeterFullRun {
                       await tx.$executeRaw`UPDATE meter_full_run SET run_id = ${runId}, operator_id = ${operatorId},
                 inventory_digest = ${digest}, source_boundary = ${inventory.boundary}, activated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
                 WHERE id = true`;
+                      callbackReturned = true;
                       return runId;
                     },
                     { timeoutMs: 30_000 },
                   );
                 } catch (error) {
                   if (error instanceof MeterFullRunRefusal) throw error;
+                  // Prisma cannot commit until our callback returns. Pool acquisition,
+                  // statement errors and callback timeouts therefore prove refusal.
+                  if (!callbackReturned) throw new MeterFullRunRefusal('FULL_RUN_PRECOMMIT_FAILED');
                   throw new Error('FULL_RUN_UNCONFIRMED');
                 }
               },
