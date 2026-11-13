@@ -320,10 +320,10 @@ export const JEST_LAUNCHERS = {
   'scripts/backup-restore-drill.pg.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns psql, pg_dump and pg_restore through command(name, args); every caller passes one of those literals. No Jest or test-script launch.',
+      'Spawns psql, pg_dump and pg_restore through command(name, args); every caller passes one of those literals. migrateEconomic() spawns the literal `pnpm run db:migrate` in services/economic-service (prisma migrate deploy on the disposable database). No Jest or test-script launch.',
     sha256: {
       'scripts/backup-restore-drill.pg.test.mjs':
-        '6466ed788dd770bf43c5f179687e94d5d1e7027047cdff279517a691689f5f2e',
+        '99c2a9d419c5a2bfd4f355dc52fb6681e13c40869c30a6026c65b8242537510f',
     },
   },
 };

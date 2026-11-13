@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -134,6 +134,32 @@ const withoutReference = (state) => {
   return rest;
 };
 const ledger = () => JSON.parse(sql(LEDGER_SQL));
+// The whole economic chain, through the service's own `db:migrate` (`prisma migrate deploy`) as the
+// drill itself migrates (backup-restore-drill-main.mjs): the fixture has to commit under every
+// constraint and deferred trigger of the schema the drill dumps, not under the first migration's
+// (FU-309: that gap hid a fixture hold the schema refused, FU-308, from every pull request).
+let migrateMilliseconds = 0;
+function migrateEconomic() {
+  const { PGHOST, PGPORT = '5432', PGUSER, PGPASSWORD = '' } = process.env;
+  const url = `postgresql://${encodeURIComponent(PGUSER)}:${encodeURIComponent(PGPASSWORD)}@${PGHOST}:${PGPORT}/${database}`;
+  const started = performance.now();
+  const result = spawnSync('pnpm', ['run', 'db:migrate'], {
+    cwd: new URL('../services/economic-service/', import.meta.url),
+    // Both names, so a developer's .env (read by the script, never over a set variable) adds none.
+    // No generation from a reinstall's lifecycle hook, as the drill sets it (FU-329).
+    env: {
+      ...process.env,
+      DATABASE_URL_ECONOMIC_MIGRATOR: url,
+      DATABASE_URL_ECONOMIC: url,
+      PRISMA_SKIP_POSTINSTALL_GENERATE: 'true',
+    },
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  migrateMilliseconds = performance.now() - started;
+  // Prisma's own account of it: the migration's name and the database's error, no credential.
+  assert.equal(result.status, 0, `${result.stdout}`.slice(-2000) + `${result.stderr}`.slice(-2000));
+}
 
 before(async () => {
   assert.ok(
@@ -148,19 +174,8 @@ before(async () => {
     ALTER ROLE "${process.env.PGUSER.replaceAll('"', '""')}" IN DATABASE ${database} SET TimeZone = 'UTC';`,
     'postgres',
   );
-  sql(
-    readFileSync(
-      new URL(
-        '../services/economic-service/prisma/migrations/20260828202043_init_economic/migration.sql',
-        import.meta.url,
-      ),
-      'utf8',
-    ),
-  );
+  migrateEconomic();
   sql(`CREATE EXTENSION postgis;
-    CREATE TABLE _prisma_migrations (id text, migration_name text, checksum text,
-      finished_at timestamp, rolled_back_at timestamp);
-    INSERT INTO _prisma_migrations VALUES ('test', 'test', 'test', '2026-01-01', null);
     INSERT INTO ledger_account (id, organization_id, account_type, account_code, purpose, currency, created_by)
       VALUES ('ACC_SEED_PAYMENT_CLEARING', 'ORG-PLATFORM', 'ASSET', 'TEST-CLEARING', 'PAYMENT_CLEARING', 'IRR', 'test');`);
   sql(FIXTURE_SQL);
@@ -205,16 +220,30 @@ after(() => {
     );
   } finally {
     console.error(
-      `Reference restore + fixed point: ${Math.round(referenceMilliseconds)} ms; schema-only dump collection total: ${Math.round(dumpMilliseconds)} ms`,
+      `Economic migration chain: ${Math.round(migrateMilliseconds)} ms; reference restore + fixed point: ${Math.round(referenceMilliseconds)} ms; schema-only dump collection total: ${Math.round(dumpMilliseconds)} ms`,
     );
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test('unchanged migrated fixture passes its first restore against REF, with real CHECK deparse drift', () => {
-  assert.equal(initialSnapshot.reference.checkLinesDifferent, 2);
+  // This file's own two samples drift, exactly those two of its own; the real chain's CHECKs that
+  // PostgreSQL prints differently after one round trip drift beside them, and how many those are
+  // is the schema's business (the drill reports them per database, it pins none).
+  const { checkConstraints, checkLinesDifferent } = initialSnapshot.reference;
+  assert.deepEqual(
+    checkConstraints
+      .filter(({ schema }) => schema === 'drill_metadata')
+      .map(({ name }) => name)
+      .sort(),
+    ['drill_array_check', 'drill_deparse_check'],
+  );
+  assert.ok(checkLinesDifferent >= checkConstraints.length);
   // FU-327: PostgreSQL stores BETWEEN as a nested AND and reads its own dump back as one list, in
   // a SQL-standard body and a view as in the CHECK above; that fold is the only non-CHECK change.
+  // Exact over the whole economic chain too: the schema itself stores no list a restore regroups
+  // (20261109200000 rewrote the one trigger that did, FU-308 B). A migration that adds one shows
+  // here by its dump identity: write it as PostgreSQL prints it, or list it here on purpose.
   assert.deepEqual(initialSnapshot.reference.foldedBooleanLists, folded);
   assert.equal(
     initialSnapshot.schemaDump.content.equals(initialSnapshot.reference.reference.content),
@@ -283,6 +312,14 @@ test('real inventory separates extension rows and detects equal-count value chan
 test('real ledger SQL returns exact amounts; unbalanced journal and wallet hold mismatch fail', () => {
   assert.equal(ledgerPassed(ledger()), true);
   assert.equal(ledger().fixtureAmount, '9007199254740993');
+  // On the whole chain the schema itself proves the fixture's hold (FU-308), and its transaction
+  // is HELD by it. HELD, not CREATED: the service never leaves a transaction CREATED beside its
+  // hold (create: insert, placeHold, HELD, one database transaction), so only HELD is a state a
+  // backup of this system can hold, and only HELD is proven.
+  assert.equal(
+    sql(`SELECT wallet_hold_funded('HLD_DRILL'), transaction_held_proven('TXN_DRILL')`),
+    't|t',
+  );
   for (const [mutation, field] of [
     [
       `ALTER TABLE ledger_entry DISABLE TRIGGER ALL;
@@ -290,7 +327,9 @@ test('real ledger SQL returns exact amounts; unbalanced journal and wallet hold 
       'journalMismatches',
     ],
     [
-      `UPDATE wallet_hold SET status = 'RELEASED', resolved_at = now(), resolved_journal_id = 'JRN_DRILL_HOLD' WHERE id = 'HLD_DRILL';`,
+      // Triggers off, as for the entry above: the schema refuses this write, a damaged restore asks nobody.
+      `ALTER TABLE wallet_hold DISABLE TRIGGER ALL;
+      UPDATE wallet_hold SET status = 'RELEASED', resolved_at = now(), resolved_journal_id = 'JRN_DRILL_HOLD' WHERE id = 'HLD_DRILL';`,
       'walletMismatches',
     ],
   ]) {
@@ -426,8 +465,8 @@ for (const [category, mutation, undo] of [
   });
 }
 
-// Fixtures supplement the real initial migration: the real append-only function gets an
-// explicit restricted ACL, and an RLS policy is added because this migration has none.
+// Fixtures supplement the real migration chain: the real append-only function gets an
+// explicit restricted ACL, and an RLS policy is added because the economic schema has none.
 for (const [category, mutation, verify, baseline] of [
   [
     'schema CREATE grant',
