@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import { randomUUID } from 'node:crypto';
 import type { EventEnvelope } from '@rasta/contracts';
 import { FleetMeterInventorySeal } from '../src/fleet/meter-inventory';
@@ -95,11 +96,13 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await prisma.client
       .$executeRaw`INSERT INTO availability_window(id, asset_id, organization_id, available, from_at,
       reason, created_by) VALUES (${id('AVW')}, ${ids[3]}, ${org.b}, false, '2026-01-01', 'TEST', 'TEST')`;
-    await prisma.client
-      .$executeRaw`INSERT INTO asset_transfer_fence(asset_id, organization_id, fence_id, expires_at,
+    await eligibilityClockWrite(
+      prisma.client,
+    )`INSERT INTO asset_transfer_fence(asset_id, organization_id, fence_id, expires_at,
       created_at) VALUES (${ids[4]}, ${org.a}, 'TEST_FENCE', '2027-01-01Z', '2026-01-01Z')`;
-    await prisma.client
-      .$executeRaw`INSERT INTO asset_transfer_release(asset_id, organization_id, fence_id, expires_at,
+    await eligibilityClockWrite(
+      prisma.client,
+    )`INSERT INTO asset_transfer_release(asset_id, organization_id, fence_id, expires_at,
       released_at) VALUES (${ids[5]}, ${org.b}, 'TEST_RELEASE', '2027-01-01Z', '2026-01-01Z')`;
     await prisma.client
       .$executeRaw`INSERT INTO insurance_pending_verification(event_id, asset_id, organization_id,
@@ -266,7 +269,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       owner.client.$executeRawUnsafe(`TRUNCATE "${schema}".meter_inventory_seal`),
     ).rejects.toThrow('SOURCE_SEAL_FIXED');
     await expect(
-      prisma.transaction(async (tx) => {
+      owner.transaction(async (tx) => {
         await tx.$executeRaw`CREATE TEMP TABLE meter_inventory_seal(id boolean, inventory jsonb) ON COMMIT DROP`;
         await tx.$executeRaw`INSERT INTO pg_temp.meter_inventory_seal VALUES(true, NULL)`;
         await tx.$executeRaw`SELECT set_config('search_path', ${`pg_temp, "${schema}", public`}, true)`;

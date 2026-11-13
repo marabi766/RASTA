@@ -183,6 +183,17 @@ const reviewedClockTemplates: readonly {
   template: string;
   expressions: string | null;
 }[] = [
+  // FU-347: fixed source-enumeration probes; expiry is never used for eligibility.
+  {
+    file: 'services/fleet-service/test/meter-inventory.int-spec.ts',
+    template: '17b56026d6577c8422e250cbb52aaddaad8dc38ca82742c517f8a2afdded1bf5',
+    expressions: 'b8c36742bb6ac728ed6afb3b1299584fbae770161b4caa1b169a2d7d872fd946',
+  },
+  {
+    file: 'services/fleet-service/test/meter-inventory.int-spec.ts',
+    template: 'bf77c2896555320aac0263fbe36fab009542523115f75cd5a33856dea4822e89',
+    expressions: '6e1a34a99a485b681ccc57cb1dd36e436805edbc01ff45a5f26779105170437a',
+  },
   // FU-170: isolated deadline probes; table choice and fixed expired instant are bound.
   {
     file: 'services/identity-service/test/timestamp-deadlines.int-spec.ts',

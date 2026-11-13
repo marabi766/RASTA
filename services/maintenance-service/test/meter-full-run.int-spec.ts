@@ -400,7 +400,7 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     await expect(command().status(runId, actor)).rejects.toThrow('FULL_RUN_GATE_MISSING');
   });
   it('pins gate/refusal lookup against a hostile caller search_path and temp shadows', async () => {
-    await prisma.transaction(async (tx) => {
+    await owner.transaction(async (tx) => {
       await tx.$executeRaw`CREATE TEMP TABLE meter_full_run(id boolean, run_id text) ON COMMIT DROP`;
       await tx.$executeRaw`INSERT INTO pg_temp.meter_full_run VALUES(true, 'FAKE_ACTIVE')`;
       await tx.$executeRaw`SELECT set_config('search_path', ${`pg_temp, "${schema}", public`}, true)`;
