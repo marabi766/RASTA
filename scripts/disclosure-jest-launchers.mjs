@@ -38,7 +38,7 @@ export const JEST_LAUNCHERS = {
       'scripts/verify-migration-reversible-lib.test.mjs':
         '3723ec4f079d428d2e6bf5b107b671b354723304381715e75cde62c44bf4b8f8',
       'scripts/verify-migration-reversible-lib.mjs':
-        '6820885a4cee0ab389b8799c102aa9eaa43ba63fd4bc10d86ef54c1866e81450',
+        'a6102a991076ed8e4692de32032b7eb262d372b689bd3be59af67a4575113eaa',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },
@@ -206,7 +206,7 @@ export const JEST_LAUNCHERS = {
       'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed. Workspace manifests are listed through authoredFiles() (read-only git ls-files).',
     sha256: {
       'scripts/ci-shell-text-lib.mjs':
-        'dba3e1b238617ba8e082efa309209e2330acc22215d25ab4831223a6c16f29ce',
+        '195c6157ff686add94a437ff49224b633f77bc81f619fc2c32d49ea47039ffa5',
       'scripts/ci-node-test-timeouts-lib.mjs':
         '4e98805f63b3698beb0eed84ec66ffa575032d4dbd4b50012fa9f96e428fa806',
       'scripts/check-unit-step-concurrency.test.mjs':
@@ -320,10 +320,10 @@ export const JEST_LAUNCHERS = {
   'scripts/backup-restore-drill.pg.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns psql, pg_dump and pg_restore through command(name, args); every caller passes one of those literals. No Jest or test-script launch.',
+      'Spawns psql, pg_dump and pg_restore through command(name, args); every caller passes one of those literals. migrateEconomic() spawns the literal `pnpm run db:migrate` in services/economic-service (prisma migrate deploy on the disposable database). No Jest or test-script launch.',
     sha256: {
       'scripts/backup-restore-drill.pg.test.mjs':
-        '6466ed788dd770bf43c5f179687e94d5d1e7027047cdff279517a691689f5f2e',
+        '99c2a9d419c5a2bfd4f355dc52fb6681e13c40869c30a6026c65b8242537510f',
     },
   },
 };
