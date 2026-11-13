@@ -49,6 +49,8 @@ export const TENANT_SCOPED_MODELS = [
  * to exist, and one without a reason fails that spec.
  */
 export const TENANT_SCOPE_EXEMPTIONS = {
+  MeterFullRunAsset:
+    'Operator-only physical inventory spans historical owners; read only for bootstrap refusal, never for authorization or tenant-facing reporting.',
   AssetRef:
     "Read-only replica of asset facts, written by the asset-sync consumer with no request context and never consulted for an authorization decision; every access-control answer comes from the verified token and this service's own rows.",
   AssetTransferFence:

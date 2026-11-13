@@ -36,12 +36,15 @@ describe('maintenance event contracts', () => {
     }
   });
 
-  it('every event carries the asset, because that is what consumers attach to', () => {
+  it('asset events carry the asset; the global full-run event has no asset or tenant', () => {
+    const global = MAINTENANCE_EVENT_SCHEMAS.MAINTENANCE_METER_FULL_RUN_ACTIVATED.shape;
+    expect(global).not.toHaveProperty('assetId');
+    expect(global).not.toHaveProperty('organizationId');
     // Not one of these events is about a request in the abstract. Every
     // consumer — the dossier, the fleet replica, notification — reasons about
     // a machine, and `assetId` is also the partition key that keeps a
     // machine's events in order.
-    for (const name of NAMES) {
+    for (const name of NAMES.filter((n) => n !== 'MAINTENANCE_METER_FULL_RUN_ACTIVATED')) {
       const shape = (MAINTENANCE_EVENT_SCHEMAS[name] as { shape: Record<string, unknown> }).shape;
       expect(Object.keys(shape)).toContain('assetId');
       expect(Object.keys(shape)).toContain('organizationId');

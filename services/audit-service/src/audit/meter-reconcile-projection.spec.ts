@@ -52,3 +52,52 @@ it.each([
 it('refuses a meter event on another topic', () => {
   expect(() => toAuditEventRecord(event, { topic: 'rasta.fleet.v1', partition: 0 })).toThrow();
 });
+
+const fullRun = {
+  ...event,
+  eventName: 'MAINTENANCE_METER_FULL_RUN_ACTIVATED',
+  aggregateType: 'MeterFullRun',
+  aggregateId: 'RUN_1',
+  tenantId: undefined,
+  payload: {
+    runId: 'RUN_1',
+    operatorId: 'USR_OPERATOR',
+    before: 'INACTIVE',
+    after: 'ACTIVE',
+    inventoryDigest: 'a'.repeat(64),
+    sourceBoundary: 'OWNER_SEAL',
+    assetCount: 2,
+    refusedCount: 1,
+  },
+} as EventEnvelope;
+it('preserves global activation state and bounded inventory evidence in the audit path', () => {
+  const row = toAuditEventRecord(fullRun, { topic: 'rasta.maintenance.v1', partition: 0 });
+  expect(row.organizationId).toBeNull();
+  expect(row.actorId).toBe('USR_OPERATOR');
+  expect(row.changes).toEqual(
+    expect.arrayContaining([
+      { field: 'state', from: 'INACTIVE', to: 'ACTIVE' },
+      { field: 'inventoryDigest', from: null, to: 'a'.repeat(64) },
+      { field: 'refusedCount', from: null, to: 1 },
+    ]),
+  );
+});
+it.each([
+  { tenantId: 'ORG_A' },
+  { tenantId: null },
+  { aggregateId: 'RUN_OTHER' },
+  { actor: undefined },
+  { producer: 'fleet-service' },
+  { eventVersion: 2 },
+  { aggregateType: 'Asset' },
+  { correlationId: 'OTHER' },
+  { actor: { type: 'USER', id: 'OTHER' } },
+  { payload: { ...(fullRun.payload as object), refusedCount: 3 } },
+])('refuses inconsistent global activation evidence %#', (override) => {
+  expect(() =>
+    toAuditEventRecord({ ...fullRun, ...override } as EventEnvelope, {
+      topic: 'rasta.maintenance.v1',
+      partition: 0,
+    }),
+  ).toThrow('Full-run evidence refused');
+});

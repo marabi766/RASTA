@@ -102,6 +102,8 @@ const pins = {
   'packages/contracts/src/common/text.ts':
     '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
   'packages/contracts/src/index.ts': [
+    // Full-run event exports only; existing callback helper implementations unchanged.
+    '680b32f992d4bb10cf89e3f9805f93fa885ef17acf84da32988423199cf4941c',
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
     'baa12fdedf9e9bfbbeadd2be36f3b97acc62229af37ce9bc3ccdfea5c3e98cf9',
     '262f681400ee96f279f442b5f6d83f821596808ae5b72effa0c588e6875124c9',
