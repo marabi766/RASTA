@@ -151,7 +151,7 @@ export function readShell(
     if (problem) refuse(problem);
     loops += chain.filter((at) => LOOP_STARTS.has(words[at].value)).length;
     state.looped = loops > 0;
-    if (words[chain.at(-1)]?.value === 'done') loops -= 1;
+    if (words[chain.at(-1)]?.source === 'done') loops -= 1;
     const bind = (name) => {
       state.assigned.add(name);
       const unbound = policy.name

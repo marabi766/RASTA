@@ -953,6 +953,13 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
 
   // After a `cd`, only what `&&` joins to it is read as run there: the `cd` ran, and succeeded.
   const [cd, node] = ['cd services/api-gateway', 'node dist/main.js'];
+  // A quoted/escaped command named done closes no loop, even inside a substitution before it.
+  for (const close of ["'done'", '"done"', 'd\\one'])
+    for (const prefix of ['', 'for j in 1 2; do\n'])
+      for (const errors of steps(
+        `${prefix}echo "$(${close})"\nfor i in 1 2; do\n${cd} && ${node}\ndone${prefix ? '\ndone' : ''}`,
+      ))
+        assert.match(errors, form('cd'));
   const unknown = [
     `if [ -d x ]; then ${cd}; fi\n${node}`,
     `${cd} || true\n${node}`,
