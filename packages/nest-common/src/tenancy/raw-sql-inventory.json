@@ -3159,34 +3159,27 @@
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
     "line": 93,
-    "hash": "4ca355b99931809759db9fbbd6d56d84f970e953388a17cf86971b0d292af6a9",
+    "hash": "2a15ae9f18702fdcf26e3ec40708c2b8d4e6f2515db312c071b3c6d1746f01d0",
     "occurrence": 0,
-    "decision": "platform-wide: singleton rollout fence shared by every physical meter writer; no tenant data or authorization decision"
+    "decision": "platform-wide: physical asset meter across historical owners; INSERT trigger determines mode under gate; never used for authorization"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 96,
-    "hash": "348990b698c00ee3f79aba1f8b676a077ea7015b81587218e47814d4b5516f2b",
-    "occurrence": 0,
-    "decision": "platform-wide: physical meter bootstrap under rollout fence; binds input owner, durable marker and physical refusal determine mode only; never authorization"
-  },
-  {
-    "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 104,
+    "line": 98,
     "hash": "42e58ec22ca7ccd7e84c65c16d236ef49b063c66d0c9f04ac61d5566d98c2625",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 129,
+    "line": 123,
     "hash": "1e7f1260f602881d5c4413e6808c4ccbef71c3a98486ed631c76da8afb951a91",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 163,
+    "line": 157,
     "hash": "9685de3810212cfc8dad2935f95a7772a83e5a7b3d66dc2a66126c1bc1589742",
     "occurrence": 0,
     "decision": "platform-wide: calculateLegacyMeter computes numeric constants from the already locked physical meter; no database rows read"
@@ -3228,28 +3221,35 @@
   },
   {
     "file": "services/maintenance-service/src/maintenance/meter-full-run.ts",
-    "line": 101,
+    "line": 75,
+    "hash": "e884652f43bd5c0abc9850165e93683ceb2b2f8a41e55bb892d5494c7379e8f6",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only marker status and activation evidence across physical owners; no per-asset tenant output, ambient tenant context refused"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/meter-full-run.ts",
+    "line": 134,
     "hash": "678a499d718e0b964e0d2d5ef79c52db3b999c74e1667eb26b501e6f087ce3c3",
     "occurrence": 0,
     "decision": "platform-wide: operator-only sealed physical inventory and activation under exclusive rollout fence; source spans historical owners, no tenant-facing output or authorization"
   },
   {
     "file": "services/maintenance-service/src/maintenance/meter-full-run.ts",
-    "line": 121,
+    "line": 154,
     "hash": "b725c26e57df491e84ab13614c46d3638f788a084f46f95c2c11b1d3dfc38651",
     "occurrence": 0,
     "decision": "platform-wide: operator-only sealed physical inventory and activation under exclusive rollout fence; source spans historical owners, no tenant-facing output or authorization"
   },
   {
     "file": "services/maintenance-service/src/maintenance/meter-full-run.ts",
-    "line": 131,
+    "line": 164,
     "hash": "b8f24c126a6bb9ce5173738fa7021a7a1f9d40664a0a7c39fc116cb8e716256e",
     "occurrence": 0,
     "decision": "platform-wide: operator-only sealed physical inventory and activation under exclusive rollout fence; source spans historical owners, no tenant-facing output or authorization"
   },
   {
     "file": "services/maintenance-service/src/maintenance/meter-full-run.ts",
-    "line": 153,
+    "line": 186,
     "hash": "0f27964faf72269df41699294b9bda7e15cd1ff98086989f211601a40e559465",
     "occurrence": 0,
     "decision": "platform-wide: operator-only sealed physical inventory and activation under exclusive rollout fence; source spans historical owners, no tenant-facing output or authorization"

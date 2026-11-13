@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { EventEnvelope } from '@rasta/contracts';
-import { MeterFullRun } from '../src/maintenance/meter-full-run';
+import { MeterFullRun, MeterFullRunRefusal } from '../src/maintenance/meter-full-run';
 import { lockUsageMeter } from '../src/maintenance/usage-meter';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -16,6 +16,7 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
   const owner = new PrismaService(ownerUrl);
   runtimeUrl.searchParams.set('schema', schema);
   runtimeUrl.searchParams.set('application_name', schema);
+  runtimeUrl.searchParams.set('connection_limit', '12');
   const prisma = new PrismaService(runtimeUrl.toString());
   const repository = new MaintenanceRepository(prisma);
   const actor = 'USR_METER_OPERATOR';
@@ -28,7 +29,7 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
   });
   const command = (value: unknown = inventory([])) =>
     new MeterFullRun(prisma, {
-      withSealedInventory: async (fn) => fn(value),
+      withSealedInventory: async (_runId, fn) => fn(value),
     });
   function latch() {
     let release!: () => void;
@@ -53,6 +54,11 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       await owner.client.$executeRawUnsafe(
         `CREATE TABLE "${schema}"."${table}" (LIKE public."${table}" INCLUDING ALL)`,
       );
+    // LIKE does not copy triggers. Exercise the actual migrated PostgreSQL function.
+    await owner.client.$executeRawUnsafe(
+      `CREATE TRIGGER usage_meter_insert_fence BEFORE INSERT ON "${schema}".asset_usage_meter
+       FOR EACH ROW EXECUTE FUNCTION public.set_usage_meter_source()`,
+    );
     const role = decodeURIComponent(runtimeUrl.username).replaceAll('"', '""');
     await owner.client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`);
     await owner.client.$executeRawUnsafe(
@@ -77,8 +83,8 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       const [row] = await prisma.client.$queryRaw<{ waiting: boolean }[]>`
         SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
           AND pid <> pg_backend_pid() AND application_name = ${schema} AND wait_event_type = 'Lock'
-          AND query LIKE '%FROM meter_full_run WHERE id = true%'
-          AND position(${statement} in query) > 0) AS waiting`;
+          AND CASE WHEN ${statement} = 'FOR SHARE' THEN query LIKE '%INSERT INTO asset_usage_meter%'
+            ELSE query LIKE '%FROM meter_full_run WHERE id = true FOR UPDATE%' END) AS waiting`;
       return row.waiting;
     });
   }
@@ -88,7 +94,9 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       finish = latch();
     const first = prisma.transaction(
       async (tx) => {
-        await lockUsageMeter(tx, { assetId, organizationId: org.b, now: new Date() });
+        // Simulate an old image or future writer, bypassing lockUsageMeter.
+        await tx.$executeRaw`INSERT INTO asset_usage_meter(asset_id, organization_id, updated_at)
+          VALUES (${assetId}, ${org.b}, ${new Date()})`;
         locked.release();
         await finish.ready;
       },
@@ -245,15 +253,173 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     await expect(c.activate(runId, 'OTHER_OPERATOR', [])).rejects.toThrow('FULL_RUN_CONFLICT');
     await expect(
       c.activate(runId, actor, [{ assetId, reason: 'HISTORY_UNKNOWN' }]),
-    ).rejects.toThrow('FULL_RUN_CONFLICT');
+    ).rejects.toThrow('ALREADY_ACTIVE_INVENTORY_DRIFT');
     const releaseLost = new MeterFullRun(prisma, {
-      withSealedInventory: async (fn) => {
+      withSealedInventory: async (_runId, fn) => {
         await fn(inventory([{ assetId, organizationId: org.a }]));
         throw new Error('owner release lost');
       },
     });
     await expect(releaseLost.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
     expect(await eventRows()).toHaveLength(1);
+  });
+  it('measures the hot gate under eight concurrent folds and an exclusive activation waiter', async () => {
+    const assets = Array.from({ length: 8 }, () => ({ assetId: id('AST'), organizationId: org.a }));
+    const finish = latch();
+    const started = performance.now();
+    const ready = assets.map(() => latch());
+    const folds = assets.map(({ assetId }, index) =>
+      asActor({ organizationId: org.a }, () =>
+        prisma.transaction(
+          async (tx) => {
+            await repository.foldUsageIntoMeter(
+              tx,
+              {
+                assetId,
+                organizationId: org.a,
+                usageRecordId: id('USG'),
+                hoursDelta: '1',
+                kilometresDelta: '0',
+                reportedHourMeter: null,
+                reportedOdometer: null,
+                periodStart: new Date('2026-01-01Z'),
+                periodEnd: new Date('2026-01-02Z'),
+                now: new Date(),
+              },
+              id('EVT'),
+              'hot-gate-measurement',
+            );
+            ready[index].release();
+            await finish.ready;
+          },
+          { timeoutMs: 30_000 },
+        ),
+      ),
+    );
+    const completed = Promise.all(folds);
+    let activation: Promise<string> | undefined;
+    let foldsReadyMs = 0,
+      waiterObservedMs = 0;
+    try {
+      await Promise.race([Promise.all(ready.map((r) => r.ready)), completed]);
+      foldsReadyMs = performance.now() - started;
+      activation = command(inventory(assets)).activate(
+        runId,
+        actor,
+        assets.map(({ assetId }) => ({ assetId, reason: 'LEGACY_HISTORY' })),
+      );
+      await blocked('FOR UPDATE');
+      waiterObservedMs = performance.now() - started;
+    } finally {
+      finish.release();
+    }
+    await completed;
+    expect(await activation).toBe(runId);
+    // Measurements are diagnostics, not timing assertions or production SLO claims.
+    process.stdout.write(
+      JSON.stringify({
+        hotGateFolds: assets.length,
+        foldsReadyMs,
+        waiterObservedMs,
+        totalMs: performance.now() - started,
+      }) + '\n',
+    );
+    expect(await command().status(runId, actor)).toMatchObject({ assetCount: 8, refusedCount: 8 });
+  });
+  it('re-serves the run seal after response loss and source drift; status remains readable without authority', async () => {
+    const seals = new Map<string, unknown>();
+    let source = inventory([]);
+    const requestedRuns: string[] = [];
+    const authority = {
+      withSealedInventory: async <T>(
+        key: string,
+        fn: (value: unknown) => Promise<T>,
+      ): Promise<T> => {
+        requestedRuns.push(key);
+        if (!seals.has(key)) seals.set(key, source);
+        const result = await fn(seals.get(key));
+        if (seals.size === 1 && source.assets.length === 0) throw new Error('lost release');
+        return result;
+      },
+    };
+    const c = new MeterFullRun(prisma, authority);
+    const reader = new MeterFullRun(prisma);
+    expect(await reader.status(runId, actor)).toBeNull();
+    await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
+    const stored = await reader.status(runId, actor);
+    expect(stored).toEqual({
+      runId,
+      inventoryDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      sourceBoundary: 'TEST_OWNER_SEAL',
+      assetCount: 0,
+      refusedCount: 0,
+    });
+    source = {
+      ...inventory([{ assetId: id('AST'), organizationId: org.b }]),
+      boundary: 'NEW_BOUNDARY',
+    };
+    expect(await c.activate(runId, actor, [])).toBe(runId);
+    expect(requestedRuns).toEqual([runId, runId]);
+    await expect(command(source).activate(runId, actor, [])).rejects.toThrow(
+      'ALREADY_ACTIVE_INVENTORY_DRIFT',
+    );
+    await expect(reader.status(runId, 'OTHER_OPERATOR')).rejects.toThrow('FULL_RUN_CONFLICT');
+    await expect(reader.status(id('RUN'), actor)).rejects.toThrow('FULL_RUN_CONFLICT');
+    await expect(
+      asActor({ organizationId: org.b }, () => reader.status(runId, actor)),
+    ).rejects.toThrow('OPERATOR_CONTEXT_REQUIRED');
+    expect(await reader.status(runId, actor)).toEqual(stored);
+    expect(await eventRows()).toHaveLength(1);
+  });
+  it('database overrides omitted and explicit modes, including seed/model writes and a missing gate', async () => {
+    const refusedId = id('AST');
+    await command(inventory([{ assetId: refusedId, organizationId: org.a }])).activate(
+      runId,
+      actor,
+      [{ assetId: refusedId, reason: 'HISTORY_UNKNOWN' }],
+    );
+    for (const mode of [null, 'LEGACY', 'LEDGER']) {
+      const assetId = id('AST');
+      await prisma.client
+        .$executeRaw`INSERT INTO asset_usage_meter(asset_id, organization_id, updated_at, meter_source)
+        VALUES (${assetId}, ${org.b}, ${new Date()}, ${mode})`;
+      expect((await bootstrap(assetId)).meter_source).toBe('LEDGER');
+    }
+    await seedMeter(prisma, id('AST'), org.b, '0');
+    await seedMeter(prisma, refusedId, org.b, '0');
+    expect((await bootstrap(refusedId, org.b)).meter_source).toBe('LEGACY');
+    expect(await command().status(runId, actor)).toMatchObject({ assetCount: 1, refusedCount: 1 });
+    await prisma.client.$executeRaw`DELETE FROM meter_full_run`;
+    await expect(prisma.client
+      .$executeRaw`INSERT INTO asset_usage_meter(asset_id, organization_id, updated_at)
+      VALUES (${id('AST')}, ${org.b}, ${new Date()})`).rejects.toThrow('FULL_RUN_GATE_MISSING');
+    await expect(command().status(runId, actor)).rejects.toThrow('FULL_RUN_GATE_MISSING');
+  });
+  it('reports definite pool/statement/callback-timeout failures as named precommit refusals', async () => {
+    const pool = jest.spyOn(prisma, 'transaction').mockRejectedValueOnce(new Error('pool wait'));
+    await expect(command().activate(runId, actor, [])).rejects.toBeInstanceOf(MeterFullRunRefusal);
+    pool.mockRestore();
+    for (const failure of ['statement', 'timeout']) {
+      const fail = jest
+        .spyOn(MaintenanceRepository.prototype, 'enqueueEvent')
+        .mockImplementationOnce(async (tx) => {
+          if (failure === 'statement') await tx.$executeRaw`SELECT 1/0`;
+          else {
+            await tx.$executeRaw`SET LOCAL statement_timeout = '10ms'`;
+            await tx.$executeRaw`SELECT pg_sleep(1)`;
+          }
+          throw new Error('unreachable');
+        });
+      try {
+        await expect(command().activate(runId, actor, [])).rejects.toThrow(
+          'FULL_RUN_PRECOMMIT_FAILED',
+        );
+      } finally {
+        fail.mockRestore();
+      }
+      expect(await command().status(runId, actor)).toBeNull();
+      expect(await eventRows()).toHaveLength(0);
+    }
   });
   it('rollback after enqueue leaves no marker, inventory or audit event; missing fence never defaults', async () => {
     const transaction = prisma.transaction.bind(prisma);

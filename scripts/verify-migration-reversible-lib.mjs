@@ -4597,7 +4597,8 @@ export const EXPECTED = {
       'processed_event',
       'repair_order',
     ],
-    triggers: [],
+    triggers: ['usage_meter_insert_fence'],
+    functions: ['set_usage_meter_source'],
     indexes: ['asset_usage_entry_asset_id_period_end_idx', 'asset_usage_entry_organization_id_idx'],
     constraints: [
       'ck_cost_provenance',

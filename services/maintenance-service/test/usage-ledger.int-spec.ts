@@ -63,6 +63,10 @@ describe('ADR-073 usage ledger', () => {
     await prisma.client.$executeRaw`
       INSERT INTO asset_usage_meter(asset_id, organization_id, meter_source, hour_meter, odometer, updated_at)
       VALUES (${assetId}, ${org.a}, ${source}, ${value}::numeric, ${value}::numeric, NOW())`;
+    // The INSERT trigger owns first mode; this fixture represents an existing
+    // meter already switched by a verified per-asset reconciliation.
+    await prisma.client.$executeRaw`UPDATE asset_usage_meter SET meter_source = ${source}
+      WHERE asset_id = ${assetId} AND organization_id = ${org.a}`;
     return assetId;
   }
   const apply = (e: EventEnvelope) =>

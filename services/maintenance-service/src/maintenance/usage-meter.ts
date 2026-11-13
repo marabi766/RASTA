@@ -88,17 +88,11 @@ export async function lockUsageMeter(
   return runUnscoped(
     'physical usage meter spans asset owners; not used for authorization',
     async () => {
-      // Held to commit, also on existing meters: activation sees every earlier
-      // LEGACY bootstrap; later bootstraps observe its durable marker/refusals.
-      const [gate] = await tx.$queryRaw<{ run_id: string | null }[]>`
-        SELECT run_id FROM meter_full_run WHERE id = true FOR SHARE`;
-      if (!gate) throw new Error('FULL_RUN_GATE_MISSING');
+      // PostgreSQL's BEFORE INSERT trigger owns the mode decision and gate lock,
+      // including ON CONFLICT and writers running an older application image.
       await tx.$executeRaw`
-      INSERT INTO asset_usage_meter(asset_id, organization_id, updated_at, meter_source)
-      SELECT ${input.assetId}, ${input.organizationId}, ${input.now},
-        CASE WHEN ${gate.run_id}::text IS NOT NULL AND NOT EXISTS (
-          SELECT 1 FROM meter_full_run_asset WHERE asset_id = ${input.assetId} AND outcome = 'REFUSED'
-        ) THEN 'LEDGER' ELSE 'LEGACY' END
+      INSERT INTO asset_usage_meter(asset_id, organization_id, updated_at)
+      VALUES (${input.assetId}, ${input.organizationId}, ${input.now})
       ON CONFLICT (asset_id) DO NOTHING
     `;
       const [meter] = await tx.$queryRaw<LockedUsageMeter[]>`
