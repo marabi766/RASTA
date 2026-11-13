@@ -20,6 +20,7 @@ export type MaintenancePayload<N extends MaintenanceEventName> = z.infer<
 
 /** The aggregate each event is *about*, which is not what orders it. */
 export const AGGREGATE_OF = {
+  MAINTENANCE_METER_FULL_RUN_ACTIVATED: 'MeterFullRun',
   MAINTENANCE_METER_RECONCILED: 'AssetUsageMeter',
   MAINTENANCE_DUE: 'MaintenanceSchedule',
   BREAKDOWN_REPORTED: 'MaintenanceRequest',
@@ -37,7 +38,7 @@ export const AGGREGATE_OF = {
   REPAIR_COST_RECORDED: 'RepairOrder',
 } as const satisfies Record<MaintenanceEventName, string>;
 
-export const PARTITION_SCOPES = { ASSET: 'ASSET' } as const;
+export const PARTITION_SCOPES = { ASSET: 'ASSET', PLATFORM: 'PLATFORM' } as const;
 export type PartitionScope = (typeof PARTITION_SCOPES)[keyof typeof PARTITION_SCOPES];
 
 export interface PartitionDecision {
@@ -52,8 +53,8 @@ type PartitionRule<N extends MaintenanceEventName> = (
 /**
  * The one place a maintenance event's Kafka key is decided.
  *
- * **Every maintenance event is asset-scoped**, and that uniformity is the
- * point rather than an accident. A machine's maintenance history is one story:
+ * **Asset maintenance events are asset-scoped**; the global full-run activation
+ * uses its own platform stream. Asset ordering follows one physical machine. A machine's maintenance history is one story:
  * reported → created → assigned → started → repaired → completed → approved.
  * A consumer rebuilding it must see those in order, and Kafka guarantees order
  * within a partition and nowhere else. Keying by request or repair-order id
@@ -72,6 +73,10 @@ type PartitionRule<N extends MaintenanceEventName> = (
  * holds that line so nobody later infers a guarantee that was never made.
  */
 export const PARTITION_KEY_POLICY: { [N in MaintenanceEventName]: PartitionRule<N> } = {
+  MAINTENANCE_METER_FULL_RUN_ACTIVATED: () => ({
+    scope: 'PLATFORM',
+    key: 'maintenance-meter-full-run',
+  }),
   MAINTENANCE_METER_RECONCILED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   MAINTENANCE_DUE: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   BREAKDOWN_REPORTED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),

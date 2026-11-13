@@ -804,3 +804,26 @@ model ProcessedEvent {
   @@index([processedAt])
   @@map("processed_event")
 }
+
+/// Global operator-only rollout fence; never an authorization source.
+model MeterFullRun {
+  id              Boolean   @id
+  runId           String?   @unique @map("run_id")
+  operatorId      String?   @map("operator_id")
+  inventoryDigest String?   @map("inventory_digest")
+  sourceBoundary  String?   @map("source_boundary")
+  activatedAt     DateTime? @map("activated_at")
+
+  @@map("meter_full_run")
+}
+
+/// Immutable activation inventory, including explicit physical-asset refusals.
+model MeterFullRunAsset {
+  assetId        String  @id @map("asset_id")
+  organizationId String  @map("organization_id")
+  outcome        String
+  refusal        String?
+
+  @@index([organizationId])
+  @@map("meter_full_run_asset")
+}

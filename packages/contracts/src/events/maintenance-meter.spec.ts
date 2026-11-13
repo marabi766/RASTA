@@ -1,4 +1,7 @@
-import { maintenanceMeterReconciledPayloadV1 } from './maintenance-meter';
+import {
+  maintenanceMeterFullRunPayloadV1,
+  maintenanceMeterReconciledPayloadV1,
+} from './maintenance-meter';
 
 const state = {
   mode: 'LEDGER',
@@ -29,4 +32,26 @@ it('accepts a bounded transition and refuses missing identity, evidence, noncano
     { ...payload, extra: 'private' },
   ])
     expect(maintenanceMeterReconciledPayloadV1.safeParse(bad).success).toBe(false);
+});
+
+it('validates bounded global full-run evidence without inventing an asset or tenant', () => {
+  const p = {
+    runId: 'RUN_1',
+    operatorId: 'USR_1',
+    before: 'INACTIVE',
+    after: 'ACTIVE',
+    inventoryDigest: 'a'.repeat(64),
+    sourceBoundary: 'OWNER_SEAL',
+    assetCount: 1,
+    refusedCount: 1,
+  };
+  expect(maintenanceMeterFullRunPayloadV1.parse(p)).toEqual(p);
+  for (const bad of [
+    { ...p, refusedCount: 2 },
+    { ...p, assetCount: 20_001 },
+    { ...p, operatorId: '' },
+    { ...p, sourceBoundary: 'a\nb' },
+    { ...p, after: 'INACTIVE' },
+  ])
+    expect(maintenanceMeterFullRunPayloadV1.safeParse(bad).success).toBe(false);
 });

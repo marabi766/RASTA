@@ -32,3 +32,19 @@ export const maintenanceMeterReconciledPayloadV1 = z
     operatorId: meterReconcileOperatorSchema,
   })
   .strict();
+
+export const MAINTENANCE_METER_FULL_RUN_ACTIVATED = 'MAINTENANCE_METER_FULL_RUN_ACTIVATED';
+export const MAINTENANCE_METER_FULL_RUN_ACTIVATED_VERSION = 1;
+export const maintenanceMeterFullRunPayloadV1 = z
+  .object({
+    runId: identifier,
+    operatorId: meterReconcileOperatorSchema,
+    before: z.literal('INACTIVE'),
+    after: z.literal('ACTIVE'),
+    inventoryDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    sourceBoundary: z.string().regex(/^[!-~]{1,256}$/),
+    assetCount: z.number().int().nonnegative().max(20_000),
+    refusedCount: z.number().int().nonnegative().max(20_000),
+  })
+  .strict()
+  .refine((p) => p.refusedCount <= p.assetCount);

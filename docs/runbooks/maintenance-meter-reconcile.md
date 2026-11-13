@@ -114,3 +114,67 @@ markers or run schema down: arrival-order folding can double-count covered or
 replayed usage. Pause rollout, preserve evidence, repair source/delivery issues,
 and rerun verified apply. Full rollout still requires the separately persisted
 marker and its first-meter race proof; this PR neither writes nor infers it.
+
+## Full-run activation acceptance contract (implementation still blocked)
+
+The full-run follow-up must persist its authoritative inventory, per-asset
+outcomes and explicit refusals before activating a durable marker. The local
+replica scan, a collection of per-asset certificates, an empty tenant report
+and a zero gauge cannot establish inventory exhaustion. An unavailable or
+unproven owner inventory must refuse activation, including after restart.
+Historical/transferred source usage and local orphan meters must be accounted
+for; the owner inventory must define which concurrent asset creations belong
+to the run. No operator flag may substitute for that proof.
+
+Activation must recheck durable modes and outcomes while serialized against
+every production first-meter insertion. Prove both PostgreSQL race orders:
+an earlier LEGACY insertion is included in the final check or blocks activation;
+an insertion following activation observes the committed marker. An explicitly
+refused pre-existing asset must retain its LEGACY treatment even if its first
+meter is created later. Only proven new assets may start LEDGER. Unknown apply
+results require durable reconciliation and must not silently become refusals.
+
+The serialization must preserve the existing fact-insert-before-meter-lock
+order and both r3 regressions (102, never 104). Test restart, lost activation
+responses, explicit refusals and unavailable inventory against real PostgreSQL.
+The full-run marker and each per-asset cutover also require transactional audit
+evidence; a conditional MAINTENANCE_DUE announcement is not cutover evidence.
+
+After activation, rollback retains the inventory, refusals, marker, ledger facts,
+processed-event markers and transactional cutover evidence. Keep a LEDGER-aware
+image that also honors the marker and refused-asset bootstrap rules. If no such
+image is available, pause rollout instead of resetting modes, removing the
+marker or running schema down. Gauge zero remains an additional rollout check,
+never authority to activate or erase the marker.
+
+## Full-run marker foundation (not operational rollout)
+
+The `MeterFullRun` operator primitive persists the sealed inventory, explicit
+refusals, marker and `MAINTENANCE_METER_FULL_RUN_ACTIVATED` outbox evidence in one
+transaction. The shared `meter_full_run` row fences every production first-meter
+path; activation takes its exclusive lock before the final completeness check.
+Refused physical assets remain LEGACY on first creation even after an ownership
+change. Unseen assets start LEDGER only after the durable marker commits.
+Missing fence state refuses processing; gauge zero never activates anything.
+
+This slice has **no production inventory authority or CLI activation path**.
+The constructor without an authority refuses `AUTHORITATIVE_INVENTORY_REQUIRED`.
+The stacked follow-up must implement the trusted owner adapter's
+`withSealedInventory` contract: all physical assets, historical/transferred fleet
+usage and a fenced future-creation boundary held through maintenance commit.
+A caller manifest, replica pagination or per-asset certificates cannot implement
+that contract. The PostgreSQL tests inject a synthetic sealed inventory to test
+the maintenance transaction and races; they do not prove source completeness.
+The activation inventory is persisted atomically, not a resumable progress log;
+source sealing, durable pre-activation progress/refusals and CLI reporting remain
+in the follow-up. Sealed inventories and explicit refusal lists are capped at
+20,000 assets; overflow refuses activation without truncation. Until then keep
+operational rollout disabled.
+
+Operator IDs use the same configured, self-asserted identity as per-asset apply;
+they are attributable operational configuration, not identity-service verification.
+The global activation audit event has no tenant and does not disclose the
+per-asset inventory. No tenant request may invoke the global primitive.
+After activation, schema-down refuses `ACTIVE_METER_FULL_RUN_ROLLBACK_REFUSED`.
+Retain the marker, refusal inventory, facts, processed markers and outbox;
+rollback only to an image honoring the creation fence and refusals.

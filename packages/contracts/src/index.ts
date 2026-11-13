@@ -374,6 +374,9 @@ export {
 export type { MeterCertificate, MeterCertificateFact } from './common/meter-certificate';
 
 export {
+  MAINTENANCE_METER_FULL_RUN_ACTIVATED,
+  MAINTENANCE_METER_FULL_RUN_ACTIVATED_VERSION,
+  maintenanceMeterFullRunPayloadV1,
   MAINTENANCE_METER_RECONCILED,
   MAINTENANCE_METER_RECONCILED_VERSION,
   maintenanceMeterReconciledPayloadV1,

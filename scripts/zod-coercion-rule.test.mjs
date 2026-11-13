@@ -470,7 +470,8 @@ it('FU-181 refuses the stale partial contracts barrel', () => {
     writeFileSync(barrel, stale);
     assert.equal(
       createHash('sha256').update(stale).digest('hex'),
-      'c00b540de2dbd5520aa889fc345fbd6b5cf7385f7a1b57eecee5731eebd13877',
+      // Only the three full-run event exports changed this derived stale fixture.
+      'a8bbbe1698b2326c18928a8a80353ed1b07cf0bde4da8068ac3e43b15ecae20f',
     );
     assert.equal(imported(root, '@rasta/contracts', 'isoDateTime'), undefined);
   } finally {
