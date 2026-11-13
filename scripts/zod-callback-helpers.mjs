@@ -119,6 +119,8 @@ const pins = {
     '0d7a692210ab8c4f739096703984e7253fa3019a63f7c99049666348f2835238',
     // CI/main synchronization: exact union of FU-181 and the maintenance replay constant.
     '83991df34a484819959e3e747235a462e0f4e4a6d5c59812dfa60821a1ae036e',
+    // EXP-007 meter certificate exports only; existing plainText/ISO helper exports are unchanged.
+    'c134937c8332f6b4fb81fb885fddf5ae2e0081ca878bcb4e883fcfa9ba455569',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
