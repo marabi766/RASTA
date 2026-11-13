@@ -71,10 +71,18 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
-import { productionFiles, readSchemas, sqlLiterals, SOURCE, SPEC } from './eligibility-clock-derive.mjs';
-import { sqlSinkTexts, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
+import { productionFiles, readSchemas, sqlLiterals, SOURCE } from './eligibility-clock-derive.mjs';
+import { isMap, LineCounter, parseDocument, visit } from 'yaml';
+import { psqlSql, sqlSinkTexts, SQL_CLI, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
+import { tokenizeShell } from './check-dockerfile-pins-lib.mjs';
 import { lex as lexSql, PLACEHOLDER, stripComments } from './eligibility-clock-sql.mjs';
+
+const SQL_CLI_WORD = /\b(?:psql|pgbench)\b/;
+const INVENTORY = 'scripts/opaque-sql-sinks.json';
+/** What a file holds when it can execute SQL: a raw API, the pg driver, a SQL CLI; or a call of the name. */
+const SINK_WORD = /(?:query|execute)Raw|['"]pg['"]|\b(?:psql|pgbench)\b/;
+const SINK_CALL = /\b(?:query|execute)['"\]]*\s*(?:<[^>\n]*>)?\s*[(`]/;
 
 const CALLS = new Set(['now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp']);
 const KEYWORD_CLOCK = 'current_timestamp';
@@ -1888,16 +1896,33 @@ export function schemaDisagreements(repository, perService) {
 const [CONFLICT, CONFLICT_NAMED] = [Symbol('variable_conflict'), /variable_conflict/i];
 const unknownAt = (t) => (t?.type === 'placeholder' && t.value === 'text') || t?.unterminated === true;
 const lockAt = (tokens, i) => isWord(tokens[i], 'for') && isWord(tokens[i + 1], 'update', 'no', 'share', 'key');
-const STATEMENT =
-  /^(?:select|update|delete|insert|merge|create|alter|drop|do|begin|declare)\b|^values\s*\(|^with\s+(?:recursive\s+)?(?:[\w$]+|"[^"]+")\s+as\b/i;
+const STATEMENT = /^(?:select|update|delete|insert|merge|create|alter|drop|do|begin|declare)\b|^values\s*\(/i;
+/**
+ * FU-333: the name of the CTE whose AS is tokens[as], as an index, or -1. `name AS` and
+ * `name (column, …) AS` are one form: the optional list is read as PostgreSQL reads it (names
+ * between commas, not empty); a list that is anything else names no CTE.
+ */
+function cteName(tokens, as) {
+  let at = as - 1;
+  if (isOp(tokens[at], ')')) {
+    for (at -= 1; nameOf(tokens[at]) !== null && isOp(tokens[at - 1], ','); at -= 2);
+    if (nameOf(tokens[at]) === null || !isOp(tokens[at - 1], '(')) return -1;
+    at -= 2;
+  }
+  const follows = isWord(tokens[at - 1], 'with', 'recursive') || isOp(tokens[at - 1], ',');
+  return isWord(tokens[as], 'as') && nameOf(tokens[at]) !== null && follows ? at : -1;
+}
 /**
  * A text read as executed: for what it holds (FU-325: the tokens every locking picker needs) or,
  * as origin/main did, for its statement head. Either only adds texts: none is left unread (r1 F1).
  */
 const executed = (text) => {
-  if (STATEMENT.test(stripComments(text).trim())) return true;
-  if (!/\b(?:select|table)\b/i.test(text) || !/\bfor\b/i.test(text)) return false;
-  const tokens = lex(text);
+  const head = stripComments(text).trim();
+  if (STATEMENT.test(head)) return true;
+  const tokens = /^with\b/i.test(head) || (/\b(?:select|table)\b/i.test(text) && /\bfor\b/i.test(text)) ? lex(text) : [];
+  // WITH [RECURSIVE] name [(columns)] AS: the head of a statement, with or without the list.
+  const as = tokens.findIndex((t) => isWord(t, 'as'));
+  if (isWord(tokens[0], 'with') && as > 0 && cteName(tokens, as) === (isWord(tokens[1], 'recursive') ? 2 : 1)) return true;
   // A fragment that starts or ends inside a quote hides its tokens from the lexer: read as text.
   return tokens.some((_, i) => lockAt(tokens, i)) ||
     (tokens.some((t) => t.unterminated) && /\bfor(?:\s|--[^\n\r]*|\/\*[^]*?\*\/)+(?:update|share|no|key)\b/i.test(text));
@@ -2077,66 +2102,226 @@ export function claimSubqueryProblems(sql, seen = new Set(), strict = true, bloc
     // CTEs containing row locks cannot be inlined by PostgreSQL. A derived
     // FROM/USING/JOIN or membership picker has no such evaluation boundary.
     const as = isWord(tokens[i - 1], 'materialized') ? i - 2 : i - 1;
-    const cte =
-      isWord(tokens[as], 'as') &&
-      nameOf(tokens[as - 1]) !== null &&
-      (isWord(tokens[as - 2], 'with', 'recursive') || isOp(tokens[as - 2], ','));
-    if (!cte) return refuse;
+    if (cteName(tokens, as) < 0) return refuse;
   }
   return [];
 }
 
-function claimFileProblems(repository) {
-  const problems = [];
-  for (const path of authoredFiles(repository)) {
-    const local = relative(repository, path);
-    if (
-      !/\.(?:sql|[cm]?[jt]sx?|sh|bash)$/.test(local) ||
-      /(?:^|\/)(?:test|tests|__tests__|e2e|fixtures)\/|\.(?:spec|test|int-spec|e2e-spec)\./.test(
-        local,
-      )
+/**
+ * The inventory key of an execution site: its file, its callee and the SHA-256 of its exact
+ * expression (the call of a raw API; the argv or the call a SQL CLI is named in; a shell
+ * command's lines), whitespace runs as one space. Not its line: an edit elsewhere moves that.
+ */
+export const siteKey = (file, sink, expression) =>
+  `${file}:${sink}:sha256:${sha256(expression.replace(/\s+/g, ' ').trim())}`;
+
+const TEST_PATH = /(?:^|\/)(?:test|tests|__tests__|e2e|fixtures)\/|\.(?:spec|test|int-spec|e2e-spec)\./;
+const EXPANSION = /\\([\\"$`])|\\\n|\$\{[^}]*\}|\$\w+|\$[@*#?!$-]|\$(?=\()|`/g;
+const expanded = (raw) => raw.replace(EXPANSION, (m, kept) => kept ?? (m === '\\\n' ? '' : UNKNOWN_SQL));
+/** A shell word as its command receives it: every expansion is unknown text. */
+const shellText = (word) =>
+  word.segments
+    .map(({ kind, raw }) =>
+      kind === 'sq' ? raw : kind === 'esc' ? raw.slice(1) : kind === 'dq' || kind === 'bare' ? expanded(raw) : UNKNOWN_SQL,
     )
+    .join('');
+
+/** What changes the directory a relative path is read from, or runs text that may: a script naming one proves no directory. */
+const MOVES = /(?<![\w$./-])(?:cd|pushd|popd|chroot|eval|source|\.)(?![\w./-])/;
+/**
+ * FU-325: every execution of a SQL CLI in shell text, as `{ line, text, command }`: the SQL it is
+ * given (`-c` in any spelling, a here-string, the here-document it reads), or null when this
+ * cannot read it (a pipe, a word of unknown content, shell text that does not tokenize);
+ * `command` is the source of the lines the command stands on, with the here-document it reads.
+ * PR #1109 r1 F1: a site is a WORD that is the program's name, wherever it stands; a word that
+ * only names it (`"${PSQL:-psql}"`) is a site this does not read, and so is a CLI that is not
+ * its command's first word: the program in front (`docker exec`, `xargs`, `sudo`) decides what
+ * it receives and where it runs. F2: the input is the one the CLI receives or it is not read.
+ * A file: only where `read` is given (the caller proves the directory the text runs in), the
+ * script changes no directory and the path is a plain relative one. Standard input: only the
+ * command's ONE `<<<` or `<<`, on descriptor 0, with no other `<` on its lines.
+ */
+export function cliSqlSites(script, read = null, line = 0, depth = 0) {
+  let parsed;
+  try {
+    if (depth > 4) throw new Error('nested too deeply');
+    parsed = tokenizeShell(script);
+  } catch {
+    return [{ line, text: null, command: script }];
+  }
+  const lines = script.split('\n');
+  const mentions = (text) => SQL_CLI_WORD.test(text);
+  const here = read && !MOVES.test(script) ? read : null;
+  const sites = parsed.nested
+    .filter((inner) => mentions(inner.script))
+    .flatMap((inner) => cliSqlSites(inner.script, inner.shell ? null : here, line + inner.line, depth + 1));
+  for (const { words, input, startLine, endLine } of parsed.commands) {
+    const at = words.findIndex(({ value }) => SQL_CLI.test(value));
+    let command = lines.slice(startLine, endLine + 1).join('\n');
+    if (at < 0) {
+      // `bash -c "psql …"`, `ssh host "psql …"`: a word that is shell text of its own, run from
+      // a directory this does not follow. One that names a CLI and holds no command is not read.
+      for (const word of words.filter(({ value }) => mentions(value))) {
+        const inner = cliSqlSites(shellText(word), null, line + startLine, depth + 1);
+        sites.push(...(inner.length ? inner : [{ line: line + startLine, text: null, command }]));
+      }
       continue;
+    }
+    const argv = words.slice(at + 1).map((word) => (word.split ? undefined : shellText(word)));
+    const first = words.slice(0, at).every(({ value }) => /^(?:[A-Za-z_]\w*=.*|if|then|else|elif|do|while|until|!|\{)$/s.test(value));
+    const found = first && SQL_CLI.exec(words[at].value)[1] ? psqlSql(argv) : null;
+    const runs = [...command.matchAll(/(^|[^<])(<+)/g)];
+    const stdin = () => {
+      // `0>&3` makes descriptor 3 the standard input as `<&3` does.
+      if (runs.length !== 1 || /\S/.test(runs[0][1]) || /(?:^|\s)0>/.test(command)) return null;
+      if (runs[0][2] === '<<<') return input.hereString?.segments ? shellText(input.hereString) : null;
+      // The delimiter is the whole word: `<<'END SQL'` does not end at a line `END`.
+      const mark = /^\s?<<(-?)\s*(?:(['"])([\w.-]+)\2|(\\?)([\w.-]+))(?=[\s;|&>)]|$)/.exec(command.slice(runs[0].index)) ?? [];
+      const [strip, quoted, tag] = [mark[1], mark[2] ?? mark[4], mark[3] ?? mark[5]];
+      const stop = lines.findIndex((l, i) => i > endLine && (strip ? l.replace(/^\t+/, '') : l) === tag);
+      if (!input.hereDocument || runs[0][2] !== '<<' || stop < 0) return null;
+      const body = lines.slice(endLine + 1, stop).join('\n');
+      command = lines.slice(startLine, stop + 1).join('\n');
+      return quoted ? body : expanded(body);
+    };
+    const file = (name) => (here && /^[\w.][\w./-]*$/.test(name) ? here(name) : null);
+    const texts = !found ? [null] : found.length === 0 ? [stdin()]
+      : found.map(({ at: k, text, file: name }) => (name !== undefined ? (name === '-' ? stdin() : file(name)) : (text ?? argv[k] ?? null)));
+    for (const text of texts) sites.push({ line: line + startLine, text, command });
+  }
+  return sites;
+}
+
+/**
+ * The shell texts of a file: itself, or each YAML scalar that mentions a SQL CLI (a `run:` block).
+ * r1 F2 `moved`: nothing proves the text starts in the repository: it is a script file (run
+ * where its caller stands), not the `run` of a step, a map above it sets a directory
+ * (`working-directory`, `defaults`, a merge key), it or a node above it is anchored (an alias
+ * runs it in another place), or a checkout of the document has a `path` (the repository is not
+ * at the root). YAML that is no workflow is not read at all (see `rewritten`).
+ */
+function shellScripts(local, source) {
+  if (!/\.ya?ml$/.test(local)) return [{ script: source, moved: true, line: 0 }];
+  const lineCounter = new LineCounter();
+  const doc = parseDocument(source, { lineCounter, uniqueKeys: false });
+  if (doc.errors.length) return null;
+  const scripts = [];
+  let relocated = false;
+  visit(doc, {
+    Map(_, map) { relocated ||= /checkout/.test(String(map.get('uses'))) && isMap(map.get('with')) && map.get('with').has('path'); },
+  });
+  visit(doc, {
+    Scalar(key, { value, range, type, anchor }, path) {
+      const moved = relocated || anchor || key !== 'value' || path.at(-1).key?.value !== 'run' ||
+        path.some((above) => above.anchor || (isMap(above) && ['working-directory', 'defaults', '<<'].some((set) => above.has(set))));
+      if (typeof value === 'string' && SQL_CLI_WORD.test(value))
+        scripts.push({ script: value, moved, line: lineCounter.linePos(range[0]).line - (/^BLOCK/.test(type) ? 0 : 1) });
+    },
+  });
+  return scripts;
+}
+
+// psql meta-commands that run no SQL of their own; any other one (\i, \gexec, \copy) is not read.
+const PSQL_INERT = ['set', 'unset', 'connect', 'c', 'echo', 'qecho', 'if', 'elif', 'else', 'endif'];
+/**
+ * A text as psql executes it: `{ sql, whole }`. PR #1109 r1 F3: a meta-command is its line from
+ * the backslash on (where no quote or comment of the SQL is open), not SQL, and a comment mark
+ * in it is one of its words: one that runs no SQL is dropped, any other one (or one followed by
+ * `\\` and more) is not read. psql puts the text of `:name`, `:'name'`, `:"name"` into the
+ * statement: unknown text. `whole`: every meta-command was read and NO part of the text is
+ * unknown, wherever it stands (after a known prefix, inside a string: a routine body is
+ * executed). What is readable is still checked.
+ */
+export function psqlText(text) {
+  let whole = true;
+  let sql = stripComments(text, (line) => {
+    const [, name, rest] = /^\\(\w*)(.*)$/s.exec(line);
+    const inert = PSQL_INERT.includes(name) && !rest.includes('\\');
+    whole &&= inert;
+    return inert ? '' : line;
+  });
+  const raw = lexSql(sql);
+  for (let i = raw.length - 2; i >= 0; i--)
+    if (isOp(raw[i], ':') && ['word', 'string', 'quoted'].includes(raw[i + 1].type) && raw[i + 1].start === raw[i].start + 1)
+      sql = sql.slice(0, raw[i].start) + UNKNOWN_SQL + sql.slice(raw[i + 2]?.start ?? sql.length);
+  return { sql, whole: whole && !sql.includes(UNKNOWN_SQL) };
+}
+
+function claimFileProblems(repository, opaque, opaqueUsed) {
+  const problems = [];
+  const authored = authoredFiles(repository);
+  // `psql -f <file>`: an authored file named from the repository root, where a workflow step
+  // starts. Not where another directory may be set (r1 F2): see shellScripts for YAML; a script
+  // file runs where its caller stands and a JS command string has a `cwd`: they name no file this reads.
+  const read = (file) => (authored.includes(join(repository, file)) ? readFileSync(join(repository, file), 'utf8') : null);
+  for (const path of authored) {
+    const local = relative(repository, path);
+    if (TEST_PATH.test(local) || /\.(?:md|png|jpe?g|ico|woff2?|pdf)$|^docs\//.test(local)) continue;
     const source = readFileSync(path, 'utf8');
-    const composed = new Map();
+    const texts = [];
+    // FU-325 part 2: a SQL CLI is an execution site. What it is given is executed (strict), or
+    // the site is unresolved unless the inventory lists it; what is readable is checked anyway.
+    // `rewritten`: what the file's reader puts other text in before a shell is given the command.
+    const sites = (script, line, input, rewritten = /$^/) => {
+      for (const site of cliSqlSites(script, input, line)) {
+        const key = siteKey(local, 'cli', site.command);
+        const sql = site.text === null ? null : psqlText(site.text);
+        if (sql) texts.push({ text: sql.sql, line: site.line + 1, strict: true });
+        if (sql?.whole && !rewritten.test(site.command)) continue;
+        if (typeof opaque[key] === 'string' && opaque[key].trim()) opaqueUsed.add(key);
+        else problems.push(`${local}:${site.line + 1}: FU-324: unresolved executable SQL [${key}]`);
+      }
+    };
     if (/\.[cm]?[jt]sx?$/.test(local)) {
       const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
       if (ast.parseDiagnostics.length) { problems.push(`${local}: FU-324: unreadable source`); continue; }
       // FU-325: literal parts are composed first (`'a' + 'b'`, `${'a'}b`); any other part is a
-      // bound value here: the sink rule of utc-clock-sinks.mjs is what proves a complete text.
+      // bound value here: the execution-site rule of utc-clock-sinks.mjs is what proves a complete text.
       const concat = (n) => ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken;
       // PR #1082 r1 F2: syntax that leaves its operand the text it is.
       const transparent = (n) => ts.isParenthesizedExpression(n) || ts.isAsExpression(n) ||
         ts.isSatisfiesExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n);
-      const textOf = (n) =>
-        transparent(n) ? textOf(n.expression)
-          : concat(n) ? textOf(n.left) + textOf(n.right)
+      const textOf = (n, hole = PLACEHOLDER(0)) =>
+        transparent(n) ? textOf(n.expression, hole)
+          : concat(n) ? textOf(n.left, hole) + textOf(n.right, hole)
             : ts.isTemplateExpression(n)
-              ? n.head.text + n.templateSpans.map((s) => textOf(s.expression) + s.literal.text).join('')
-              : ts.isStringLiteralLike(n) ? n.text : PLACEHOLDER(0);
+              ? n.head.text + n.templateSpans.map((s) => textOf(s.expression, hole) + s.literal.text).join('')
+              : ts.isStringLiteralLike(n) ? n.text : hole;
+      const composed = new Map();
       for (const { node } of sqlLiterals(ast)) {
         let top = node;
         while (concat(top.parent) || transparent(top.parent) || ts.isTemplateSpan(top.parent))
           top = ts.isTemplateSpan(top.parent) ? top.parent.parent : top.parent;
         composed.set(top, { node: top, text: textOf(top) });
       }
-    }
-    // PR #1082 r1 F1: no text is dropped for what it seems to hold. A literal or a word that is
-    // not read as executed is still opened, string by string, and judged as a piece of a text.
-    const texts = /\.[cm]?[jt]sx?$/.test(local)
-      ? [...composed.values()]
-      : /\.sql$/.test(local)
-        ? [{ text: source, strict: true }]
-        : [...source.matchAll(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$/gm)]
-            .map((m) => ({ text: m[3], strict: true }))
-            .concat(
-              parseCommands(source).commands.flatMap(({ words }) => words)
-                .map(({ value }) => ({ text: value.replace(/^[A-Za-z_]\w*=/, '') })),
-            );
-    for (const { text, node, strict } of texts) {
+      // PR #1082 r1 F1: no text is dropped for what it seems to hold. A literal that is not read
+      // as executed is still opened, string by string, and judged as a piece of a text.
+      texts.push(...composed.values());
+      // A command string (`execSync('psql db -c …')`, `['bash', '-c', 'psql …']`) is shell text: a
+      // part that is not a literal is unknown text in it. r1 F1: whatever follows the name; the
+      // name alone, as ONE literal, is the argv site of utc-clock-sinks.mjs (a composed name is not).
+      for (const { node, text } of composed.values())
+        if (SQL_CLI_WORD.test(text) && !(ts.isStringLiteralLike(node) && SQL_CLI.test(text))) sites(textOf(node, UNKNOWN_SQL), ast.getLineAndCharacterOfPosition(node.getStart()).line, null);
+    } else if (/\.sql$/.test(local)) texts.push({ text: source, strict: true });
+    else if (/\.(?:sh|bash|ya?ml)$/.test(local)) {
+      const scripts = /\.ya?ml$/.test(local) && !SQL_CLI_WORD.test(source) ? [] : shellScripts(local, source);
+      if (!scripts) { problems.push(`${local}: FU-324: unreadable source`); continue; }
+      for (const { script, line, moved } of scripts) {
+        // Whatever reads them: every here-document (executed), and every word (r1 F1: a piece).
+        texts.push(
+          ...[...script.matchAll(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$/gm)].map((m) => ({ text: m[3], strict: true })),
+          ...parseCommands(script).commands.flatMap(({ words }) => words)
+            .map(({ value }) => ({ text: value.replace(/^[A-Za-z_]\w*=/, '') })),
+        );
+        // A workflow puts `${{ … }}` into the text, also inside quotes; what reads any other YAML is not known.
+        if (SQL_CLI_WORD.test(script))
+          sites(script, line, moved ? null : read, /\.ya?ml$/.test(local) ? (local.startsWith('.github/') ? /\$\{\{/ : /^/) : undefined);
+      }
+    } else if (SQL_CLI_WORD.test(source) && local !== INVENTORY) problems.push(`${local}: FU-324: a SQL CLI in a file this guard does not read`);
+    for (const { text, node, strict, line: at } of texts) {
       const line = node
         ? node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1
-        : 1;
+        : (at ?? 1);
       const seen = new Set(CONFLICT_NAMED.test(source) ? [CONFLICT] : []);
       for (const problem of claimSubqueryProblems(text, seen, strict || executed(text)))
         problems.push(`${local}:${line}: ${problem}`);
@@ -2147,32 +2332,45 @@ function claimFileProblems(repository) {
 
 export function utcClockProblems(repository) {
   const perService = collectTables(repository);
+  // The execution-boundary rule (FU-325): SQL reaches a database through a Prisma raw API, a pg
+  // client, a SQL CLI, or a SQL file. Each such site is read completely and checked, or it is
+  // listed here by file + callee + the digest of its exact expression (siteKey), with a reason:
+  // a new, changed, removed or now-readable site fails. A listed site waives nothing readable.
+  const inventoryPath = join(repository, INVENTORY);
+  const opaque = authoredFiles(repository).includes(inventoryPath)
+    ? JSON.parse(readFileSync(inventoryPath, 'utf8')) : {};
+  const opaqueUsed = new Set();
   const problems = [
-    ...claimFileProblems(repository),
+    ...claimFileProblems(repository, opaque, opaqueUsed),
     ...schemaDisagreements(repository, perService).map(
       (d) => `schema/migration disagreement: ${d}`,
     ),
   ];
   const reviewedUsed = new Set();
-  // PM-approved FU-324 boundary: inventory opaque sites, not their callers (FU-325).
-  // Exact argument location + callee: moved, removed or now-resolved sites go stale.
-  const inventoryPath = join(repository, 'scripts/opaque-sql-sinks.json');
-  const opaque = authoredFiles(repository).includes(inventoryPath)
-    ? JSON.parse(readFileSync(inventoryPath, 'utf8')) : {};
-  const opaqueUsed = new Set();
   const sinks = new Map();
-  const operational = authoredFiles(join(repository, 'scripts'), { optional: true })
-    .filter((p) => SOURCE.test(p) && !SPEC.test(p));
-  for (const sink of sqlSinkTexts(repository, [...productionFiles(repository), ...operational])) {
+  const production = productionFiles(repository);
+  // Operational scripts, and every other authored source file that names a sink (seeds, tools).
+  // The web application has no database client (A-02) and its type declarations change what the
+  // resolver proves: a file of it is read once it names a raw API, the driver or a SQL CLI.
+  const operational = authoredFiles(repository).filter((p) => {
+    const local = relative(repository, p);
+    const names = (word) => word.test(readFileSync(p, 'utf8'));
+    return SOURCE.test(p) && !p.endsWith('.d.ts') && !production.includes(p) &&
+      !local.startsWith('packages/testing/') && !TEST_PATH.test(local) &&
+      (local.startsWith('scripts/') || names(SINK_WORD) || (!local.startsWith('apps/') && names(SINK_CALL)));
+  });
+  for (const sink of sqlSinkTexts(repository, [...production, ...operational])) {
     const path = sink.node.getSourceFile().fileName;
     sinks.set(path, [...(sinks.get(path) ?? []), sink]);
-    const pos = sink.node.getSourceFile().getLineAndCharacterOfPosition(sink.node.getStart());
-    const key = `${relative(repository, path)}:${pos.line + 1}:${pos.character + 1}:${sink.sink}`;
-    if (sink.text === null && Object.hasOwn(opaque, key) && typeof opaque[key] === 'string' && opaque[key].trim()) {
-      opaqueUsed.add(key);
-      continue;
-    }
-    const found = sink.text === null ? ['FU-324: unresolved executable SQL'] : claimSubqueryProblems(sink.text);
+    const key = siteKey(relative(repository, path), sink.sink, sink.subject.getText());
+    // A CLI site is read as psql reads it; what is not whole is unresolved, the rest still checked.
+    const read = sink.text !== null && SQL_CLI.test(sink.sink) ? psqlText(sink.text) : { sql: sink.text, whole: sink.text !== null };
+    const listed = !read.whole && Object.hasOwn(opaque, key) && typeof opaque[key] === 'string' && opaque[key].trim();
+    if (listed) opaqueUsed.add(key);
+    const found = [
+      ...(read.whole || listed ? [] : [`FU-324: unresolved executable SQL [${key}]`]),
+      ...(read.sql === null ? [] : claimSubqueryProblems(read.sql)),
+    ];
     for (const problem of found) problems.push(`${relative(repository, path)}:${sink.node.getSourceFile().getLineAndCharacterOfPosition(sink.node.getStart()).line + 1}: ${problem}`);
   }
   for (const key of Object.keys(opaque)) {

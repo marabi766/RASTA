@@ -116,12 +116,17 @@ const NOT_A_COLUMN = new Set([
  * quotes. A `--` inside `'...'` is text, not a comment, so it can never hide
  * the rest of its line.
  */
-export function stripComments(sql) {
+export function stripComments(sql, meta) {
   let out = '';
   let i = 0;
   while (i < sql.length) {
     const c = sql[i];
-    if (c === "'" || c === '"') {
+    if (c === '\\' && meta) {
+      // psql (PR #1109 r1 F3): a backslash outside quotes and comments starts a meta-command; its line ends it.
+      const end = sql.indexOf('\n', i) < 0 ? sql.length : sql.indexOf('\n', i);
+      out += meta(sql.slice(i, end));
+      i = end;
+    } else if (c === "'" || c === '"') {
       // In E'…' a backslash escapes the next character, a quote too (as `lex` reads it).
       const escaped = c === "'" && /[eE]/.test(sql[i - 1] ?? '') && !/[\w$]/.test(sql[i - 2] ?? '');
       let j = i + 1;

@@ -25,8 +25,8 @@ import {
  *    `mapfile`, `getopts`, `let`): they are refused only while a policy does not list them;
  *  - shell state is not modelled: `set` options, traps, a function named like a listed program
  *    (its body is read as commands, by the same policy), startup files;
- *  - text inside `${x:-…}` is read as words of commands: stricter than bash there, and not
- *    proven equal to it.
+ *  - an expansion with an operator (`${x:-…}`) is read while its text holds plain characters
+ *    alone (FU-340); what the operator does with the value it expands is not.
  *
  * FU-334: the ONE default-deny reader of shell text for a guard that must prove what a step, a
  * RUN or a container runs (the Prisma lifecycle-suppression guard now; the browser-install guard
@@ -53,8 +53,11 @@ import {
  * decides one shell invocation by `shellInvocation` — a `-c` body is read by this same reader
  * under `policy`, a script file is `policy.file`'s to admit, standard input is refused — and
  * `context.state` is the text so far: the directory it starts in (`cwd`), whether this command
- * runs after a `context.leave()` of its own or an enclosing subshell (`moved`), and the names
- * assigned so far (`assigned`, in any subshell). Pure: text in, problems out.
+ * runs after a `context.leave()` of its own or an enclosing subshell (`moved`), whether it also
+ * stands in the and-list of that command, so runs only if it succeeded (`chained`, FU-340),
+ * whether it stands in a loop, where what follows it also runs before it (`looped`), and
+ * the names assigned so far (`assigned`, in any subshell). `context.before` holds the words of the
+ * command before the grammar's own (`!`, `then`, a prefix assignment). Pure: text in, problems out.
  */
 const clip = (text) => (text.length > 80 ? `${text.slice(0, 77)}...` : text);
 
@@ -72,6 +75,8 @@ const written = (word) => (word.dynamic ? word.value.slice(0, word.cut) : word.v
 /** The programs whose operands are names they bind, and those whose first operand is. */
 const BINDERS = new Set([...DECLARERS, 'unset']);
 const LOOPS = new Set(['for', 'select']);
+/** The words a loop starts with: its condition and its body run again, up to its `done`. */
+const LOOP_STARTS = new Set([...LOOPS, 'while', 'until']);
 
 /**
  * A closed option grammar. `flags` take no value; `values` take one, attached with `=` or as the
@@ -121,21 +126,32 @@ export function readShell(
   state = { cwd: policy.cwd ?? '', moved: false, assigned: new Set() },
 ) {
   const left = state.moved ? [''] : []; // the subshells a grammar has marked as having left `cwd`
+  const entered = new Set(); // FU-340: the and-lists a `leave()` stands in, as `scope list`
+  let loops = 0; // FU-340: the loops open around a command, each from its first word to its `done`
   const problems = [];
   const commands = [];
   const read = parseCommands(text);
   for (const unread of read.problems)
     if (!policy.tolerated?.has(unread)) problems.push(`${unread} is not read`);
   const grammarOf = (name) => (Object.hasOwn(policy.programs, name) ? policy.programs[name] : null);
-  const listed = (name) => grammarOf(name) === true || typeof grammarOf(name) === 'function';
-  for (const { words: all, scope } of read.commands) {
+  // FU-340 (#1099 r2 F4): ONE lookup admits a word of the chain and finds its grammar. A word is
+  // looked up as written out, or as a word of the grammar itself (`[`, `{`, `[[`) spelled exactly
+  // so: `$x[` and `"$x"{` are words the shell computes, whatever is left of them here.
+  const entryOf = ({ value, dynamic, source }) =>
+    dynamic && source !== value ? null : grammarOf(value);
+  const listed = (word) => entryOf(word) === true || typeof entryOf(word) === 'function';
+  for (const { words: all, scope, list } of read.commands) {
     // r1 F1: a redirection's target is no word of the command: `>echo env -i x` runs `env`.
     const words = all.filter((word) => !word.redirect);
     state.moved = left.some((at) => at === '' || scope === at || scope.startsWith(`${at}/`));
+    state.chained = entered.has(`${scope} ${list}`);
     const refuse = (why) =>
       problems.push(`\`${clip(words.map((word) => word.value).join(' '))}\` ${why}`);
     const { chain, problem } = executionChain(words);
     if (problem) refuse(problem);
+    loops += chain.filter((at) => LOOP_STARTS.has(words[at].value)).length;
+    state.looped = loops > 0;
+    if (words[chain.at(-1)]?.source === 'done') loops -= 1;
     const bind = (name) => {
       state.assigned.add(name);
       const unbound = policy.name
@@ -146,10 +162,7 @@ export function readShell(
     for (const at of chain) {
       const { value, dynamic } = words[at];
       // A computed word is a word of the grammar (`[`, `{`) or nothing this reader knows.
-      const unread = dynamic
-        ? /\w/.test(value) || !listed(value)
-        : !listed(value) && admits(policy, value, state) !== null;
-      if (unread)
+      if (!listed(words[at]) && (dynamic || admits(policy, value, state) !== null))
         refuse(`runs \`${value}\`, ${policy.unlisted ?? 'a program this check does not list'}`);
     }
     const last = chain.at(-1) ?? words.length;
@@ -180,6 +193,7 @@ export function readShell(
       /** From here on, in this subshell, a relative path is no longer one of the starting directory. */
       leave() {
         left.push(scope);
+        if (list) entered.add(`${scope} ${list}`);
       },
       /** What `name args…` runs as a shell, read under `inner`: a problem, or null. */
       shell(shellArgs, name, inner = policy) {
@@ -197,8 +211,9 @@ export function readShell(
     };
     // r1 F4: every word of the chain that has a grammar is asked, a wrapper before what it runs.
     for (const at of chain) {
-      const grammar = plain(words[at]) ? grammarOf(words[at].value) : null;
-      const unread = typeof grammar === 'function' ? grammar(words.slice(at + 1), context) : null;
+      const grammar = entryOf(words[at]);
+      const asked = { ...context, before: words.slice(0, at) };
+      const unread = typeof grammar === 'function' ? grammar(words.slice(at + 1), asked) : null;
       if (unread) refuse(`is not a form of \`${words[at].value}\` this check reads: ${unread}`);
     }
   }
