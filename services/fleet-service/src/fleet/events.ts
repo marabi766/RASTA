@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
+import {
+  isoDateTime,
+  describeLegacyRefusal,
+  legacyParse,
+  fleetMeterInventorySealedPayloadV1,
+} from '@rasta/contracts';
 
 /**
  * Events published by fleet-service, on `rasta.fleet.v1`.
@@ -20,6 +25,7 @@ import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contract
  */
 
 export const FLEET_EVENTS = {
+  FLEET_METER_INVENTORY_SEALED: 'FLEET_METER_INVENTORY_SEALED',
   DRIVER_REGISTERED: 'DRIVER_REGISTERED',
   DRIVER_STATUS_CHANGED: 'DRIVER_STATUS_CHANGED',
   // A second deliberate addition, alongside DRIVER_STATUS_CHANGED (L3-11):
@@ -157,6 +163,7 @@ export const availabilityChangedPayload = z.object({
 });
 
 export const FLEET_EVENT_SCHEMAS = {
+  FLEET_METER_INVENTORY_SEALED: fleetMeterInventorySealedPayloadV1,
   [FLEET_EVENTS.DRIVER_REGISTERED]: driverRegisteredPayload,
   [FLEET_EVENTS.DRIVER_STATUS_CHANGED]: driverStatusChangedPayload,
   [FLEET_EVENTS.DRIVER_UPDATED]: driverUpdatedPayload,

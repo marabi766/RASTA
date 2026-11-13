@@ -200,5 +200,38 @@ The singleton share lock remains held until each inserting fold commits,
 including `ON CONFLICT` on an existing meter. The concurrent-fold race test
 records a bounded synthetic measurement, not a production throughput guarantee
 or starvation proof. Schedule eventual activation in a maintenance window with
-usage consumers paused/drained; resume only after status confirms the marker.
+usage consumers and reconcile/preview runs paused/drained; resume only after status confirms the marker.
 Active schema-down refuses to remove this database fence.
+
+### Fleet source seal (operator primitive; activation remains disabled)
+
+`FleetMeterInventorySeal.seal(runId, operatorId)` enumerates all physical asset
+identities in fleet's replica, usage, assignments, availability, transfer fences,
+transfer releases and pending insurance, including historical owners and orphans.
+It refuses ambiguous ownership or more than 20,000 assets. One transaction takes
+SHARE locks on all seven source tables, locks the singleton gate, persists the
+inventory and boundary, and enqueues `FLEET_METER_INVENTORY_SEALED` on
+`rasta.fleet.v1` (platform stream `meter-inventory-seal`). The global audit carries
+only the digest, boundary, count, run and configured operator, never the inventory.
+
+The durable database fence covers INSERT and UPDATE from old images, direct SQL,
+replication and future writers on these seven tables. Once sealed, new physical
+asset identities refuse `SOURCE_INVENTORY_SEALED`; existing identities may continue
+writing. Missing gates and non-READ-COMMITTED writes refuse. Pause asset creation
+and drain source writers before sealing. This deliberately blocks future creation
+until a later reviewed protocol can coordinate reopening with maintenance; this
+slice provides no release, expiry or automatic activation. Schema-down refuses an
+active source seal. Do not operate this primitive in production yet.
+
+Replay the SAME run and operator after `SOURCE_SEAL_UNCONFIRMED`: it re-serves the
+stored seal, even after source changes or a lost commit response. A different run
+or operator refuses `SOURCE_SEAL_CONFLICT`. Ambient request/service contexts are
+refused. Operator identity is configured and self-asserted, as for per-asset apply.
+A REST authority adapter, durable pre-activation per-asset progress/refusals,
+reconciliation/reporting and the explicit activation CLI remain separate work.
+Fleet sealing proves its own source inventory; it does not attest an undrained
+asset-service stream. That cross-service completeness check remains required
+before wiring the production authority.
+
+Per-asset apply refuses oversized snapshots as `SNAPSHOT_NOT_AUDITABLE` and invalid
+post-lock audit payloads as `CUTOVER_AUDIT_INVALID`; neither is an ambiguous commit.

@@ -59,6 +59,10 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       `CREATE TRIGGER usage_meter_insert_fence BEFORE INSERT ON "${schema}".asset_usage_meter
        FOR EACH ROW EXECUTE FUNCTION public.set_usage_meter_source()`,
     );
+    await owner.client.$executeRawUnsafe(
+      `CREATE TRIGGER usage_meter_mode_fixed BEFORE UPDATE OF meter_source ON "${schema}".asset_usage_meter
+       FOR EACH ROW EXECUTE FUNCTION public.usage_meter_mode_fixed()`,
+    );
     const role = decodeURIComponent(runtimeUrl.username).replaceAll('"', '""');
     await owner.client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`);
     await owner.client.$executeRawUnsafe(
@@ -395,7 +399,60 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       VALUES (${id('AST')}, ${org.b}, ${new Date()})`).rejects.toThrow('FULL_RUN_GATE_MISSING');
     await expect(command().status(runId, actor)).rejects.toThrow('FULL_RUN_GATE_MISSING');
   });
-  it('reports definite pool/statement/callback-timeout failures as named precommit refusals', async () => {
+  it('pins gate/refusal lookup against a hostile caller search_path and temp shadows', async () => {
+    await owner.transaction(async (tx) => {
+      await tx.$executeRaw`CREATE TEMP TABLE meter_full_run(id boolean, run_id text) ON COMMIT DROP`;
+      await tx.$executeRaw`INSERT INTO pg_temp.meter_full_run VALUES(true, 'FAKE_ACTIVE')`;
+      await tx.$executeRaw`SELECT set_config('search_path', ${`pg_temp, "${schema}", public`}, true)`;
+      const [row] = await tx.$queryRaw<{ meter_source: string }[]>`
+        INSERT INTO asset_usage_meter(asset_id, organization_id, updated_at)
+        VALUES (${id('AST')}, ${org.a}, ${new Date()}) RETURNING meter_source`;
+      expect(row.meter_source).toBe('LEGACY');
+    });
+  });
+  it('allows idempotent modes and LEGACY to LEDGER, refuses regression by direct SQL', async () => {
+    const assetId = id('AST');
+    await bootstrap(assetId);
+    for (const mode of ['LEGACY', 'LEDGER', 'LEDGER'])
+      await prisma.client
+        .$executeRaw`UPDATE asset_usage_meter SET meter_source = ${mode} WHERE asset_id = ${assetId}`;
+    await expect(prisma.client.$executeRaw`UPDATE asset_usage_meter SET meter_source = 'LEGACY'
+      WHERE asset_id = ${assetId}`).rejects.toThrow('USAGE_METER_MODE_REGRESSION');
+    expect((await bootstrap(assetId)).meter_source).toBe('LEDGER');
+  });
+  it('reports real Prisma callback expiration as a precommit refusal', async () => {
+    const transaction = prisma.transaction.bind(prisma);
+    let expired: unknown;
+    const timeout = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn) => {
+      try {
+        return await transaction(fn, { timeoutMs: 100 });
+      } catch (error) {
+        expired = error;
+        throw error;
+      }
+    });
+    const enqueue = jest
+      .spyOn(MaintenanceRepository.prototype, 'enqueueEvent')
+      .mockImplementationOnce(async (tx) => {
+        await tx.$executeRaw`SELECT pg_sleep(0.4)`;
+        // The callback has not returned when Prisma expires its transaction.
+        await tx.$executeRaw`SELECT 1`;
+        return 'unreachable';
+      });
+    try {
+      await expect(command().activate(runId, actor, [])).rejects.toThrow(
+        'FULL_RUN_PRECOMMIT_FAILED',
+      );
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(expired).toMatchObject({ code: 'P2028' });
+    } finally {
+      timeout.mockRestore();
+      enqueue.mockRestore();
+    }
+    expect(await command().status(runId, actor)).toBeNull();
+    expect(await eventRows()).toHaveLength(0);
+  });
+  it('reports definite pool and statement failures as named precommit refusals', async () => {
     const pool = jest.spyOn(prisma, 'transaction').mockRejectedValueOnce(new Error('pool wait'));
     await expect(command().activate(runId, actor, [])).rejects.toBeInstanceOf(MeterFullRunRefusal);
     pool.mockRestore();

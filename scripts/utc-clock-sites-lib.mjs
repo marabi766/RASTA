@@ -1655,6 +1655,18 @@ export const REVIEWED_LITERALS = [
 ];
 export const REVIEWED_FUNCTIONS = [
   {
+    service: 'fleet-service',
+    name: 'meter_inventory_creation_fence',
+    sha256: '3ca7af2591f3eeff8fc8e8ce3e393913fa15b95785c7a6eab3151f57708db26e',
+    why: 'Clock-free creation fence; schema-local set_config quotes trusted TG_TABLE_SCHEMA; assetId is a JSON data key, never SQL; no EXECUTE.',
+  },
+  {
+    service: 'maintenance-service',
+    name: 'set_usage_meter_source',
+    sha256: '3a874722030f2d13b1053711c34c1d1094445c5fd93d751492c29e123b547b3f',
+    why: 'Clock-free meter_source assignment; schema-local set_config quotes trusted TG_TABLE_SCHEMA; header pins catalog/temp and restores caller path; no EXECUTE.',
+  },
+  {
     service: 'construction-service',
     name: 'bid_guard',
     sha256: 'a6dcf942e2d423831d7ec99110948148b66e8a8c6596eb0eb1b9ddc611e03b0d',

@@ -24,6 +24,7 @@ export type FleetPayload<N extends FleetEventName> = z.infer<(typeof FLEET_EVENT
 
 /** The aggregate each event is *about*, which is not always what orders it. */
 export const AGGREGATE_OF = {
+  FLEET_METER_INVENTORY_SEALED: 'MeterInventorySeal',
   DRIVER_REGISTERED: 'Driver',
   DRIVER_STATUS_CHANGED: 'Driver',
   DRIVER_UPDATED: 'Driver',
@@ -34,6 +35,7 @@ export const AGGREGATE_OF = {
 } as const satisfies Record<FleetEventName, string>;
 
 export const PARTITION_SCOPES = {
+  PLATFORM: 'PLATFORM',
   ASSET: 'ASSET',
   DRIVER: 'DRIVER',
 } as const;
@@ -54,7 +56,7 @@ type PartitionRule<N extends FleetEventName> = (payload: FleetPayload<N>) => Par
  * without deciding how it is ordered fails `pnpm typecheck` rather than
  * quietly inheriting the aggregate id.
  *
- * Two scopes, and the split is the accepted one (ADR-051 § B4, Q-36):
+ * Asset and driver scopes retain the accepted split (ADR-051 § B4, Q-36):
  *
  *   **asset-scoped** — everything that happens *to a machine*. `ASSET_ASSIGNED`
  *   is keyed by asset rather than by assignment because asset-service builds
@@ -68,12 +70,15 @@ type PartitionRule<N extends FleetEventName> = (payload: FleetPayload<N>) => Par
  *   keep the driver id, which is also what the aggregate default gave them
  *   before this file existed, so their routing is unchanged.
  *
+ * The global operator inventory seal uses its own platform stream and carries no tenant.
+ *
  * **No ordering is claimed between this topic and `rasta.maintenance.v1`,**
  * even for the same `assetId`. Two databases, two counters, no shared lock —
  * ADR-051 § C-7 and the plan's § B4 note say so explicitly, and a negative test
  * holds it.
  */
 export const PARTITION_KEY_POLICY: { [N in FleetEventName]: PartitionRule<N> } = {
+  FLEET_METER_INVENTORY_SEALED: () => ({ scope: 'PLATFORM', key: 'meter-inventory-seal' }),
   // ---- Asset-scoped: one partition per machine ----------------------------
   ASSET_ASSIGNED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),
   ASSIGNMENT_ENDED: (payload) => ({ scope: 'ASSET', key: payload.assetId }),

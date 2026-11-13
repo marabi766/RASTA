@@ -139,6 +139,48 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
     );
   });
 
+  it('persists global fleet source seal evidence once, without inventory disclosure', async () => {
+    const { DomainProjectorConsumer } = await import('../src/consumers/domain-projector.consumer');
+    const source = envelope({
+      occurredAt: instantIn(runMonth(1), 6).toISOString(),
+      eventName: 'FLEET_METER_INVENTORY_SEALED',
+      producer: 'fleet-service',
+      aggregateType: 'MeterInventorySeal',
+      tenantId: undefined,
+      actor: { type: 'USER', id: 'USR_OPERATOR' },
+    });
+    source.aggregateId = source.correlationId;
+    source.payload = {
+      runId: source.correlationId,
+      operatorId: 'USR_OPERATOR',
+      inventoryDigest: 'c'.repeat(64),
+      sourceBoundary: 'FLEET_SOURCE_SEAL',
+      assetCount: 2,
+    };
+    const consumer = new DomainProjectorConsumer(jest.fn(), repository, {
+      error: jest.fn(),
+      debug: jest.fn(),
+    } as never);
+    await consumer.handle(source, delivery('rasta.fleet.v1'));
+    await consumer.handle(source, delivery('rasta.fleet.v1'));
+    const rows = await prisma.client.auditEvent.findMany({
+      where: { sourceEventId: source.eventId },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      actorType: 'USER',
+      actorId: 'USR_OPERATOR',
+      organizationId: null,
+    });
+    expect(rows[0].changes).toHaveLength(5);
+    expect(rows[0].changes).toEqual(
+      expect.arrayContaining([
+        { field: 'inventoryDigest', from: null, to: 'c'.repeat(64) },
+        { field: 'assetCount', from: null, to: 2 },
+      ]),
+    );
+  });
+
   it('stores meter before/after, operator and certificate evidence once through the domain consumer', async () => {
     const { DomainProjectorConsumer } = await import('../src/consumers/domain-projector.consumer');
     const source = envelope({
