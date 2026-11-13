@@ -121,6 +121,8 @@ const pins = {
     '83991df34a484819959e3e747235a462e0f4e4a6d5c59812dfa60821a1ae036e',
     // EXP-007 meter certificate exports only; existing plainText/ISO helper exports are unchanged.
     'c134937c8332f6b4fb81fb885fddf5ae2e0081ca878bcb4e883fcfa9ba455569',
+    // Meter-transition contract exports only; existing callback helper exports unchanged.
+    '7ae5c4e5277757a4829a96873f6cb86588729544fa0ad735b9548756d766339a',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',

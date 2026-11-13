@@ -3,6 +3,7 @@ import { SENSITIVE_KEYS } from '@rasta/logging';
 import type { AuditChange, EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { toContractRefusalProjection } from './contract-refusal-projection';
+import { toMeterReconcileChanges } from './meter-reconcile-projection';
 import { toCommissionRuleChanges } from './commission-rule-change-projection';
 import { toSettlementRefusalProjection } from './settlement-refusal-projection';
 import { AUDIT_DOMAIN_TOPIC_OWNERS, type AuditDomainTopic } from './audit-producer-topology';
@@ -262,8 +263,8 @@ export function toAuditEventRecord(
   // economic's contract and allow-listed; refused to the dead-letter topic otherwise.
   const settlementRefusal = toSettlementRefusalProjection(envelope, delivery);
 
-  // The one published before/after pair: a commission rule's terms (docs/23 D-057). Allow-listed
-  // and validated against economic's contract; refused to the dead-letter topic otherwise.
+  // Allow-listed before/after evidence, validated against each producer's contract.
+  const meterChanges = toMeterReconcileChanges(envelope, delivery);
   const ruleChanges = toCommissionRuleChanges(envelope, delivery);
 
   return {
@@ -293,6 +294,7 @@ export function toAuditEventRecord(
     ...(settlementRefusal
       ? { reason: settlementRefusal.reason, changes: settlementRefusal.changes }
       : {}),
+    ...(meterChanges ? { changes: meterChanges } : {}),
     ...(ruleChanges ? { changes: ruleChanges } : {}),
   };
 }

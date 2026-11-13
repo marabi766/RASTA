@@ -15,6 +15,9 @@ export interface UsageMeterInput {
 }
 export interface LockedUsageMeter {
   meter_source: 'LEGACY' | 'LEDGER';
+  last_period_end: Date | null;
+  last_usage_record_id: string | null;
+  record_count: number;
   hour_meter: string;
   odometer: string;
 }
@@ -91,7 +94,8 @@ export async function lockUsageMeter(
       ON CONFLICT (asset_id) DO NOTHING
     `;
       const [meter] = await tx.$queryRaw<LockedUsageMeter[]>`
-      SELECT meter_source, hour_meter::text, odometer::text
+      SELECT meter_source, hour_meter::text, odometer::text,
+        last_period_end, last_usage_record_id, record_count
       FROM asset_usage_meter WHERE asset_id = ${input.assetId} FOR UPDATE
     `;
       if (!meter) throw new Error('usage meter lock returned no row');

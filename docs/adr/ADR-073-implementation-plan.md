@@ -186,10 +186,13 @@ refused. Exhausting PR 9 live pages is not proof against tail/backdated commits.
 Task 1360 uses the authorized second split: **7b-2a** adds fleet's bounded
 REPEATABLE READ per-asset fact certificate and maintenance's exact set verification
 under the shared meter lock. Preview still rolls back and `--apply` refuses.
-**7b-2b remains required** for the durable post-snapshot outbox/lock handoff,
-authoritative full inventory, apply/announcements, persisted marker/new-asset
-serialization and the actual-cutover concurrency regressions. A verified snapshot
-is not a proof of subsequent delivery or of full-run completion.
+**7b-2b-i** (task 1362) adds certificate-verified per-asset apply and the
+post-snapshot transactional outbox/shared-lock handoff, with real fleet writer,
+relay and maintenance consumer PostgreSQL tests. See the runbook for the ordering
+argument and rollback contract. **7b-2b-ii remains required** for authoritative
+full inventory, durable per-asset refusals/full-run marker and serialization with
+first-meter creation. New assets still default LEGACY; global sourceComplete
+remains false and gauge zero cannot authorize rollout.
 
 - Migration برگشت‌پذیر: جدول `asset_usage_entry` (کلید `usage_record_id`؛ `asset_id`، `organization_id`، `period_start`،
   `period_end`، `hours` `NUMERIC(10,2)`، `kilometres`، `hour_meter`، `odometer` `NUMERIC(12,2)`؛ ایندکس `(asset_id, period_end)`؛

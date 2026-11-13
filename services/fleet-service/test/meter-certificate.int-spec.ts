@@ -7,7 +7,7 @@ import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
 /** Real PostgreSQL locks: no injected repository/page or transaction implementation. */
 describe('fleet source certificate snapshot', () => {
   const org = tenants();
-  const assetId = id('AST');
+  let assetId: string;
   const prisma = newPrisma();
   const service = new MeterCertificateService(prisma);
   const certificate = (callerService = 'maintenance-service', requestedAsset = assetId) =>
@@ -15,8 +15,13 @@ describe('fleet source certificate snapshot', () => {
       createSystemContext({ organizationId: org.a, callerService, correlationId: 'snapshot-test' }),
       async () => service.certificate({ assetId: requestedAsset }),
     );
-  afterAll(async () => {
+  beforeEach(() => {
+    assetId = id('AST');
+  });
+  afterEach(async () => {
     await cleanup(prisma, [org.a, org.b]);
+  });
+  afterAll(async () => {
     await prisma.stop();
   });
 

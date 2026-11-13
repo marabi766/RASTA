@@ -1,4 +1,12 @@
-import { type MeterCertificate } from '@rasta/contracts';
+import {
+  type MeterCertificate,
+  maintenanceMeterReconciledPayloadV1,
+  meterReconcileOperatorSchema,
+  MAINTENANCE_METER_RECONCILED,
+  MAINTENANCE_METER_RECONCILED_VERSION,
+} from '@rasta/contracts';
+import { ulid } from 'ulid';
+import { MAINTENANCE_TOPIC } from '../config/env';
 import { readMeterCertificate, verifyMeterCertificate } from './meter-certificate';
 import { z } from 'zod';
 import {
@@ -19,6 +27,8 @@ import {
 import { assessDue, isAnnounceable } from './due';
 import { toRule } from './schedule.service';
 import { formatHundredths, parseHundredths } from './quantity';
+import { DueAnnouncerService } from './due-announcer.service';
+import { MaintenanceRepository } from './maintenance.repository';
 
 const CERTIFICATE_MAX_BYTES = 16 * 1024 * 1024;
 const PAGE_SIZE = 200;
@@ -95,9 +105,10 @@ export interface MeterReconcileAssetReport {
   pagesExhausted: boolean;
   snapshotVerified: boolean;
   sourceSnapshot: string | null;
-  /** A live cursor supplies no snapshot or future-write fence. Still false until the durable live-write handoff and inventory are proven. */
-  sourceComplete: false;
-  refusal: string;
+  /** Per-asset snapshot verified and committed with the durable outbox/lock handoff. */
+  sourceComplete: boolean;
+  outcome: 'PREVIEW' | 'REFUSED' | 'APPLIED' | 'UNCONFIRMED';
+  refusal: string | null;
 }
 class PreviewComplete extends Error {
   constructor(readonly report: MeterReconcileAssetReport) {
@@ -105,39 +116,50 @@ class PreviewComplete extends Error {
   }
 }
 
-/** Read-only operator preview. Every tentative ledger/meter insert is rolled back. */
+/** Per-asset cutover. Global inventory/marker activation is a separate operation. */
 export class MeterReconcile {
+  private readonly runId = ulid();
   constructor(
     private readonly prisma: PrismaService,
     private readonly source: MeterUsageSource,
+    private readonly announcer: Pick<
+      DueAnnouncerService,
+      'announceForAsset'
+    > = new DueAnnouncerService(new MaintenanceRepository(prisma)),
+    private readonly operatorId?: string,
   ) {}
 
   async report(
     organizationId: string,
     now = new Date(),
+    apply = false,
   ): Promise<{
     organizationId: string;
-    dryRun: true;
+    dryRun: boolean;
     sourceComplete: false;
     assets: MeterReconcileAssetReport[];
   }> {
+    if (apply && !meterReconcileOperatorSchema.safeParse(this.operatorId).success)
+      throw new Error('OPERATOR_ID_REQUIRED');
     const assets: MeterReconcileAssetReport[] = [];
     let after = '';
     for (;;) {
       const rows = await this.assets(organizationId, after, ASSET_PAGE_SIZE);
-      for (const { id } of rows) assets.push(await this.reportAsset(organizationId, id, now));
+      for (const { id } of rows)
+        assets.push(await this.reportAsset(organizationId, id, now, apply));
       if (rows.length < ASSET_PAGE_SIZE) break;
       const last = rows.at(-1);
       if (!last) break;
       after = last.id;
     }
-    return { organizationId, dryRun: true, sourceComplete: false, assets };
+    return { organizationId, dryRun: !apply, sourceComplete: false, assets };
   }
 
   async reportAsset(
     organizationId: string,
     assetId: string,
     now = new Date(),
+    apply = false,
   ): Promise<MeterReconcileAssetReport> {
     const report: MeterReconcileAssetReport = {
       organizationId,
@@ -151,12 +173,16 @@ export class MeterReconcile {
       snapshotVerified: false,
       sourceSnapshot: null,
       sourceComplete: false,
+      outcome: 'REFUSED',
       refusal: 'CUTOVER_PROOF_REQUIRED',
     };
+    if (apply && !meterReconcileOperatorSchema.safeParse(this.operatorId).success)
+      return { ...report, refusal: 'OPERATOR_ID_REQUIRED' };
     // Partition reports by the current local asset owner. Orphan meters are included
     // under their last recorded tenant; this is an operator report, not authorization.
     if (!(await this.assets(organizationId, '', 1, assetId)).length)
       return { ...report, refusal: 'ASSET_NOT_IN_TENANT' };
+    if (apply && !this.source.certificate) return report;
     const records: MeterUsagePage['items'] = [];
     let certificate: MeterCertificate | undefined;
     try {
@@ -165,6 +191,7 @@ export class MeterReconcile {
           await this.source.certificate(organizationId, assetId),
           assetId,
         );
+        if (apply) maintenanceMeterReconciledPayloadV1.shape.snapshot.parse(certificate.snapshot);
         records.push(...certificate.facts);
         report.sourceSnapshot = certificate.snapshot;
       } else {
@@ -200,7 +227,8 @@ export class MeterReconcile {
         createSystemContext({
           organizationId,
           callerService: 'maintenance-service',
-          correlationId: 'maintenance-meter-reconcile',
+          correlationId: this.runId,
+          userId: this.operatorId,
         }),
         async () =>
           this.prisma.transaction(
@@ -248,7 +276,51 @@ export class MeterReconcile {
                   ),
                 )
                 .map((s) => s.id);
-              throw new PreviewComplete(report);
+              if (!apply) throw new PreviewComplete({ ...report, outcome: 'PREVIEW' });
+              if (!certificate) throw new Error('CUTOVER_PROOF_REQUIRED');
+              const state = (mode: 'LEGACY' | 'LEDGER', value: typeof ledger | typeof meter) => ({
+                mode,
+                hours: difference(value.hour_meter, '0'),
+                kilometres: difference(value.odometer, '0'),
+                recordCount: value.record_count,
+                lastPeriodEnd: value.last_period_end?.toISOString() ?? null,
+                lastUsageRecordId: value.last_usage_record_id,
+              });
+              const before = state(meter.meter_source, meter);
+              const after = state('LEDGER', ledger);
+              // Under the shared lock: timestamp-only retries write no transition evidence.
+              if (JSON.stringify(before) !== JSON.stringify(after)) {
+                await new MaintenanceRepository(this.prisma).enqueueEvent(tx, {
+                  aggregateType: 'AssetUsageMeter',
+                  aggregateId: assetId,
+                  eventName: MAINTENANCE_METER_RECONCILED,
+                  eventVersion: MAINTENANCE_METER_RECONCILED_VERSION,
+                  topic: MAINTENANCE_TOPIC,
+                  organizationId,
+                  payload: maintenanceMeterReconciledPayloadV1.parse({
+                    assetId,
+                    organizationId,
+                    before,
+                    after,
+                    certificateDigest: certificate.digest,
+                    snapshot: certificate.snapshot,
+                    runId: this.runId,
+                    operatorId: this.operatorId,
+                  }),
+                });
+              }
+              // Staging precedes the shared lock. An unseen post-snapshot fact
+              // either committed before verification (exact-set refusal), or
+              // must take this lock after commit and observe LEDGER. No fact
+              // insert/uniqueness wait is allowed below the meter lock.
+              await tx.$executeRaw`
+                UPDATE asset_usage_meter SET meter_source = 'LEDGER',
+                  hour_meter = ${ledger.hour_meter}::numeric,
+                  odometer = ${ledger.odometer}::numeric,
+                  last_period_end = ${ledger.last_period_end},
+                  last_usage_record_id = ${ledger.last_usage_record_id},
+                  record_count = ${ledger.record_count}, updated_at = ${now}
+                WHERE asset_id = ${assetId}`;
             },
             { timeoutMs: 30_000 },
           ),
@@ -261,15 +333,39 @@ export class MeterReconcile {
         diff: null,
         schedulesWouldAnnounce: [],
         snapshotVerified: false,
+        outcome:
+          apply &&
+          !(error instanceof UsageMeterRefusal) &&
+          !(error instanceof Error && error.message === 'SOURCE_LEDGER_MISMATCH')
+            ? 'UNCONFIRMED'
+            : 'REFUSED',
         refusal:
           error instanceof UsageMeterRefusal
             ? error.code
             : error instanceof Error && error.message === 'SOURCE_LEDGER_MISMATCH'
               ? 'SOURCE_LEDGER_MISMATCH'
-              : 'PREVIEW_FAILED',
+              : apply
+                ? 'APPLY_UNCONFIRMED'
+                : 'PREVIEW_FAILED',
       };
     }
-    throw new Error('PREVIEW_DID_NOT_ROLL_BACK');
+    report.sourceComplete = true;
+    report.outcome = 'APPLIED';
+    report.refusal = null;
+    try {
+      await runWithContext(
+        createSystemContext({
+          organizationId,
+          callerService: 'maintenance-service',
+          correlationId: 'maintenance-meter-reconcile',
+        }),
+        async () => this.announcer.announceForAsset(assetId, now),
+      );
+    } catch {
+      // The meter is confirmed durable even if the separate announcement fails.
+      report.refusal = 'ANNOUNCEMENT_UNCONFIRMED';
+    }
+    return report;
   }
 
   private async assets(

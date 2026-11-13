@@ -1,12 +1,15 @@
 import { markRefusal } from '@rasta/config';
 
-export function parseMeterReconcileArgs(args: readonly string[]): { organizationId: string } {
+export function parseMeterReconcileArgs(args: readonly string[]): {
+  organizationId: string;
+  apply: boolean;
+} {
   let organizationId: string | undefined;
-  let dryRun = false;
+  let mode: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--dry-run' && !dryRun) {
-      dryRun = true;
+    if ((arg === '--dry-run' || arg === '--apply') && mode === undefined) {
+      mode = arg;
       continue;
     }
     if (arg === '--organization-id' && organizationId === undefined) {
@@ -16,9 +19,8 @@ export function parseMeterReconcileArgs(args: readonly string[]): { organization
         continue;
       }
     }
-    // Includes apply: no code path can bypass the missing completeness proof.
     throw markRefusal(new Error('maintenance-meter-reconcile arguments refused'), 'usage');
   }
   if (!organizationId) throw markRefusal(new Error('organization-id is required'), 'usage');
-  return { organizationId };
+  return { organizationId, apply: mode === '--apply' };
 }

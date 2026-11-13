@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
+import {
+  maintenanceMeterReconciledPayloadV1,
+  isoDateTime,
+  describeLegacyRefusal,
+  legacyParse,
+} from '@rasta/contracts';
 
 /**
  * Events published by maintenance-service, on `rasta.maintenance.v1`.
@@ -51,6 +56,7 @@ import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contract
  */
 
 export const MAINTENANCE_EVENTS = {
+  MAINTENANCE_METER_RECONCILED: 'MAINTENANCE_METER_RECONCILED',
   MAINTENANCE_DUE: 'MAINTENANCE_DUE',
   BREAKDOWN_REPORTED: 'BREAKDOWN_REPORTED',
   MAINTENANCE_CREATED: 'MAINTENANCE_CREATED',
@@ -373,6 +379,7 @@ export const repairCostRecordedPayload = z.object({
 });
 
 export const MAINTENANCE_EVENT_SCHEMAS = {
+  MAINTENANCE_METER_RECONCILED: maintenanceMeterReconciledPayloadV1,
   [MAINTENANCE_EVENTS.MAINTENANCE_DUE]: maintenanceDuePayload,
   [MAINTENANCE_EVENTS.BREAKDOWN_REPORTED]: breakdownReportedPayload,
   [MAINTENANCE_EVENTS.MAINTENANCE_CREATED]: maintenanceCreatedPayload,
