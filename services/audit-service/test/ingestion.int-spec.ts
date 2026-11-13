@@ -96,6 +96,8 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
   it('persists global full-run state and inventory evidence once with no tenant', async () => {
     const { DomainProjectorConsumer } = await import('../src/consumers/domain-projector.consumer');
     const source = envelope({
+      // A global chain has no tenant tag: keep it out of Kafka's shared month.
+      occurredAt: instantIn(runMonth(1), 5).toISOString(),
       eventName: 'MAINTENANCE_METER_FULL_RUN_ACTIVATED',
       producer: 'maintenance-service',
       aggregateType: 'MeterFullRun',
