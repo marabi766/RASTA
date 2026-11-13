@@ -25,7 +25,7 @@ import {
   utcClockProblems,
 } from './utc-clock-sites-lib.mjs';
 import { lex } from './eligibility-clock-sql.mjs';
-import { psqlSql, sqlSinkTexts, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
+import { prismaSql, psqlSql, sqlSinkTexts, UNKNOWN_SQL } from './utc-clock-sinks.mjs';
 import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { authoredFiles } from './authored-source-inventory.cjs';
 
@@ -2939,4 +2939,105 @@ test('FU-337 no cut of a picker passes through a join the reader does not follow
   }
   assert.ok(total > 2000);
   assert.equal(passed, 0);
+});
+
+// PR #1111 r1 F1, items 2 to 5: every trigger of the review, and the forms beside them.
+const SINK_MEMBERS = ['query', '$queryRawUnsafe', '$executeRawUnsafe', '$queryRaw', '$executeRaw', 'execute'];
+const ESCAPES = {
+  bind: (m) => `const run = client.${m}.bind(client);\nrun(runtimeSql);`,
+  call: (m) => `client.${m}.call(client, runtimeSql);`,
+  apply: (m) => `client.${m}.apply(client, [runtimeSql]);`,
+  assigned: (m) => `const run = client.${m};\nrun(runtimeSql);`,
+  optional: (m) => `const run = (client?.${m})!;\nrun?.(runtimeSql);`,
+  argument: (m) => `invoke(client.${m}, runtimeSql);`,
+  returned: (m) => `export const runner = () => client.${m};`,
+  element: (m) => `const run = client['${m}'];\nrun(runtimeSql);`,
+  destructured: (m) => `const { ${m}: run } = client;\nrun(runtimeSql);`,
+  shorthand: (m) => `const { ${m} } = client;\nlater(${m});`,
+  quoted: (m) => `const { '${m}': run } = client;\nrun(runtimeSql);`,
+  parameter: (m) => `export function f({ ${m}: run }) { return run(runtimeSql); }`,
+  imported: (m) => `import { ${m} as run } from 'driver';\nrun(runtimeSql);`,
+  pattern: (m) => `let run;\n[{ ${m}: run }] = [client];\nrun(runtimeSql);`,
+};
+
+test('PR #1111 r1 item 2: a sink member named where it is not called is an unresolved site', () => {
+  const refused = {}, passing = {};
+  for (const [i, member] of SINK_MEMBERS.entries()) for (const ext of ['js', 'cjs', 'mjs', 'jsx', 'ts', 'cts', 'mts', 'tsx']) {
+    for (const [form, text] of Object.entries(ESCAPES))
+      if (form !== 'optional' || /ts/.test(ext)) refused[`scripts/escaped/${form}${i}.${ext}`] = text(member);
+    // The direct-call controls are what they were: unknown text is refused, a literal is read.
+    refused[`scripts/escaped/direct${i}.${ext}`] = `client.${member}(runtimeSql);`;
+    passing[`scripts/escaped/literal${i}.${ext}`] = `client.${member}('SELECT 1');`;
+  }
+  // Under every root that is read (the web application: once the file names a raw API).
+  for (const dir of ['services/x-service/src', 'services/x-service/prisma', 'packages/p/src', 'tools'])
+    refused[`${dir}/escaped.ts`] = ESCAPES.bind('query');
+  refused['apps/web/src/escaped.ts'] = ESCAPES.assigned('$queryRawUnsafe');
+  // Not a sink: a member whose type is a scalar, a method implemented here (its body is read),
+  // the target of an assignment, an object that is built and not taken apart.
+  Object.assign(passing, {
+    'services/x-service/src/scalar.ts': 'export const f = (request: { query: string; execute?: boolean }) => [request.query, request.execute ? 1 : 0];',
+    'services/x-service/src/command.ts': 'class Command { execute() { return 1; } }\nexport const run = new Command().execute.bind(null);',
+    'scripts/escaped/written.mjs': 'client.query = wrapped;\nexport const built = { query: 1, execute: [{ query: 2 }] };',
+  });
+  assertUnresolved(refused, passing);
+  const production = scanOf('x-service', 'CREATE TABLE task (id text);', `declare const client: any;\nexport const run = client.query.bind(client);`);
+  assert.match(production.join(), /R0 unresolved SQL text passed to query/);
+});
+
+test('PR #1111 r1 item 3: prisma db execute is a CLI of the one registry, read by the rules of psql', () => {
+  const texts = (script, read = (name) => `file ${name}`) => cliSqlSites(script, read).map(({ text }) => text);
+  // What it receives: a file where the directory is proven, its one here-document or here-string.
+  assert.deepEqual(texts('prisma db execute --schema prisma/schema.prisma --file ops/a.sql\nDATABASE_URL=x prisma db execute --file=b.sql --url "$URL"'), ['file ops/a.sql', 'file b.sql']);
+  assert.deepEqual(texts(`prisma db execute --stdin <<'SQL'\nSELECT 1;\nSQL\n./node_modules/.bin/prisma db execute --stdin --schema=s <<< 'SELECT 2'`), ['SELECT 1;', 'SELECT 2']);
+  // A site by its two words, whatever is in front; not read: another program in front, an option
+  // this does not know, an input that is not the one it receives, a directory that is not proven.
+  for (const script of ['prisma db execute --stdin', 'echo "$SQL" | prisma db execute --stdin', 'prisma db execute --stdin < "$FILE"', 'prisma db execute --file "$SQL_FILE"',
+    'prisma db execute --file /tmp/a.sql', 'prisma db execute', 'prisma db execute --stdin --file a.sql', 'prisma db execute --file a.sql --file b.sql', 'prisma db execute $OPTS --stdin',
+    'prisma db execute "$OPTS" --stdin', 'prisma db execute --force --stdin', 'prisma db execute --file', 'pnpm exec prisma db execute --file a.sql', 'npx prisma db execute --file a.sql',
+    'node cli.js db execute --file a.sql', '"$PRISMA" db execute --file a.sql', 'db execute --file a.sql', 'X=1 db execute --stdin <<< "SELECT 1"', 'cd ops && prisma db execute --file a.sql', `bash -c 'prisma db execute --file a.sql'`, '"prisma" "db" \\\n  "execute" --stdin']) {
+    assert.ok(texts(script).length >= 1, script);
+    assert.deepEqual(texts(script).filter((text) => text !== null), [], script);
+  }
+  assert.deepEqual(texts('prisma db execute --file a.sql', null), [null]);
+  assert.deepEqual(texts('prisma migrate deploy && prisma generate && prisma db push && echo execute db'), []);
+  assert.deepEqual([['--stdin'], ['--file', 'a'], ['--file=a', '--url', 'u'], ['--stdin', '--file', 'a'], [], ['--stdin=1'], [undefined, '--stdin']].map(prismaSql),
+    [[], [{ at: 1, file: 'a' }], [{ at: 0, file: 'a' }], null, null, null, null]);
+  // The review's triggers and the five shapes of this repository's own sites.
+  const refused = { 'scripts/argv.mjs': `spawnSync('prisma', ['db', 'execute', '--stdin'], { input: runtimeSql, shell: true });`,
+    'scripts/wrapper.mjs': `const sql = (script) => prisma(['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'], { stdin: script });`,
+    'scripts/led.ts': `spawnSync('pnpm', ['exec', 'prisma', 'db', 'execute', '--file', sqlFile]);`, 'scripts/variadic.cjs': `run('prisma', 'db', 'execute', '--stdin');`,
+    'scripts/command.mjs': 'execSync(`prisma db execute --file ${sqlFile}`);', 'scripts/input.mjs': `execSync('prisma db execute --stdin', { input: runtimeSql });`,
+    'tools/argv.mjs': `spawnSync(process.execPath, [cli, 'db', 'execute', '--stdin'], { input: runtimeSql });`, 'services/x-service/prisma/seed.ts': `run(['db', 'execute', '--stdin']);` };
+  inShells(refused, 'stdin', 'echo "$SQL" | prisma db execute --stdin');
+  inShells(refused, 'file', 'prisma db execute --file "$SQL_FILE"');
+  inShells(refused, 'unknown', 'prisma db execute --stdin <<SQL\nDELETE FROM task WHERE id = $picker;\nSQL');
+  const passing = { 'scripts/migrate.mjs': `spawnSync('prisma', ['migrate', 'deploy']);\nspawnSync('prisma', ['db', 'push']);\nexport const words = ['execute', 'db'];` };
+  inShells(passing, 'ok', `prisma db execute --stdin <<'SQL'\n${SAFE};\nSQL\nprisma migrate deploy`);
+  assertUnresolved(refused, passing);
+  // Read as executed where it is read; a file type this does not read is refused as for psql.
+  const other = claimScan({ 'ops/claim.sh': `prisma db execute --stdin <<'SQL'\n${UNSAFE};\nSQL`,
+    'services/x-service/package.json': JSON.stringify({ scripts: { sql: 'prisma db execute --stdin' } }), 'services/x-service/Dockerfile': 'RUN prisma db execute --file "$SQL_FILE"\n' });
+  assert.deepEqual([...new Set(other.map((p) => p.replace(/:\d+: /, ': ').slice(0, 58)))], ['ops/claim.sh: FU-324: locking subquery or unreadable SQL; ',
+    'services/x-service/Dockerfile: FU-324: a SQL CLI in a file', 'services/x-service/package.json: FU-324: a SQL CLI in a fi']);
+});
+
+test('PR #1111 r1 items 4, 5: an extension executor and EXPLAIN … EXECUTE are execution sites in every file', () => {
+  const executors = ['dblink', 'dblink_exec', 'dblink_send_query', 'dblink_open', 'pg_background_launch', 'cron.schedule', 'cron.schedule_in_database', 'cron.alter_job',
+    'public.dblink_exec', '"public"."dblink_exec"', '"cron"."schedule"', 'schedule', 'jobs.schedule_in_database', 'alter_job', 'pg_catalog.query_to_xml'];
+  const heads = ['EXPLAIN ANALYZE', 'EXPLAIN (ANALYZE, BUFFERS)', 'EXPLAIN', 'explain analyse verbose', 'EXPLAIN (FORMAT JSON, ANALYZE (true))', 'CREATE TABLE t AS', 'EXPLAIN ANALYZE CREATE TEMP TABLE t AS'];
+  const sites = [...executors.map((name) => `SELECT ${name}('c', cmd) FROM jobs`), `SELECT * FROM dblink('dbname=x', $1) AS t(id text)`, `SELECT cron.alter_job(1, command := cmd) FROM jobs`,
+    `DO $$BEGIN PERFORM dblink_exec('c', cmd); END$$`, `DO $$BEGIN FOR r IN SELECT a AS b FROM x LOOP CREATE TABLE t (a) ON COMMIT DROP AS EXECUTE p; END LOOP; END$$`, ...heads.flatMap((head) => [`${head} EXECUTE p`, `PREPARE p AS SELECT 1; ${head} EXECUTE p(1)`])];
+  for (const sql of sites) assert.equal(dynamicSite(claimSubqueryProblems(sql)).length, 1, sql);
+  // In every file that runs SQL: an operational .sql (whatever CREATE EXTENSION stands before), psql, a raw API.
+  const files = {};
+  sites.forEach((sql, i) => Object.assign(files, { [`ops/s${i}.sql`]: `CREATE EXTENSION IF NOT EXISTS dblink;\n${sql};`,
+    [`ops/s${i}.sh`]: `psql -X <<'SQL'\n${sql};\nSQL`, [`scripts/s${i}.mjs`]: `db.$executeRawUnsafe(${JSON.stringify(sql)});` }));
+  const found = boundaryScan(files);
+  for (const path of Object.keys(files)) assert.ok(found.some((p) => p.startsWith(`${path}:`) && p.includes(`[${path}:EXECUTE:`)), path);
+  // The migration replay knows the same calls (one test for both), and nothing else became a site.
+  for (const name of executors) migrationRefused(`SELECT ${name}('c', 'DELETE FROM task');`);
+  for (const sql of ['EXPLAIN ANALYZE SELECT 1', 'EXPLAIN (ANALYZE) DELETE FROM task', 'CREATE TABLE t AS SELECT 1 AS execute; ANALYZE VERBOSE t', 'SELECT lower(cmd), reschedule(cmd), cron_schedule(cmd) FROM jobs',
+    'CREATE TRIGGER u AFTER UPDATE ON task FOR EACH ROW WHEN (explain (1)) EXECUTE PROCEDURE f()', 'CREATE TABLE t (id int); CREATE VIEW v AS SELECT 1 AS execute FROM t AS execute'])
+    assert.deepEqual(claimSubqueryProblems(sql), [], sql);
 });

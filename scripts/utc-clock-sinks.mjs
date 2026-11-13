@@ -23,8 +23,35 @@ const nameOf = (n) => ts.isIdentifier(n) ? n.text :
 export const UNKNOWN_SQL = PLACEHOLDER('text');
 /** Unknown text where a word starts or stands, named (FU-337: `text:<digest of its source>`) or not. */
 export const UNKNOWN_WORD = /\uE000text[:\uE001]/;
-/** A word naming a program that executes SQL text; only psql's arguments are read. */
+/**
+ * PR #1111 r1 item 3: the ONE registry of the CLIs that execute SQL text they are given, for
+ * every reader (the argv sites below; shell text and the file sweep of utc-clock-sites-lib.mjs).
+ * SQL_CLI: a word naming psql or pgbench. Prisma's `db execute` is its two subcommand words,
+ * whatever names the program in front of them (prisma, a path, a wrapper that is handed the
+ * argv). SQL_CLI_WORD: a text that may name one. `cliAt`: where a list of words does, or -1.
+ */
 export const SQL_CLI = /(?:^|\/)(?:(psql)|pgbench)$/;
+export const SQL_CLI_WORD = /\b(?:psql|pgbench)\b|\bdb['"`,\s\\]+execute\b/;
+const subcommand = (word, next) => word === 'db' && next === 'execute';
+export const cliAt = (words) => words.findIndex((w, i) => typeof w === 'string' && (SQL_CLI.test(w) || subcommand(w, words[i + 1])));
+/**
+ * Where the words after `prisma db execute` say its SQL is, as psqlSql does: `[{ at, file }]`,
+ * empty for `--stdin`; null for anything else (another option, both or neither, a word of
+ * unknown count or content where an option may stand).
+ */
+export function prismaSql(words) {
+  const out = [];
+  let stdin = false;
+  for (let i = 0; i < words.length; i++) {
+    const [, name, value] = /^--([a-z-]+)(?:=([\s\S]*))?$/.exec(words[i] ?? '') ?? [];
+    if (name === 'stdin' && value === undefined) stdin = true;
+    else if (['file', 'url', 'schema'].includes(name) && (value ?? words[i + 1]) !== undefined) {
+      if (name === 'file') out.push({ at: value === undefined ? i + 1 : i, file: value ?? words[i + 1] });
+      if (value === undefined) i += 1;
+    } else return null;
+  }
+  return out.length + Number(stdin) === 1 ? out : null;
+}
 const PSQL_VALUES = ['dbname', 'host', 'port', 'username', 'variable', 'set', 'output', 'log-file',
   'field-separator', 'record-separator', 'table-attr', 'pset'];
 /**
@@ -430,8 +457,14 @@ export function sqlSinkTexts(repository, files = productionFiles(repository)) {
   // the one beside it); a SQL word resolves as any sink's text does, or the site is unresolved.
   const cli = [];
   for (const ast of sources) walk(ast, (n) => {
-    if (!ts.isStringLiteralLike(n) || !SQL_CLI.test(n.text)) return;
+    if (!ts.isStringLiteralLike(n)) return;
     const p = n.parent, beside = ts.isCallExpression(p) && p.arguments[0] === n && unwrap(p.arguments[1]);
+    // Item 3: `'db', 'execute'` in one array or one call's arguments is Prisma's argv. Its SQL is
+    // the child's input or a file under the child's `cwd`: nothing here reads either.
+    const words = p.elements ?? p.arguments ?? [], beyond = words[words.indexOf(n) + 1];
+    if (words.includes(n) && beyond && ts.isStringLiteralLike(beyond) && subcommand(n.text, beyond.text))
+      cli.push({ node: n, text: null, file: ast.fileName, sink: 'prisma', subject: p });
+    if (!SQL_CLI.test(n.text)) return;
     const list = ts.isArrayLiteralExpression(p) ? p.elements.slice(p.elements.indexOf(n) + 1) :
       beside && ts.isArrayLiteralExpression(beside) ? [...beside.elements] : null;
     const found = list && SQL_CLI.exec(n.text)[1] && psqlSql(list.map((e) => ts.isSpreadElement(e) ? undefined :
@@ -446,15 +479,41 @@ export function sqlSinkTexts(repository, files = productionFiles(repository)) {
     else for (const { at, text, file } of found)
       site(list[at] ?? n, file !== undefined || !list[at] ? null : text !== undefined ? [text] : resolve(list[at]));
   });
+  // A locally implemented method called execute/query is a domain command or a
+  // wrapper. Its body is scanned for real SQL sinks, not treated as SQL itself.
+  const wrapper = (name, d) => (name === 'execute' || name === 'query') && d &&
+    ((ts.isFunctionLike(d) && d.body) || (ts.isBindingElement(d) &&
+      functionOf(d)?.name?.getText() === '$allOperations'));
+  // PR #1111 r1 item 2 (D-173): a sink member named where it is not called has escaped: bound,
+  // `.call`/`.apply`, assigned, passed on, destructured. No alias is followed: the reference is
+  // itself a site of unknown text. Not one: the target of an assignment, a member whose type is
+  // a scalar (no function), and a wrapper as above.
+  const pattern = (o) => {
+    while (ts.isPropertyAssignment(o.parent) || ts.isObjectLiteralExpression(o.parent) || ts.isArrayLiteralExpression(o.parent)) o = o.parent;
+    return ts.isForOfStatement(o.parent) ? o.parent.initializer === o
+      : ts.isBinaryExpression(o.parent) && o.parent.left === o && o.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+  };
+  const escaped = [];
+  for (const ast of sources) walk(ast, (n) => {
+    const access = ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n);
+    const key = access ? n.name ?? (ts.isStringLiteralLike(n.argumentExpression) ? n.argumentExpression : null)
+      : ts.isBindingElement(n) && ts.isObjectBindingPattern(n.parent) ? n.propertyName ?? n.name
+        : ts.isImportSpecifier(n) ? n.propertyName // renamed: its calls no longer carry the name
+          : (ts.isPropertyAssignment(n) || ts.isShorthandPropertyAssignment(n)) && pattern(n.parent) ? n.name : null;
+    if (!key || !SQL_SINKS.has(key.text)) return;
+    let value = n;
+    while (unwrap(value.parent) !== value.parent) value = value.parent;
+    const use = value.parent;
+    if ((ts.isCallExpression(use) && use.expression === value) || (ts.isTaggedTemplateExpression(use) && use.tag === value) ||
+      (ts.isBinaryExpression(use) && use.left === value && use.operatorToken.kind === ts.SyntaxKind.EqualsToken)) return;
+    const held = access ? n : ts.isPropertyAssignment(n) ? n.initializer : n.name;
+    if (scalarType(checker.getTypeAtLocation(held)) || wrapper(key.text, ts.isBindingElement(n) ? n : declaration(held))) return;
+    // Its site is the expression it stands in (a statement would change with its body).
+    escaped.push({ node: n, text: null, file: ast.fileName, sink: key.text, subject: ts.isStatement(use) ? value : use });
+  });
   return calls.flatMap((call) => {
     const target = targetOf(call), name = nameOf(target);
-    if (!SQL_SINKS.has(name)) return [];
-    const d = declaration(target);
-    // A locally implemented method called execute/query is a domain command or a
-    // wrapper. Its body is scanned for real SQL sinks, not treated as SQL itself.
-    if ((name === 'execute' || name === 'query') && d &&
-      ((ts.isFunctionLike(d) && d.body) || (ts.isBindingElement(d) &&
-        functionOf(d)?.name?.getText() === '$allOperations'))) return [];
+    if (!SQL_SINKS.has(name) || wrapper(name, declaration(target))) return [];
     const node = argumentsOf(call)[0] ?? call;
     const tagged = ts.isTaggedTemplateExpression(call);
     // Safe tags bind scalars; nested SQL fragments still need complete proof.
@@ -463,5 +522,5 @@ export function sqlSinkTexts(repository, files = productionFiles(repository)) {
     const texts = safe ? template(node, new Set(), new Map()) : resolve(node);
     return (texts?.length ? texts : [null]).map((text) => ({ node, text,
       file: node.getSourceFile().fileName, sink: name, subject: call }));
-  }).concat(cli);
+  }).concat(cli, escaped);
 }

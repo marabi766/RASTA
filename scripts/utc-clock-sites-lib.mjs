@@ -73,16 +73,15 @@ import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { productionFiles, readSchemas, sqlLiterals, SOURCE } from './eligibility-clock-derive.mjs';
 import { isMap, LineCounter, parseDocument, visit } from 'yaml';
-import { psqlSql, sqlSinkTexts, SQL_CLI, UNKNOWN_SQL, UNKNOWN_WORD } from './utc-clock-sinks.mjs';
+import { cliAt, prismaSql, psqlSql, sqlSinkTexts, SQL_CLI, SQL_CLI_WORD, UNKNOWN_SQL, UNKNOWN_WORD } from './utc-clock-sinks.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
 import { tokenizeShell } from './check-dockerfile-pins-lib.mjs';
 import { lex as lexSql, PLACEHOLDER, stripComments } from './eligibility-clock-sql.mjs';
 
-const SQL_CLI_WORD = /\b(?:psql|pgbench)\b/;
 const INVENTORY = 'scripts/opaque-sql-sinks.json';
-/** What a file holds when it can execute SQL: a raw API, the pg driver, a SQL CLI; or a call of the name. */
-const SINK_WORD = /(?:query|execute)Raw|['"]pg['"]|\b(?:psql|pgbench)\b/;
-const SINK_CALL = /\b(?:query|execute)['"\]]*\s*(?:<[^>\n]*>)?\s*[(`]/;
+/** What a file holds when it can execute SQL: a raw API, the pg driver, a SQL CLI; or the name of a sink member (called or not: PR #1111 r1 item 2). */
+const SINK_WORD = new RegExp(`(?:query|execute)Raw|['"]pg['"]|${SQL_CLI_WORD.source}`);
+const SINK_CALL = /\b(?:query|execute)\b/;
 
 const CALLS = new Set(['now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp']);
 const KEYWORD_CLOCK = 'current_timestamp';
@@ -1296,18 +1295,20 @@ const SQL_TEXT_EXECUTORS = new Set([
   'ts_stat',
   'ts_rewrite', // both overloads refused; no argument-type inference
 ]);
+/**
+ * PR #1111 r1 item 4: ONE test of a call that executes SQL text, for the migration replay and
+ * for every text read as executed (dynamicSites): a name above, under any schema or none; what
+ * dblink and pg_background run; every function of schema `cron`, and pg_cron's three that take
+ * a command by their own name (a search_path may reach them unqualified).
+ */
+const executorAt = (tokens, i) => {
+  const name = nameOf(tokens[i]);
+  return name !== null && isOp(tokens[i + 1], '(') &&
+    (SQL_TEXT_EXECUTORS.has(name) || /^(?:dblink|pg_background_)|^(?:schedule|schedule_in_database|alter_job)$/.test(name) ||
+      (isOp(tokens[i - 1], '.') && nameOf(tokens[i - 2]) === 'cron'));
+};
 function sqlTextExecutor(tokens) {
-  const executor = tokens.find((t, i) => {
-    const name = nameOf(t);
-    return (
-      name !== null &&
-      isOp(tokens[i + 1], '(') &&
-      (SQL_TEXT_EXECUTORS.has(name) ||
-        /^(?:dblink|pg_background_)/.test(name) ||
-        (isOp(tokens[i - 1], '.') && nameOf(tokens[i - 2]) === 'cron'))
-    );
-  });
-  return executor?.value ?? null;
+  return tokens.find((_, i) => executorAt(tokens, i))?.value ?? null;
 }
 
 function opaqueStringCall(tokens, i) {
@@ -2053,22 +2054,38 @@ function textConstants(tokens, block) {
 
 // PL/pgSQL runs EXECUTE where a statement starts, after RETURN QUERY, FOR … IN and OPEN … FOR.
 const BEFORE_EXECUTE = ['begin', 'then', 'else', 'loop', 'in', 'for', 'query'];
+/**
+ * PR #1111 r1 item 5: what stands in front of tokens[i] runs the statement that starts there:
+ * EXPLAIN [ANALYZE] [VERBOSE], EXPLAIN (options), or the AS of a statement that creates a table.
+ */
+const runsNext = (tokens, i) => {
+  let at = i - 1;
+  if (isWord(tokens[at], 'as')) {
+    // The first AS after CREATE … TABLE: a later one names a column or a table of its query.
+    for (let table = false; (at -= 1) >= 0 && !isOp(tokens[at], ';') && !isWord(tokens[at], 'as'); table ||= isWord(tokens[at], 'table'))
+      if (isWord(tokens[at], 'create')) return table;
+    return false;
+  }
+  if (isOp(tokens[at], ')')) for (let depth = 0; at >= 0 && (depth += isOp(tokens[at], ')') - isOp(tokens[at], '(')) > 0;) at -= 1;
+  else while (isWord(tokens[at], 'analyze', 'analyse', 'verbose')) at -= 1;
+  return isWord(tokens[isOp(tokens[at], '(') ? at - 1 : at], 'explain');
+};
 const AFTER_DYNAMIC = ['into', 'using', 'loop'];
 /**
  * FU-337: where a text runs SQL it builds, as token ranges `[start, end)` of the expression that
- * is run: PL/pgSQL EXECUTE, and a call of a function that executes its argument. EXECUTE is the
- * statement where one can start: at the start of the text, after `;`, a label, a hole, or one of
- * BEFORE_EXECUTE. Elsewhere (GRANT EXECUTE ON, a trigger's EXECUTE FUNCTION, prose) it runs
+ * is run: PL/pgSQL EXECUTE, and a call of a function that executes its argument (executorAt: its
+ * whole argument list, so a call with more than the one text is a site to list). EXECUTE is the
+ * statement where one can start: at the start of the text, after `;`, a label, a hole, one of
+ * BEFORE_EXECUTE, or what runsNext knows. Elsewhere (GRANT EXECUTE ON, a trigger's EXECUTE FUNCTION, prose) it runs
  * nothing; the one word 'EXECUTE' is the name of the privilege.
  */
 function dynamicSites(tokens) {
   const sites = [];
   tokens.forEach((t, i) => {
-    if (SQL_TEXT_EXECUTORS.has(nameOf(t)) && isOp(tokens[i + 1], '('))
-      return sites.push({ start: i + 1, end: closing(tokens, i + 1) + 1 });
+    if (executorAt(tokens, i)) return sites.push({ start: i + 1, end: closing(tokens, i + 1) + 1 });
     const before = tokens[i - 1];
     const starts = !before || isOp(before, ';') || (isOp(before, '>') && isOp(tokens[i - 2], '>')) ||
-      before.type === 'placeholder' || isWord(before, ...BEFORE_EXECUTE);
+      before.type === 'placeholder' || isWord(before, ...BEFORE_EXECUTE) || runsNext(tokens, i);
     if (!isWord(t, 'execute') || tokens.length === 1 || !starts || isWord(tokens[i + 1], 'on')) return;
     let end = i + 1;
     for (let depth = 0; end < tokens.length; end += 1) {
@@ -2250,7 +2267,7 @@ export function cliSqlSites(script, read = null, line = 0, depth = 0) {
     .filter((inner) => mentions(inner.script))
     .flatMap((inner) => cliSqlSites(inner.script, inner.shell ? null : here, line + inner.line, depth + 1));
   for (const { words, input, startLine, endLine } of parsed.commands) {
-    const at = words.findIndex(({ value }) => SQL_CLI.test(value));
+    const at = cliAt(words.map(({ value }) => value));
     let command = lines.slice(startLine, endLine + 1).join('\n');
     if (at < 0) {
       // `bash -c "psql …"`, `ssh host "psql …"`: a word that is shell text of its own, run from
@@ -2262,8 +2279,10 @@ export function cliSqlSites(script, read = null, line = 0, depth = 0) {
       continue;
     }
     const argv = words.slice(at + 1).map((word) => (word.split ? undefined : shellText(word)));
-    const first = words.slice(0, at).every(({ value }) => /^(?:[A-Za-z_]\w*=.*|if|then|else|elif|do|while|until|!|\{)$/s.test(value));
-    const found = first && SQL_CLI.exec(words[at].value)[1] ? psqlSql(argv) : null;
+    // Item 3: Prisma's `db execute` is read where the word in front of it is the program `prisma`.
+    const prisma = !SQL_CLI.test(words[at].value), program = prisma && /(?:^|\/)prisma$/.test(words[at - 1]?.value) ? at - 1 : at;
+    const first = words.slice(0, program).every(({ value }) => /^(?:[A-Za-z_]\w*=.*|if|then|else|elif|do|while|until|!|\{)$/s.test(value));
+    const found = !first || (prisma && program === at) ? null : prisma ? prismaSql(argv.slice(1)) : SQL_CLI.exec(words[at].value)[1] ? psqlSql(argv) : null;
     const runs = [...command.matchAll(/(^|[^<])(<+)/g)];
     const stdin = () => {
       // `0>&3` makes descriptor 3 the standard input as `<&3` does.
