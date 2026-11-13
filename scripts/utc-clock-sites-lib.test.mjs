@@ -2708,6 +2708,80 @@ test('PR #1109 r1 F2: a file and standard input are read only where they are wha
   assertUnresolved(refused, passing, fixtures);
 });
 
+// PR #1109 r2 F2 (FU-340 part B): the file `psql -f` names is the repository's only while no step
+// of its job, the step itself included, may have written or restored it (ci-write-targets-lib.mjs,
+// the model the shell reader shares). Each `earlier`, `same` and `after` row printed [] before.
+test('PR #1109 r2 F2: a file a step may have written before psql reads it leaves the site unresolved', () => {
+  const f = 'psql -f fixtures/claim.sql';
+  const composite = (script) => `runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: ${script}\n`;
+  const fixtures = { 'fixtures/claim.sql': 'SELECT 1', 'fixtures/other.sql': 'SELECT 1',
+    '.github/actions/write/action.yml': composite('echo "$SQL" > fixtures/claim.sql'), '.github/actions/quiet/action.yml': composite('echo ok > /tmp/log'),
+    '.github/actions/outer/action.yml': 'runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/quiet\n',
+    '.github/actions/torn/action.yml': 'runs:\n  steps: [\n', '.github/actions/dangling/action.yml': 'runs:\n  using: composite\n  steps:\n    - *missing\n' };
+  const jobs = (...steps) => `jobs:\n  a:\n    steps:\n${steps.map((step) => `      - ${step.replace(/\n/g, '\n        ')}\n`).join('')}`;
+  const run = (script) => `run: |\n  ${script.replace(/\n/g, '\n  ')}`;
+  const uses = (action, inputs = {}) => `uses: ${action}${Object.keys(inputs).length ? `\nwith:${Object.entries(inputs).map(([key, value]) => `\n  ${key}: ${value}`).join('')}` : ''}`;
+  const [refused, passing] = [{}, {}];
+  const name = (kind, at) => `.github/workflows/${kind}-${at}.yml`;
+  // The review's trigger and its siblings: a redirection and every program that writes its operands; a target this cannot place.
+  const writes = ['printf "%s" "$SQL" > fixtures/claim.sql', 'cp "$SRC" fixtures/claim.sql', 'cp /tmp/x.sql fixtures/claim.sql', 'cp -t fixtures /tmp/claim.sql',
+    'mv /tmp/x.sql fixtures/claim.sql', 'install /tmp/x.sql fixtures/claim.sql', 'ln -sf /tmp/x.sql fixtures/claim.sql', 'dd if=/tmp/x.sql of=fixtures/claim.sql',
+    'echo x | tee fixtures/claim.sql', 'sed -i s/1/2/ fixtures/claim.sql', 'curl -fsSo fixtures/claim.sql https://example.org/x', 'curl -fsS https://example.org/x --output fixtures/claim.sql',
+    'curl -fsSO https://example.org/claim.sql', 'curl -fsS https://example.org/x -o"$OUT"', 'wget -O fixtures/claim.sql https://example.org/x', 'wget -P fixtures https://example.org/claim.sql', 'wget https://example.org/claim.sql',
+    'tar -xzf /tmp/a.tgz', 'tar -xzf /tmp/a.tgz -C fixtures', 'unzip /tmp/a.zip -d fixtures', 'git checkout other -- fixtures', 'patch -p1 -i /tmp/x.patch',
+    `bash -c 'echo x > fixtures/claim.sql'`, `eval 'echo x > fixtures/claim.sql'`, 'echo x > "$OUT"', 'echo x > "${dir}/claim.sql"', 'echo x > ./fixtures/../fixtures/claim.sql',
+    'echo x > fixtures', 'echo x > /home/runner/work/repo/repo/fixtures/claim.sql', '$writer /tmp/x.sql fixtures/claim.sql', 'echo x | xargs tee', 'cat > fixtures/claim.sql <<EOF\nx\nEOF',
+    // The self-review (rule 4): an option cluster with `#`, a computed word where an option may stand, `trap --`, a `cd` that `eval` runs, a wrapper
+    // that changes directory or splits its value into a command, a nested backtick, a runner's name the text binds, a value an expression pastes in.
+    'curl -#fLo fixtures/claim.sql https://example.org/x', 'curl "$FLAG" fixtures/claim.sql https://example.org/x', 'sed "$FLAG" s/1/2/ fixtures/claim.sql',
+    `trap -- 'echo x > fixtures/claim.sql' EXIT`, `eval 'cd fixtures'\necho x > claim.sql`, 'echo x | env -C fixtures tee claim.sql', `env -S 'cp /tmp/x fixtures/claim.sql'`,
+    'x=`echo \\`cp /tmp/x fixtures/claim.sql\\``', 'RUNNER_TEMP=.\necho x > "$RUNNER_TEMP/fixtures/claim.sql"', 'echo ${{ env.MSG }}'];
+  for (const [at, write] of writes.entries()) {
+    refused[name('same', at)] = jobs(run(`${write}\n${f}`));
+    refused[name('after', at)] = jobs(run(`${f}\n${write}`)); // a loop or a function runs a later command first: no order is read
+    refused[name('earlier', at)] = jobs(run(write), run('echo ok'), run(f));
+    passing[name('later', at)] = jobs(run(f), run(write));
+    passing[name('job', at)] = `${jobs(run(write))}  b:\n    steps:\n      - ${run(f).replace(/\n/g, '\n        ')}\n`;
+  }
+  // What an action restores, from its inputs as written; an action or an input this does not read.
+  const restores = [uses('actions/download-artifact@v4'), uses('actions/download-artifact@v4', { path: 'fixtures' }), uses('actions/download-artifact@v4', { path: '${{ env.DIR }}' }),
+    uses('actions/cache@v4', { key: 'k', path: 'fixtures/claim.sql' }), uses('actions/cache@v4', { key: 'k' }), uses('actions/checkout@v4', { ref: 'other' }),
+    uses('actions/checkout@v4', { repository: 'o/r' }), uses('owner/unknown@v1'), uses('./.github/actions/write'), uses('./.github/actions/missing'),
+    uses('aquasecurity/trivy-action@v1', { output: 'fixtures/claim.sql', 'cache-dir': '/tmp/t' }), uses('actions/download-artifact@v4', { path: "''" }),
+    uses('./.github/actions/torn'), uses('./.github/actions/dangling'), `working-directory: fixtures\n${run('ln -sf /tmp/claim.sql')}`];
+  for (const [at, restore] of restores.entries()) {
+    refused[name('restored', at)] = jobs(restore, run(f));
+    passing[name('restored-later', at)] = jobs(run(f), restore);
+  }
+  // The same file under another spelling; a step another shell reads; a local action a step before it replaced.
+  refused[name('dot', 0)] = jobs(run('echo x > ./fixtures//claim.sql'), run('psql -f ./fixtures/claim.sql'));
+  refused[name('shell', 0)] = jobs(`shell: python\n${run('open("fixtures/claim.sql", "w")')}`, run(f));
+  refused[name('replaced', 0)] = jobs(run('echo x > .github/actions/quiet/action.yml'), uses('./.github/actions/quiet'), run(f));
+  passing[name('replaced', 1)] = jobs(run('echo x > .github/actions/other/action.yml'), uses('./.github/actions/quiet'), run(f));
+  refused[name('replaced', 2)] = jobs(run('echo x > .github/actions/quiet/action.yml'), uses('./.github/actions/outer'), run(f)); // the action it uses in turn
+  refused[name('replaced', 3)] = jobs(run('echo x > .github/actions/quiet/action.yml'), uses('./.github/actions/quiet/'), run(f));
+  passing[name('replaced', 4)] = jobs(uses('./.github/actions/outer'), run(f));
+  // A key written twice (which of the two runs is not read here); an alias without its anchor.
+  refused[name('twice', 0)] = `jobs:\n  a:\n    steps:\n      - run: echo x > fixtures/claim.sql\n    steps:\n      - run: ${f}\n`;
+  refused[name('twice', 1)] = `jobs:\n  a:\n    steps:\n      - run: echo x > fixtures/claim.sql\n  a:\n    steps:\n      - run: ${f}\n`;
+  refused[name('dangling', 0)] = `jobs:\n  a:\n    steps:\n      - *missing\n      - run: ${f}\n`;
+  // A step that is an alias of one that writes, defined in another job.
+  refused[name('alias', 0)] = `jobs:\n  a:\n    steps:\n      - &write\n        run: echo x > fixtures/claim.sql\n  b:\n    steps:\n      - *write\n      - run: ${f}\n`;
+  // A step before it that takes its text from a merge key, which is not applied here.
+  refused[name('merge', 0)] = `x: &write { run: 'echo x > fixtures/claim.sql' }\n${jobs('<<: *write', run(f))}`;
+  // An action's own step runs after steps of its caller, which are not known here.
+  refused['.github/actions/sql/action.yml'] = composite(f);
+  // Controls: another file, a place outside the checkout, an action that restores elsewhere or writes nothing.
+  const elsewhere = ['printf x > fixtures/other.sql', 'echo x > fixtures/claim.sql2', 'echo x > /tmp/claim.sql', 'echo x > "$RUNNER_TEMP/fixtures/claim.sql"', 'echo x >> "$GITHUB_ENV"',
+    `curl -s -o /dev/null -w '%{http_code}' https://example.org/fixtures/claim.sql`, 'cp /tmp/a /tmp/b', 'sed -n p fixtures/claim.sql', 'git log -1 -- fixtures/claim.sql'];
+  for (const [at, write] of elsewhere.entries()) passing[name('elsewhere', at)] = jobs(run(write), run(`${write}\n${f}`));
+  const inert = [uses('actions/checkout@v4'), uses('actions/checkout@v4', { 'fetch-depth': 0 }), uses('actions/download-artifact@v4', { path: 'fixtures/other.sql' }),
+    uses('actions/download-artifact@v4', { path: '${{ runner.temp }}/x' }), uses('actions/cache@v4', { key: 'k', path: '~/.cache/x' }),
+    uses('actions/upload-artifact@v4', { name: 'n', path: 'fixtures' }), uses('./.github/actions/quiet')];
+  for (const [at, step] of inert.entries()) passing[name('inert', at)] = jobs(step, run(f));
+  assertUnresolved(refused, passing, fixtures);
+});
+
 test('PR #1109 r1 F3, PR #1111 r1 item 1: a part this cannot read, anywhere in the executed text, leaves the site unresolved', () => {
   const U = UNKNOWN_SQL;
   for (const text of [`DELETE FROM task ${U}`, `EXPLAIN ${U}`, `DELETE FROM task WHERE id = ${U}`, `SELECT ${U} FROM task`, `DO $$BEGIN ${U}; END$$`,
