@@ -262,7 +262,15 @@ export function handlingFailureCause(error: unknown): Error {
 
 /** Ambiguous handling: bounded retry, then DLQ for reconciliation, never a success claim. */
 export class EventHandlingUnconfirmedError extends Error {
-  constructor(message: string, cause?: unknown) {
+  constructor(
+    message: string,
+    cause?: unknown,
+    readonly evidencePolicy?: {
+      attempts: number;
+      backoffMs: number;
+      persist: () => Promise<void>;
+    },
+  ) {
     // Driver messages/stacks can contain SQL and tenant values. Keep only a closed SDK code.
     super(message, { cause: handlingFailureCause(cause) });
   }
@@ -706,8 +714,9 @@ export class EventConsumer {
       return;
     }
 
-    const maxRetries = this.options.maxRetries ?? DEFAULT_MAX_RETRIES;
-    const backoff = this.options.retryBackoffMs ?? DEFAULT_BACKOFF_MS;
+    let maxRetries = this.options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    let backoff = this.options.retryBackoffMs ?? DEFAULT_BACKOFF_MS;
+    let evidencePolicy: EventHandlingUnconfirmedError['evidencePolicy'];
 
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       // Once stopping, no attempt starts — the first included — and the pause
@@ -753,6 +762,22 @@ export class EventConsumer {
         const event = `${envelope.eventName} ${logField(envelope.eventId)}`;
         const message = handlerMessage(error);
 
+        if (error instanceof EventHandlingUnconfirmedError && error.evidencePolicy) {
+          // The evidence window starts at its first refusal, even after ordinary retries.
+          if (!evidencePolicy)
+            maxRetries = Math.max(maxRetries, attempt + error.evidencePolicy.attempts - 1);
+          evidencePolicy = error.evidencePolicy;
+          backoff = Math.max(backoff, evidencePolicy.backoffMs);
+        }
+        if (
+          attempt === maxRetries &&
+          evidencePolicy &&
+          !(error instanceof UnprocessableEventError)
+        ) {
+          // A failed evidence commit propagates, leaving the offset uncommitted.
+          await evidencePolicy.persist();
+          this.abandonIfPastDeadline(run, { topic, partition, offset });
+        }
         if (error instanceof EventHandlingUnconfirmedError) {
           this.logger.error(
             `Handling unconfirmed ${event}: ${message}; cause=${(error.cause as Error).message}`,
@@ -794,7 +819,7 @@ export class EventConsumer {
         this.logger.warn(`Attempt ${attempt}/${maxRetries} failed for ${event}: ${message}`);
         // The member stays in its group across the pause (#240 r12).
         beat?.();
-        await this.pause(run, backoff * attempt);
+        await this.pause(run, evidencePolicy ? backoff : backoff * attempt);
         beat?.();
       }
     }

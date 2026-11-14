@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Prisma } from '../src/generated/prisma';
-import type { EventEnvelope } from '@rasta/contracts';
+import { MeterInventoryAuthorityRefusal, type EventEnvelope } from '@rasta/contracts';
 import { MeterFullRun, MeterFullRunRefusal } from '../src/maintenance/meter-full-run';
 import { lockUsageMeter } from '../src/maintenance/usage-meter';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
@@ -233,6 +233,19 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       withQuarantineClear: async (_runId, _boundary, fn) => fn(proof),
     });
     await expect(c.activate(runId, actor, [])).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+    expect(await c.status(runId, actor)).toBeNull();
+    expect(await eventRows()).toHaveLength(0);
+  });
+  it('keeps a definite inventory authority refusal named before the callback', async () => {
+    const c = new MeterFullRun(prisma, {
+      withSealedInventory: async (_runId, fn) => fn(inventory([])),
+      withQuarantineClear: async () => {
+        throw new MeterInventoryAuthorityRefusal('SOURCE_DRIFT_QUARANTINED');
+      },
+    });
+    await expect(c.activate(runId, actor, [])).rejects.toEqual(
+      new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED'),
+    );
     expect(await c.status(runId, actor)).toBeNull();
     expect(await eventRows()).toHaveLength(0);
   });

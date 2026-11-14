@@ -1,6 +1,9 @@
 import { EventHandlingUnconfirmedError, UnprocessableEventError } from '@rasta/nest-common';
-import { Prisma } from '../generated/prisma';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import { createHash } from 'node:crypto';
+
+const ACTIVATION_RETRY_ATTEMPTS = 8;
+const ACTIVATION_RETRY_BACKOFF_MS = 10_000;
 
 export class SourceDriftRefusal extends EventHandlingUnconfirmedError {
   constructor(
@@ -31,22 +34,26 @@ export async function quarantineTransaction<T>(
 ): Promise<T> {
   let refused = false;
   let callbackReturned = false;
+  let entered = false;
+  let refusal: SourceDriftRefusal | undefined;
   let result: T | SourceDriftRefusal;
   try {
     result = await transaction(async (tx) => {
       const [gate] = await tx.$queryRaw<{ run_id: string | null }[]>`
-        SELECT run_id FROM meter_inventory_seal WHERE id = true FOR SHARE`;
+        SELECT run_id FROM meter_inventory_seal WHERE id = true FOR SHARE NOWAIT`;
       if (!gate) throw new EventHandlingUnconfirmedError('SOURCE_FENCE_MISSING');
       // Sweep ownership must survive rollback, including before evidence capacity is locked.
       await cleanup?.lock(tx);
       await tx.$executeRaw`SAVEPOINT source_event_effects`;
       try {
+        entered = true;
         const value = await fn(tx);
         callbackReturned = true;
         return value;
       } catch (error) {
         if (!(error instanceof SourceDriftRefusal)) throw error;
         refused = true;
+        refusal = error;
         await tx.$executeRaw`ROLLBACK TO SAVEPOINT source_event_effects`;
         if (!gate.run_id) throw new EventHandlingUnconfirmedError('SOURCE_FENCE_MISSING');
         // Terminal sweep cleanup shares the evidence commit; failure preserves the parked row.
@@ -64,17 +71,23 @@ export async function quarantineTransaction<T>(
       }
     });
   } catch (error) {
-    // Includes persistence failures and ambiguous COMMIT; retry/DLQ retains the unresolved classification.
-    if (refused) {
-      const full =
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2010' &&
-        error.meta?.code === 'P0001' &&
-        error.meta?.message === 'ERROR: SOURCE_DRIFT_QUARANTINE_FULL';
-      throw new EventHandlingUnconfirmedError(
-        full ? 'SOURCE_DRIFT_QUARANTINE_FULL' : 'SOURCE_DRIFT_QUARANTINE_UNCONFIRMED',
-        error,
-      );
+    if (refused || !entered) {
+      // Seven pauses of at least 10s exceed tx2 (30s), tx1/pool and token release.
+      // No seal dependency: missing gates and expired activation tokens need evidence too.
+      const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
+      throw new EventHandlingUnconfirmedError('SOURCE_DRIFT_QUARANTINE_UNCONFIRMED', error, {
+        attempts: ACTIVATION_RETRY_ATTEMPTS,
+        backoffMs: ACTIVATION_RETRY_BACKOFF_MS,
+        persist: async () => {
+          await transaction(async (tx) => {
+            await tx.$executeRaw`INSERT INTO meter_drift_overflow
+              (event_id, asset_id, named_owner, reason, run_id)
+              VALUES (${`HOLD:${hash(eventId)}`}, ${hash(refusal?.assetId ?? eventId)},
+                'PLATFORM', 'SOURCE_DRIFT_HOLD', 'UNCONFIRMED') ON CONFLICT (event_id) DO NOTHING`;
+            return undefined as T;
+          });
+        },
+      });
     }
     if (callbackReturned)
       throw new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED', error);

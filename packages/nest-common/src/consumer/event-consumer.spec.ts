@@ -1,6 +1,7 @@
 import {
   EventConsumer,
   EventHandlingUnconfirmedError,
+  handlingFailureCause,
   UnprocessableEventError,
   subscribedTopics,
 } from './event-consumer';
@@ -126,6 +127,37 @@ describe('EventConsumer delivery metadata', () => {
     handler.mockResolvedValue(undefined);
     await deliver(consumer, labels.topic, 0, envelopeBytes({ eventId: 'NEXT_EVENT' }));
     expect(handler).toHaveBeenCalledTimes(4);
+  });
+  it('rethrows unconfirmed handling without a configured DLQ', async () => {
+    const failure = new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED');
+    const send = jest.fn();
+    const consumer = new EventConsumer(
+      { ...options, maxRetries: 1 },
+      async () => {
+        throw failure;
+      },
+      silentLogger,
+    );
+    (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
+    await expect(deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes())).rejects.toBe(failure);
+    expect(send).not.toHaveBeenCalled();
+  });
+  it.each([
+    Object.defineProperty({}, 'code', {
+      get() {
+        throw new Error('private getter');
+      },
+    }),
+    new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('private proxy');
+        },
+      },
+    ),
+  ])('sanitizes foreign access failures to unknown', (foreign) => {
+    expect(handlingFailureCause(foreign).message).toBe('unknown');
   });
   it('gives the handler the topic and partition the broker reported', async () => {
     const seen: EventDelivery[] = [];

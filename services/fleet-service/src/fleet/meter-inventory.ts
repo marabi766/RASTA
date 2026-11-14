@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   FLEET_METER_INVENTORY_SEALED,
+  MeterInventoryAuthorityRefusal,
   fleetMeterInventorySealedPayloadV1,
   meterReconcileOperatorSchema,
 } from '@rasta/contracts';
@@ -26,7 +27,7 @@ export interface FleetMeterInventory {
   boundary: string;
   assets: z.infer<typeof assetsSchema>;
 }
-export class FleetMeterInventoryRefusal extends Error {}
+export class FleetMeterInventoryRefusal extends MeterInventoryAuthorityRefusal {}
 
 /** Durable source fence, with no activation or release path in this slice. */
 export class FleetMeterInventorySeal {

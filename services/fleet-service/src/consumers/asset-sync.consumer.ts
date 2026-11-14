@@ -2,6 +2,7 @@ import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } fro
 import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   HANDLER_MESSAGE_MAX,
+  EventHandlingUnconfirmedError,
   UnprocessableEventError,
   createSystemContext,
   deadLetterHeaders,
@@ -1272,6 +1273,9 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       });
       if (this.sweepStopped) return 'STOPPED';
       if (!failed || failed.attempts < this.parking.maxAttempts) return 'KEPT';
+      if (error instanceof EventHandlingUnconfirmedError && error.evidencePolicy)
+        await error.evidencePolicy.persist();
+      if (this.sweepStopped) return 'STOPPED';
       // Even if terminal cleanup fails, the attempt above remains durable and
       // this row leaves the head of the least-recently-tried order.
       return this.repository.transaction(async (tx): Promise<ParkedOutcome> => {

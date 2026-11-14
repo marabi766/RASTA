@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   MAINTENANCE_METER_FULL_RUN_ACTIVATED,
+  MeterInventoryAuthorityRefusal,
   MAINTENANCE_METER_FULL_RUN_ACTIVATED_VERSION,
   maintenanceMeterFullRunPayloadV1,
   meterReconcileOperatorSchema,
@@ -120,6 +121,12 @@ function quarantineClearAuthority(
                 (error) => error instanceof MeterFullRunRefusal,
               )
               .catch((error: unknown) => {
+                if (
+                  !entered &&
+                  error instanceof MeterInventoryAuthorityRefusal &&
+                  error.code === 'SOURCE_DRIFT_QUARANTINED'
+                )
+                  throw new MeterFullRunRefusal(error.code);
                 if (!entered && !(error instanceof MeterFullRunRefusal))
                   throw new Error('SOURCE_CLEARANCE_UNCONFIRMED');
                 throw error;

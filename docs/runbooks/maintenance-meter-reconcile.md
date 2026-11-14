@@ -373,3 +373,15 @@ Retention alarm: `RastaConsumerLag` fires for nonzero lag sustained for 5 minute
 Require that threshold to remain below one quarter of the **shortest effective**
 source/retry topic retention, and recover or export evidence before retention expires.
 Verify deployed broker/topic overrides; offset lag alone does not measure record age.
+
+Activation contention and failed quarantine persistence use at least eight attempts,
+with seven pauses of at least 10 seconds (70 seconds, beyond tx2's 30-second limit
+plus tx1/pool/release time). Seal contention refuses immediately and retries.
+Exhaustion first commits a `SOURCE_DRIFT_HOLD` in bounded platform overflow:
+`event_id = HOLD:<SHA-256(event id)>`, `asset_id = SHA-256(asset id or event id)`;
+no owner values are copied. The permanent overflow counter bars activation.
+A failed hold commit rethrows without acknowledging or publishing to DLQ.
+This consumer handles each partition serially: `INSPECTION_FAILED` and
+`INSURANCE_EXPIRED` on that partition share the bounded wait; reordering safety
+events would require a separately reviewed consumer design. A definite authority
+`SOURCE_DRIFT_QUARANTINED` remains named; infrastructure stays unconfirmed.

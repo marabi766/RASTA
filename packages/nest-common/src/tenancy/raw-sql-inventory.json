@@ -3284,13 +3284,6 @@
   },
   {
     "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
-    "line": 29,
-    "hash": "e6329a7646e653a33900db925bbc3484a743c680109d1543eec18b25eb157b40",
-    "occurrence": 0,
-    "decision": "platform-wide: locks the global source seal across refusal rollback or activation; never returns owner evidence to a tenant"
-  },
-  {
-    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
     "line": 32,
     "hash": "0e2449d8a34003295589628136d16990f15278486a46b6d0898512c23f2117b1",
     "occurrence": 0,
@@ -3372,5 +3365,19 @@
     "hash": "ba2803215c7b7c30e31de594c222901adf28912e536818cf172db2878fa14383",
     "occurrence": 0,
     "decision": "platform-wide: least-recently-tried insurance sweep spans tenants with bounded batches; each decision rechecks under its asset lock"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 39,
+    "hash": "fe1e0f5c4a76c38a63222112542542527d1e880a8729bd3af23e8bcf5e2671d1",
+    "occurrence": 0,
+    "decision": "platform-wide: nonblocking singleton seal gate before any tenant effect; lock contention becomes bounded activation retry"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 80,
+    "hash": "24ef653572681c8bb19136e43d32778bb0ccd95b21fd9419e2360eb3ce426e46",
+    "occurrence": 0,
+    "decision": "platform-wide: hashed event/asset hold before exhaustion DLQ, bounded by overflow trigger and permanent activation latch; no tenant read"
   }
 ]
