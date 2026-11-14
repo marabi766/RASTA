@@ -592,6 +592,8 @@ export const TABLE_EXEMPTIONS = {
       "receipts held until their predecessor arrives: read by tender (TenderEvidenceRepository.appendLink's owner probe, drain by (tender_id, previous_receipt)) and removed by source_event_id, all served by its keys; the gap monitor counts every held row across tenants by held_at (TenderEvidenceRepository.pendingSummary, ix_tender_receipt_pending_held)",
   },
   fleet: {
+    meter_inventory_seal_asset:
+      'immutable global inventory membership: FleetMeterInventorySeal.seal replaces the complete set under the gate lock, and meter_inventory_creation_fence reads by the physical asset_id primary key across organizations; no tenant-facing query reads it, so a leading organization_id would not serve its lookup',
     asset_transfer_fence: `${TRANSFER_FENCE} (FleetRepository.hasTransferFence, findTransferFence, placeTransferFence)`,
     asset_transfer_release: `${TRANSFER_RELEASE} (FleetRepository.isTransferReleased, releaseTransferFence, purgeExpiredReleases)`,
   },
