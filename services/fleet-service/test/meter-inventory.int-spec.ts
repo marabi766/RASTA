@@ -1,6 +1,7 @@
 import { dlqMessagesTotal, driftEvidenceOwnerChangesTotal } from '@rasta/observability';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { assetSyncRebalanceTimeoutMs, loadFleetEnv } from '../src/config/env';
 import { SourceDriftRefusal } from '../src/fleet/drift-quarantine';
 import { Prisma } from '../src/generated/prisma';
 import { eligibilityClockWrite } from '@rasta/testing';
@@ -104,6 +105,9 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await owner.client.$executeRawUnsafe(
       `CREATE TRIGGER meter_drift_evidence_identity BEFORE INSERT ON "${schema}".meter_drift_quarantine FOR EACH ROW EXECUTE FUNCTION public.meter_drift_evidence_guard()`,
     );
+    await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_activation_holder_guard
+      BEFORE UPDATE ON "${schema}".meter_drift_capacity
+      FOR EACH ROW EXECUTE FUNCTION public.meter_activation_holder_guard()`);
     const role = decodeURIComponent(runtime.username).replaceAll('"', '""');
     await owner.client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`);
     await owner.client.$executeRawUnsafe(
@@ -147,6 +151,79 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       }),
     ).rejects.toThrow('ACTIVE_DRIFT_HOLD_ROLLBACK_REFUSED');
   }
+  // Fixture transitions use the same transaction-local holder protocol as the authority.
+  const setToken = (token: string | null) =>
+    prisma.transaction(async (tx) => {
+      await tx.$queryRaw`SELECT set_config('rasta.meter_activation_token',
+      COALESCE(${token}::uuid, activation_token)::text, true) FROM meter_drift_capacity FOR UPDATE`;
+      await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${token}::uuid`;
+    });
+  it.each(['arm', 'clear', 'replace', 'wrong-holder', 'latch-change', 'upsert-clear'])(
+    'runtime raw token UPDATE refuses %s',
+    async (mode) => {
+      const token = randomUUID(),
+        nextToken = randomUUID();
+      if (mode !== 'arm') await setToken(token);
+      // A completed holder transaction must not authorize another pooled transaction.
+      const update = () =>
+        prisma.transaction(async (tx) => {
+          if (mode === 'upsert-clear') {
+            await tx.$executeRaw`INSERT INTO meter_drift_capacity(id) VALUES(true)
+              ON CONFLICT(id) DO UPDATE SET activation_token = NULL`;
+            return;
+          }
+          if (mode === 'wrong-holder' || mode === 'replace' || mode === 'latch-change')
+            await tx.$queryRaw`SELECT set_config('rasta.meter_activation_token',
+          ${mode === 'wrong-holder' ? randomUUID() : mode === 'replace' ? nextToken : token}, true)`;
+          await tx.$executeRaw`UPDATE meter_drift_capacity SET
+        activation_token = ${mode === 'arm' || mode === 'replace' ? nextToken : null}::uuid,
+        overflow_count = overflow_count + ${mode === 'latch-change' ? 1 : 0}`;
+        });
+      await expect(update()).rejects.toThrow('SOURCE_ACTIVATION_HOLDER_REQUIRED');
+      expect(
+        await prisma.client
+          .$queryRaw`SELECT activation_token, overflow_count FROM meter_drift_capacity`,
+      ).toEqual([{ activation_token: mode === 'arm' ? null : token, overflow_count: 0n }]);
+    },
+  );
+  it('ambiguous holder stays durable, transaction-local and blocks guard rollback', async () => {
+    const sealed = await command.seal(runId, actor);
+    const url = new URL(runtime);
+    url.searchParams.set('connection_limit', '1');
+    const single = new PrismaService(url.toString());
+    try {
+      await expect(
+        new FleetMeterInventorySeal(single).withQuarantineClear(
+          runId,
+          sealed.boundary,
+          async () => {
+            throw new Error('UNCONFIRMED');
+          },
+        ),
+      ).rejects.toThrow('UNCONFIRMED');
+      expect(
+        await single.client
+          .$queryRaw`SELECT NULLIF(current_setting('rasta.meter_activation_token', true), '') AS holder`,
+      ).toEqual([{ holder: null }]);
+      await expect(
+        single.client.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL`,
+      ).rejects.toThrow('SOURCE_ACTIVATION_HOLDER_REQUIRED');
+    } finally {
+      await single.stop();
+    }
+    const down = readFileSync(
+      join(__dirname, '../prisma/migrations/20261114180000_meter_activation_holder_guard/down.sql'),
+      'utf8',
+    );
+    const guard = down.match(/DO \$\$ BEGIN[\s\S]*?END \$\$;/)?.[0];
+    if (!guard) throw new Error('holder rollback guard missing');
+    await expect(
+      owner.transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+        await tx.$executeRawUnsafe(guard);
+      }),
+    ).rejects.toThrow('ACTIVE_DRIFT_EVIDENCE_ROLLBACK_REFUSED');
+  });
   const events = () => prisma.client.outboxMessage.findMany({ where: { aggregateId: runId } });
   it.each([
     'token',
@@ -185,8 +262,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       await entered.ready;
     }
     if (['token', 'spent-budget', 'token-clears', 'evidence-failed'].includes(mode))
-      await prisma.client
-        .$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${randomUUID()}::uuid`;
+      await setToken(randomUUID());
     if (mode === 'missing-gate') {
       await owner.client.$executeRawUnsafe(
         `ALTER TABLE "${schema}".meter_inventory_seal DISABLE TRIGGER meter_inventory_seal_fixed`,
@@ -202,6 +278,21 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       {
         brokers: ['localhost:9092'],
         clientId: 'hold-test',
+        rebalanceTimeoutMs: assetSyncRebalanceTimeoutMs(
+          loadFleetEnv({
+            NODE_ENV: 'test',
+            DATABASE_URL: runtime.toString(),
+            KAFKA_BROKERS: 'localhost:9092',
+            REDIS_URL: 'redis://localhost:6379',
+            OIDC_ISSUER_URL: 'http://localhost:8080',
+            OIDC_JWKS_URI: 'http://localhost:8080/certs',
+            OIDC_AUDIENCE: 'test',
+            INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
+            ASSET_SERVICE_URL: 'http://localhost:3103',
+            MAINTENANCE_SERVICE_URL: 'http://localhost:3105',
+            IDENTITY_SERVICE_URL: 'http://localhost:3101',
+          }),
+        ),
         groupId: 'hold-test',
         topics: ['rasta.asset.v1'],
         deadLetterTopic: 'rasta.fleet.v1.dlq',
@@ -225,6 +316,10 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       },
       { log: () => undefined, warn: () => undefined, error: () => undefined },
     );
+    expect(
+      (transport as unknown as { options: { rebalanceTimeoutMs: number } }).options
+        .rebalanceTimeoutMs,
+    ).toBe(300_000);
     const dispatch = transport as unknown as {
       dlqProducer: { send: jest.Mock };
       pause(run: unknown, ms: number): Promise<void>;
@@ -238,8 +333,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     const send = jest.fn().mockResolvedValue(undefined);
     dispatch.dlqProducer = { send };
     const pause = jest.spyOn(dispatch, 'pause').mockImplementation(async () => {
-      if (mode === 'token-clears' && pause.mock.calls.length === 7)
-        await prisma.client.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL`;
+      if (mode === 'token-clears' && pause.mock.calls.length === 7) await setToken(null);
       if (activation) {
         finish.release();
         await activation;
@@ -1253,8 +1347,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     const insert = () => prisma.client.$executeRaw`INSERT INTO meter_drift_quarantine
       (event_id, asset_id, named_owner, reason, run_id) VALUES ('REPLAY', 'AST', ${org.a}, 'SOURCE_INVENTORY_SEALED', ${runId})`;
     await insert();
-    await prisma.client
-      .$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${randomUUID()}::uuid`;
+    await setToken(randomUUID());
     expect(await insert()).toBe(0);
     await expect(prisma.client.$executeRaw`INSERT INTO meter_drift_quarantine
       (event_id, asset_id, named_owner, reason, run_id) VALUES ('NEW', 'AST', ${org.a}, 'SOURCE_INVENTORY_SEALED', ${runId})`).rejects.toThrow(
@@ -1448,10 +1541,9 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     expect(await prisma.client.$queryRaw`SELECT overflow_count FROM meter_drift_capacity`).toEqual([
       { overflow_count: 5n },
     ]);
-    await prisma.client
-      .$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${randomUUID()}::uuid`;
+    await setToken(randomUUID());
     expect(await insert('BOUNDED')).toBe(0);
-    await prisma.client.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL`;
+    await setToken(null);
     await expect(
       command.withQuarantineClear(
         runId,
@@ -1565,9 +1657,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       validUntil: '2027-01-01T00:00:00.000Z',
       ownershipGeneration: 1,
     }));
-    if (mode === 'held-exhausted' || mode.startsWith('refused-then-'))
-      await prisma.client
-        .$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${randomUUID()}::uuid`;
+    if (mode === 'held-exhausted' || mode.startsWith('refused-then-')) await setToken(randomUUID());
     if (mode === 'missing-gate-exhausted') {
       await owner.client.$executeRawUnsafe(
         `ALTER TABLE "${schema}".meter_inventory_seal DISABLE TRIGGER meter_inventory_seal_fixed`,
@@ -1623,7 +1713,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
             .$queryRaw`SELECT reason = 'SOURCE_REFUSAL_SEEN' AS refusal_seen FROM insurance_pending_verification`,
         ).toEqual([{ refusal_seen: true }]);
         await assertHoldDownRefuses();
-        await prisma.client.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL`;
+        await setToken(null);
         await prisma.transaction((tx) => repository.markParkedInsuranceDue(tx, assetId));
         if (mode === 'refused-then-ambiguous-exhausted')
           verify.mockImplementationOnce(async () => {
