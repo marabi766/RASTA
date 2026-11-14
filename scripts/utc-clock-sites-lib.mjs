@@ -1657,8 +1657,20 @@ export const REVIEWED_FUNCTIONS = [
   {
     service: 'fleet-service',
     name: 'meter_inventory_creation_fence',
-    sha256: '3ca7af2591f3eeff8fc8e8ce3e393913fa15b95785c7a6eab3151f57708db26e',
-    why: 'Clock-free creation fence; schema-local set_config quotes trusted TG_TABLE_SCHEMA; assetId is a JSON data key, never SQL; no EXECUTE.',
+    sha256: '37de506f40bab40d26e145de05f45a8be657c7d5c96e2ff125f3d0111a1a8cb5',
+    why: 'Clock-free indexed asset/owner fence; schema-local set_config quotes trusted TG_TABLE_SCHEMA; assetId is a JSON data key, never SQL; no EXECUTE.',
+  },
+  {
+    service: 'fleet-service',
+    name: 'meter_inventory_seal_fixed',
+    sha256: 'cf25c8340aa7daa17fec3cab7d0b3819cfd2138d867522fad43f247964f2b196',
+    why: 'Clock-free atomic membership replacement from NEW.inventory; trusted quoted schema path; JSON keys are data, no EXECUTE.',
+  },
+  {
+    service: 'fleet-service',
+    name: 'meter_inventory_seal_asset_fixed',
+    sha256: 'cade9c93ed72039f534588aea23341b1c365703e2e380506f0943c89da26a927',
+    why: 'Clock-free immutable membership guard; trusted quoted schema path and gate row lock; no EXECUTE.',
   },
   {
     service: 'maintenance-service',

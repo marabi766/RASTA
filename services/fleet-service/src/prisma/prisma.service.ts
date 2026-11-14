@@ -45,6 +45,8 @@ export const TENANT_SCOPED_MODELS = [
  * to exist, and one without a reason fails that spec.
  */
 export const TENANT_SCOPE_EXEMPTIONS = {
+  MeterInventorySealAsset:
+    'Immutable global operator inventory pairs; only the source seal and database creation fence use them, never tenant-facing reads or authorization.',
   AssetRef:
     'Read-only replica of asset facts, written by the asset-sync consumer with no request context and never consulted for an authorization decision; reads apply the organization filter explicitly from the verified request context.',
   AssetTransferFence:

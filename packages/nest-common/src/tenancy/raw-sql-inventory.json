@@ -1346,27 +1346,34 @@
   {
     "file": "services/fleet-service/src/fleet/meter-inventory.ts",
     "line": 53,
-    "hash": "4665685cf38f881249019796d993b1fda2b1f2782e7c27a81d3be00dcf897de5",
+    "hash": "f3de2ed5b8f127467ab43c8c108898a6e93e8d328a101dd002f63aa853689b8a",
     "occurrence": 0,
     "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
   },
   {
     "file": "services/fleet-service/src/fleet/meter-inventory.ts",
-    "line": 55,
-    "hash": "078b0485963adf0f0d31ecc609b8af4d1c1734cdd74ad80ae611816140bfda59",
+    "line": 70,
+    "hash": "19099147206fc506b6c576189f863bce18557f8ad7451d229d4dac5aeca4e51a",
     "occurrence": 0,
     "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
   },
   {
     "file": "services/fleet-service/src/fleet/meter-inventory.ts",
-    "line": 82,
+    "line": 73,
+    "hash": "da1123b7c0889f43eac4972adf44f79c7782928f567fc81151f324f9abe7e402",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 95,
     "hash": "d294b434b1e406d3d1aeb0ccf53a2337f818143ac5766b5571f4ac4be623ebe9",
     "occurrence": 0,
     "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
   },
   {
     "file": "services/fleet-service/src/fleet/meter-inventory.ts",
-    "line": 119,
+    "line": 132,
     "hash": "96dc57af4217d6b5ff78aca07d302a0b002da0f692ab2daf9b56d63159b07179",
     "occurrence": 0,
     "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"

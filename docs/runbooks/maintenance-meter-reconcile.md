@@ -223,8 +223,19 @@ until a later reviewed protocol can coordinate reopening with maintenance; this
 slice provides no release, expiry or automatic activation. Schema-down refuses an
 active source seal. Do not operate this primitive in production yet.
 
+The fence binds the asset/organization pair through indexed, immutable
+`meter_inventory_seal_asset` rows. Owner updates and inserts under another owner
+refuse `SOURCE_OWNER_DRIFT`, including a replica INSERT for a known orphan.
+Historical rows remain readable; new writes must match the sealed owner.
+Sealing refuses immediately with `SOURCE_WRITERS_ACTIVE` when a source writer
+holds conflicting locks; drain writers and retry the same run. Replay takes no
+source-table locks. The operator transaction must use READ COMMITTED.
+The owner-fence migration refuses an already-active legacy seal as
+`SOURCE_SEAL_UPGRADE_REFUSED`: its ownership may already have drifted. Active down
+refuses `SEALED_SOURCE_ROLLBACK_REFUSED`; no automatic repair or reopening exists.
+
 Replay the SAME run and operator after `SOURCE_SEAL_UNCONFIRMED`: it re-serves the
-stored seal, even after source changes or a lost commit response. A different run
+immutable pair inventory after a lost commit response. A different run
 or operator refuses `SOURCE_SEAL_CONFLICT`. Ambient request/service contexts are
 refused. Operator identity is configured and self-asserted, as for per-asset apply.
 A REST authority adapter, durable pre-activation per-asset progress/refusals,
