@@ -21,6 +21,8 @@ import type { InsuranceCover } from './dispatch-blocks';
 import { sourceFenceRefusal } from './source-fence-refusal';
 import {
   quarantineTransaction,
+  persistSourceDriftHold,
+  type SourceHoldCause,
   SourceDriftRefusal,
   type SourceDriftCleanup,
 } from './drift-quarantine';
@@ -68,6 +70,20 @@ export class FleetRepository {
         sourceDriftCleanup,
       );
     return this.prisma.transaction(fn, options);
+  }
+
+  persistDriftHold(
+    eventId: string,
+    assetId: string,
+    cause: SourceHoldCause,
+    tx?: ExtendedPrismaClient,
+  ): Promise<void> {
+    return persistSourceDriftHold(
+      (work) => (tx ? work(tx) : this.prisma.transaction(work)),
+      eventId,
+      assetId,
+      cause,
+    );
   }
 
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {
@@ -1125,6 +1141,7 @@ export class FleetRepository {
         tx.$queryRaw<RawParkedInsurance[]>`
           SELECT event_id, asset_id, organization_id, envelope, message_key, source_topic,
                  source_partition, source_offset, reason, attempts,
+                 reason = 'SOURCE_REFUSAL_SEEN' AS refusal_seen,
                  (COALESCE(next_attempt_at <= now(), false)
                   OR (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
                       AND (last_attempt_at IS NULL
@@ -1145,6 +1162,7 @@ export class FleetRepository {
           sourceOffset: row.source_offset,
           reason: row.reason,
           attempts: row.attempts,
+          refusalSeen: row.refusal_seen,
           due: row.due,
         }
       : null;
@@ -1198,6 +1216,7 @@ export class FleetRepository {
     tx: ExtendedPrismaClient,
     eventId: string,
     reason: string,
+    refusalSeen = false,
   ): Promise<number> {
     const rows = await runUnscoped(
       'a parked insurance event is decided by machine, whichever tenant parked it',
@@ -1205,7 +1224,8 @@ export class FleetRepository {
         tx.$queryRaw<{ attempts: number }[]>`
           UPDATE insurance_pending_verification
              SET attempts = attempts + 1, last_attempt_at = now(), next_attempt_at = NULL,
-                 reason = ${reason}
+                 reason = CASE WHEN reason = 'SOURCE_REFUSAL_SEEN' OR ${refusalSeen}
+                   THEN 'SOURCE_REFUSAL_SEEN' ELSE ${reason} END
            WHERE event_id = ${eventId}
           RETURNING attempts`,
     );
@@ -1307,6 +1327,7 @@ export interface ParkedInsurance {
   sourceOffset: string | null;
   reason: string;
   attempts: number;
+  refusalSeen: boolean;
   /** Whether the sweep may try it now (see `findParkedInsurance`). */
   due: boolean;
 }
@@ -1322,6 +1343,7 @@ interface RawParkedInsurance {
   source_offset: string | null;
   reason: string;
   attempts: number;
+  refusal_seen: boolean;
   due: boolean;
 }
 

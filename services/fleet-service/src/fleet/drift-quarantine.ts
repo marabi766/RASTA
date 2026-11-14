@@ -1,4 +1,5 @@
 import { EventHandlingUnconfirmedError, UnprocessableEventError } from '@rasta/nest-common';
+import { Prisma } from '../generated/prisma';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { driftEvidenceOwnerChangesTotal } from '@rasta/observability';
 import { createHash } from 'node:crypto';
@@ -36,19 +37,30 @@ export async function quarantineTransaction<T>(
   let ownerChanged = false;
   let refused = false;
   let callbackReturned = false;
-  let entered = false;
+  let evidenceCause = false;
   let refusal: SourceDriftRefusal | undefined;
   let result: T | SourceDriftRefusal;
   try {
     result = await transaction(async (tx) => {
       const [gate] = await tx.$queryRaw<{ run_id: string | null }[]>`
-        SELECT run_id FROM meter_inventory_seal WHERE id = true FOR SHARE NOWAIT`;
-      if (!gate) throw new EventHandlingUnconfirmedError('SOURCE_FENCE_MISSING');
+        SELECT run_id FROM meter_inventory_seal WHERE id = true FOR SHARE NOWAIT`.catch(
+        (error: unknown) => {
+          // Only NOWAIT on this exact seal query enters the evidence window.
+          evidenceCause =
+            error instanceof Prisma.PrismaClientKnownRequestError &&
+            error.code === 'P2010' &&
+            error.meta?.code === '55P03';
+          throw error;
+        },
+      );
+      if (!gate) {
+        evidenceCause = true;
+        throw new EventHandlingUnconfirmedError('SOURCE_FENCE_MISSING');
+      }
       // Sweep ownership must survive rollback, including before evidence capacity is locked.
       await cleanup?.lock(tx);
       await tx.$executeRaw`SAVEPOINT source_event_effects`;
       try {
-        entered = true;
         const value = await fn(tx);
         callbackReturned = true;
         return value;
@@ -76,22 +88,21 @@ export async function quarantineTransaction<T>(
       }
     });
   } catch (error) {
-    if (refused || !entered) {
+    if (refused || evidenceCause) {
       // Seven pauses of at least 10s exceed tx2 (30s), tx1/pool and token release.
       // No seal dependency: missing gates and expired activation tokens need evidence too.
-      const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
       throw new EventHandlingUnconfirmedError('SOURCE_DRIFT_QUARANTINE_UNCONFIRMED', error, {
         attempts: ACTIVATION_RETRY_ATTEMPTS,
         backoffMs: ACTIVATION_RETRY_BACKOFF_MS,
-        persist: async () => {
-          await transaction(async (tx) => {
-            await tx.$executeRaw`INSERT INTO meter_drift_overflow
-              (event_id, asset_id, named_owner, reason, run_id)
-              VALUES (${`HOLD:${hash(eventId)}`}, ${hash(refusal?.assetId ?? eventId)},
-                'PLATFORM', 'SOURCE_DRIFT_HOLD', 'UNCONFIRMED') ON CONFLICT (event_id) DO NOTHING`;
-            return undefined as T;
-          });
-        },
+        persist: (lastError) =>
+          persistSourceDriftHold(
+            transaction,
+            eventId,
+            refusal?.assetId,
+            lastError instanceof EventHandlingUnconfirmedError && lastError.evidencePolicy
+              ? 'SOURCE_REFUSAL_UNCONFIRMED'
+              : 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
+          ),
       });
     }
     if (callbackReturned)
@@ -102,4 +113,25 @@ export async function quarantineTransaction<T>(
   if (result instanceof SourceDriftRefusal)
     throw new UnprocessableEventError(result.reason, result.reason);
   return result;
+}
+
+/** Closed operator cause, stored in the HOLD's run_id slot (no sealed run is claimed). */
+export type SourceHoldCause = 'SOURCE_REFUSAL_UNCONFIRMED' | 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL';
+
+export async function persistSourceDriftHold<T>(
+  transaction: (
+    fn: (tx: ExtendedPrismaClient) => Promise<T | SourceDriftRefusal>,
+  ) => Promise<T | SourceDriftRefusal>,
+  eventId: string,
+  assetId: string | undefined,
+  cause: SourceHoldCause,
+): Promise<void> {
+  const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
+  await transaction(async (tx) => {
+    await tx.$executeRaw`INSERT INTO meter_drift_overflow
+      (event_id, asset_id, named_owner, reason, run_id)
+      VALUES (${`HOLD:${hash(eventId)}`}, ${hash(assetId ?? eventId)},
+        'PLATFORM', 'SOURCE_DRIFT_HOLD', ${cause}) ON CONFLICT (event_id) DO NOTHING`;
+    return undefined as T;
+  });
 }

@@ -1226,6 +1226,13 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
 
         const attempts = await this.repository.recordParkedAttempt(tx, eventId, decided.reason);
         if (attempts >= this.parking.maxAttempts) {
+          if (row.refusalSeen)
+            await this.repository.persistDriftHold(
+              eventId,
+              assetId,
+              'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
+              tx,
+            );
           // One transaction: the dead letter is published exactly when the row
           // and the marker are gone (r9).
           await this.repository.enqueueDeadLetter(
@@ -1269,13 +1276,28 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
           this.parking.minAgeSeconds,
         );
         if (!row || row.attempts !== read.row.attempts) return null;
-        const attempts = await this.repository.recordParkedAttempt(tx, eventId, 'DECISION_FAILED');
+        const attempts = await this.repository.recordParkedAttempt(
+          tx,
+          eventId,
+          'DECISION_FAILED',
+          error instanceof EventHandlingUnconfirmedError && !!error.evidencePolicy,
+        );
         return { row, attempts };
       });
       if (this.sweepStopped) return 'STOPPED';
       if (!failed || failed.attempts < this.parking.maxAttempts) return 'KEPT';
-      if (error instanceof EventHandlingUnconfirmedError && error.evidencePolicy)
-        await error.evidencePolicy.persist();
+      if (
+        !(error instanceof UnprocessableEventError) &&
+        (failed.row.refusalSeen ||
+          (error instanceof EventHandlingUnconfirmedError && error.evidencePolicy))
+      )
+        await this.repository.persistDriftHold(
+          eventId,
+          assetId,
+          error instanceof EventHandlingUnconfirmedError && error.evidencePolicy
+            ? 'SOURCE_REFUSAL_UNCONFIRMED'
+            : 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
+        );
       if (this.sweepStopped) return 'STOPPED';
       // Even if terminal cleanup fails, the attempt above remains durable and
       // this row leaves the head of the least-recently-tried order.
