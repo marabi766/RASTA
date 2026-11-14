@@ -226,13 +226,25 @@ active source seal. Do not operate this primitive in production yet.
 The fence binds the asset/organization pair through indexed, immutable
 `meter_inventory_seal_asset` rows. Owner updates and inserts under another owner
 refuse `SOURCE_OWNER_DRIFT`, including a replica INSERT for a known orphan.
-Historical rows remain readable; new writes must match the sealed owner.
+Historical rows, including foreign-owner parked insurance, may update non-identity
+fields. An UPDATE preserving both the asset key and organization is allowed;
+INSERTs and every identity change must match the sealed pair. The parked sweep
+can count attempts and mark rows due without changing their accepted identity.
 Sealing refuses immediately with `SOURCE_WRITERS_ACTIVE` when a source writer
 holds conflicting locks; drain writers and retry the same run. Replay takes no
 source-table locks. The operator transaction must use READ COMMITTED.
 The owner-fence migration refuses an already-active legacy seal as
 `SOURCE_SEAL_UPGRADE_REFUSED`: its ownership may already have drifted. Active down
 refuses `SEALED_SOURCE_ROLLBACK_REFUSED`; no automatic repair or reopening exists.
+
+Before applying or rolling back `20261113220000_meter_inventory_owner_fence`,
+pause all fleet source writers (consumers, parked sweep, API commands and seeds),
+then wait for their transactions to drain. Its existing ACCESS EXCLUSIVE NOWAIT
+gate lock conflicts with each in-flight writer's FOR SHARE lock. Keep that applied
+migration unchanged to preserve recorded checksums; a later migration cannot fix
+its earlier lock acquisition. A refusal aborts the entire transaction: retry only
+after draining, never bypass the lock. The identity-update follow-up instead waits
+up to `lock_timeout = '5s'` for the gate; timeout still aborts atomically.
 
 Malformed source rows refuse `SOURCE_INVENTORY_MALFORMED`; malformed stored inventory
 refuses `SOURCE_SEAL_INVALID`. Pool, statement and callback failures proven before
