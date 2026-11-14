@@ -1168,8 +1168,8 @@ export class FleetRepository {
 
   /**
    * The sweep's batch: made due by a transfer, or parked and last tried at least
-   * `minAgeSeconds` ago, by the database's clock. Those a transfer made due
-   * first, then the oldest.
+   * `minAgeSeconds` ago, by the database's clock. Least recently tried first,
+   * so transfers cannot keep a failing prefix ahead of another tenant.
    */
   async listDueParkedInsurance(
     minAgeSeconds: number,
@@ -1184,7 +1184,7 @@ export class FleetRepository {
               OR (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
                   AND (last_attempt_at IS NULL
                        OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int)))
-           ORDER BY next_attempt_at IS NULL, first_seen_at, event_id
+           ORDER BY last_attempt_at NULLS FIRST, first_seen_at, event_id
            LIMIT ${limit}`,
     );
     return rows.map((row) => ({ eventId: row.event_id, assetId: row.asset_id }));

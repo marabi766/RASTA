@@ -328,8 +328,9 @@ capacity and zero unresolved entries, and first commits a durable activation tok
 the exclusive seal lock through the activation
 callback's settlement. Quarantine inserts refuse `SOURCE_ACTIVATION_HELD` while
 that token exists, even if the live transaction times out or loses its connection.
-Only a confirmed activation callback clears the token; errors or ambiguous commits
-retain it and refuse further activation until the separate operator recovery slice. Maintenance also requires a live `assertHeld` capability inside its transaction
+Known local preconditions are checked before arming the token. A callback that never
+started, or a proven maintenance refusal, releases its own token in a separate
+transaction. An uncertain outcome retains the token for operator recovery. Maintenance also requires a live `assertHeld` capability inside its transaction
 and before its final marker write. An expired callback/transaction refuses.
 The proof is scoped to that callback; it cannot be cached
 or reused as a certificate snapshot. Missing, stale, malformed or unreadable
@@ -346,7 +347,29 @@ applying/downing `20261114120000_meter_drift_quarantine`; its gate lock waits at
 most 5s. Down refuses an active seal or any retained evidence with
 `ACTIVE_DRIFT_QUARANTINE_ROLLBACK_REFUSED`. Operator reconciliation/clearing, REST
 authority, activation CLI, durable progress and versioned reopening remain next.
-FU-353 (#1136 r1 L1/L2/L3) remains a separate size-bounded follow-up.
+FU-353 (#1136 r1 L1/L2/L3) was completed in #1141.
 
 Per-asset apply refuses oversized snapshots as `SNAPSHOT_NOT_AUDITABLE` and invalid
 post-lock audit payloads as `CUTOVER_AUDIT_INVALID`; neither is an ambiguous commit.
+
+Overflow evidence is platform-only: inspect `meter_drift_overflow` and
+`meter_drift_capacity.overflow_count` through the fleet operator database channel,
+never a tenant endpoint. `SOURCE_DRIFT_QUARANTINE_FULL` is terminal only after its
+row commits; Kafka then publishes the envelope to DLQ. The quarantine retains
+10,000 fixed rows; overflow retains the latest 10,000 rows, one per event id,
+evicting oldest rows under the capacity lock in the same commit as their replacement.
+Identifiers remain byte-bounded. The permanent counter saturates at bigint maximum
+and bars activation even after an overflow row is evicted. This counts admissions,
+including redelivery after eviction, not lifetime distinct events. Export evidence
+before its bounded window rolls; clearing and reconciliation remain deferred.
+
+The sweep orders due rows by least recently tried. A failed decision records an
+attempt and backoff in its own transaction, checking the observed attempt version
+under the asset lock. Only attempt metadata may advance with a missing gate;
+identity and envelope changes still refuse. Exhaustion uses `PARKED_VERIFICATION_EXHAUSTED`; failed terminal
+cleanup cannot roll back the separately committed attempt.
+
+Retention alarm: `RastaConsumerLag` fires for nonzero lag sustained for 5 minutes.
+Require that threshold to remain below one quarter of the **shortest effective**
+source/retry topic retention, and recover or export evidence before retention expires.
+Verify deployed broker/topic overrides; offset lag alone does not measure record age.
