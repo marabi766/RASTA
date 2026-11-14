@@ -42,6 +42,7 @@ export class FleetMeterInventorySeal {
       clear: true;
       assertHeld: () => Promise<void>;
     }) => Promise<T>,
+    isDefiniteRefusal: (error: unknown) => boolean = () => false,
   ): Promise<T> {
     if (tryGetContext()) throw new FleetMeterInventoryRefusal('OPERATOR_CONTEXT_REQUIRED');
     identifier.parse(runId);
@@ -67,38 +68,60 @@ export class FleetMeterInventorySeal {
         const [capacity] = await tx.$queryRaw<{ token: string | null }[]>`
           SELECT activation_token AS token FROM meter_drift_capacity WHERE id = true FOR UPDATE`;
         const [state] = await tx.$queryRaw<{ blocked: boolean }[]>`
-          SELECT EXISTS(SELECT 1 FROM meter_drift_quarantine WHERE run_id = ${runId}) AS blocked`;
+          SELECT EXISTS(SELECT 1 FROM meter_drift_quarantine WHERE run_id = ${runId})
+            OR EXISTS(SELECT 1 FROM meter_drift_capacity WHERE overflow_count > 0) AS blocked`;
         if (!capacity || capacity.token !== null || !state || state.blocked)
           throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
         await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${token}::uuid WHERE id = true`;
       });
-      return this.prisma.transaction(
-        async (tx) => {
-          await lockGate(tx);
-          let held = true;
-          const assertHeld = async (): Promise<void> => {
-            if (!held) throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
-            const [capacity] = await tx.$queryRaw<{ token: string | null }[]>`
+      let entered = false;
+      let refused = false;
+      try {
+        return await this.prisma.transaction(
+          async (tx) => {
+            await lockGate(tx);
+            let held = true;
+            const assertHeld = async (): Promise<void> => {
+              if (!held) throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+              const [capacity] = await tx.$queryRaw<{ token: string | null }[]>`
             SELECT activation_token AS token FROM meter_drift_capacity WHERE id = true FOR SHARE`;
-            if (!capacity || capacity.token !== token)
-              throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
-          };
-          try {
-            await assertHeld();
-            const result = await commit({ runId, boundary, clear: true, assertHeld });
-            // Only a confirmed callback releases the durable barrier. Any failure or
-            // ambiguous commit retains it for the later operator recovery slice.
-            const released =
-              await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL
+              if (!capacity || capacity.token !== token)
+                throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+            };
+            try {
+              await assertHeld();
+              entered = true;
+              let result: T;
+              try {
+                result = await commit({ runId, boundary, clear: true, assertHeld });
+              } catch (error) {
+                refused = isDefiniteRefusal(error);
+                throw error;
+              }
+              // Confirmed success releases here; proven refusals release after rollback.
+              // An ambiguous outcome retains the barrier for operator recovery.
+              const released =
+                await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL
             WHERE id = true AND activation_token = ${token}::uuid`;
-            if (released !== 1) throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
-            return result;
-          } finally {
-            held = false;
-          }
-        },
-        { timeoutMs: 30_000 },
-      );
+              if (released !== 1) throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+              return result;
+            } finally {
+              held = false;
+            }
+          },
+          { timeoutMs: 30_000 },
+        );
+      } catch (error) {
+        // No callback, or an explicitly proven rollback: release only our token.
+        // A lost/expired callback response remains fail-closed.
+        if (!entered || refused)
+          await this.prisma.transaction(async (tx) => {
+            await lockGate(tx);
+            await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL
+              WHERE id = true AND activation_token = ${token}::uuid`;
+          });
+        throw error;
+      }
     });
   }
 

@@ -52,6 +52,7 @@ export interface MeterInventoryAuthority {
     runId: string,
     boundary: string,
     commit: (proof: unknown) => Promise<T>,
+    isDefiniteRefusal?: (error: unknown) => boolean,
   ): Promise<T>;
 }
 export class MeterFullRunRefusal extends Error {}
@@ -66,6 +67,7 @@ function quarantineClearAuthority(
     commit: (
       inventory: z.infer<typeof inventorySchema>,
       assertHeld: () => Promise<void>,
+      preflight?: boolean,
     ) => Promise<T>,
   ): Promise<T>;
 } {
@@ -79,37 +81,44 @@ function quarantineClearAuthority(
             const inventory = parsed.data;
             if (typeof authority.withQuarantineClear !== 'function')
               throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+            // Reuse the locked local checks before the source arms tx1.
+            await commit(inventory, async () => undefined, true);
             let entered = false;
             return authority
-              .withQuarantineClear(runId, inventory.boundary, (proof) => {
-                const clear = z
-                  .object({
-                    runId: identifier,
-                    boundary: z.string(),
-                    clear: z.literal(true),
-                    assertHeld: z.custom<() => Promise<void>>(
-                      (value) => typeof value === 'function',
-                    ),
-                  })
-                  .strict()
-                  .safeParse(proof);
-                if (
-                  !clear.success ||
-                  clear.data.runId !== runId ||
-                  clear.data.boundary !== inventory.boundary
-                )
-                  throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
-                entered = true;
-                return observe(
-                  commit(inventory, async () => {
-                    try {
-                      await clear.data.assertHeld();
-                    } catch {
-                      throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
-                    }
-                  }),
-                );
-              })
+              .withQuarantineClear(
+                runId,
+                inventory.boundary,
+                (proof) => {
+                  const clear = z
+                    .object({
+                      runId: identifier,
+                      boundary: z.string(),
+                      clear: z.literal(true),
+                      assertHeld: z.custom<() => Promise<void>>(
+                        (value) => typeof value === 'function',
+                      ),
+                    })
+                    .strict()
+                    .safeParse(proof);
+                  if (
+                    !clear.success ||
+                    clear.data.runId !== runId ||
+                    clear.data.boundary !== inventory.boundary
+                  )
+                    throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+                  entered = true;
+                  return observe(
+                    commit(inventory, async () => {
+                      try {
+                        await clear.data.assertHeld();
+                      } catch {
+                        throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+                      }
+                    }),
+                  );
+                },
+                (error) => error instanceof MeterFullRunRefusal,
+              )
               .catch((error: unknown) => {
                 if (!entered && !(error instanceof MeterFullRunRefusal))
                   throw new Error('SOURCE_CLEARANCE_UNCONFIRMED');
@@ -178,7 +187,7 @@ export class MeterFullRun {
       return action;
     };
     return quarantineClearAuthority(this.authority, observe)
-      .withSealedInventory(runId, async (inventory, assertHeld) => {
+      .withSealedInventory(runId, async (inventory, assertHeld, preflight = false) => {
         const assets = [...inventory.assets].sort((a, b) =>
           a.assetId < b.assetId ? -1 : a.assetId > b.assetId ? 1 : 0,
         );
@@ -243,6 +252,7 @@ export class MeterFullRun {
                   (SELECT 1 FROM inventory i WHERE i.outcome <> 'REFUSED' AND NOT EXISTS
                     (SELECT 1 FROM asset_usage_meter m WHERE m.asset_id = i."assetId" AND m.meter_source = 'LEDGER')) AS invalid`;
                       if (check.invalid) throw new MeterFullRunRefusal('FULL_RUN_INCOMPLETE');
+                      if (preflight) return runId;
                       await tx.$executeRaw`
                 INSERT INTO meter_full_run_asset(asset_id, organization_id, outcome, refusal)
                 SELECT "assetId", "organizationId", outcome, refusal FROM jsonb_to_recordset(${JSON.stringify(outcomes)}::jsonb)
@@ -284,7 +294,7 @@ export class MeterFullRun {
               },
             ),
         );
-        confirmed = true;
+        if (!preflight) confirmed = true;
         return appliedRun;
       })
       .then(

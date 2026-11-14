@@ -307,6 +307,34 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       expect(await eventRows()).toHaveLength(1);
     },
   );
+  it('checks known run refusals before arming the source token', async () => {
+    let value: unknown = inventory([]);
+    const hold = jest.fn(async () => {
+      throw new Error('must not arm');
+    });
+    const c = new MeterFullRun(prisma, {
+      withSealedInventory: async (_run, fn) => fn(value),
+      withQuarantineClear: hold,
+    });
+    const assetId = id('AST');
+    value = inventory([
+      { assetId, organizationId: org.a },
+      { assetId, organizationId: org.a },
+    ]);
+    await expect(c.activate(runId, actor, [])).rejects.toThrow('INVENTORY_CONFLICT');
+    value = inventory([{ assetId, organizationId: org.a }]);
+    await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_INCOMPLETE');
+    value = inventory([]);
+    await command().activate(runId, actor, []);
+    await expect(c.activate(id('OTHER'), actor, [])).rejects.toThrow('FULL_RUN_CONFLICT');
+    const fail = jest.spyOn(prisma, 'transaction').mockRejectedValueOnce(new Error('pool wait'));
+    try {
+      await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_PRECOMMIT_FAILED');
+    } finally {
+      fail.mockRestore();
+    }
+    expect(hold).not.toHaveBeenCalled();
+  });
   it('requires authority even at gauge zero; refuses partial, duplicate and omitted local/orphan inventory', async () => {
     await expect(new MeterFullRun(prisma).activate(runId, actor, [])).rejects.toThrow(
       'AUTHORITATIVE_INVENTORY_REQUIRED',
@@ -345,10 +373,13 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       data: { meterSource: 'LEDGER' },
     });
     const transaction = prisma.transaction.bind(prisma);
-    const lost = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
-      await transaction(fn, options);
-      throw new Error('lost commit');
-    });
+    const lost = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementationOnce(transaction)
+      .mockImplementationOnce(async (fn, options) => {
+        await transaction(fn, options);
+        throw new Error('lost commit');
+      });
     try {
       await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
     } finally {
@@ -386,13 +417,16 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       phase === 'write' ? null : expect.anything(),
     );
     const transaction = prisma.transaction.bind(prisma);
-    const spy = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
-      await transaction(fn, options);
-      throw error;
-    });
+    const spy = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementationOnce(transaction)
+      .mockImplementationOnce(async (fn, options) => {
+        await transaction(fn, options);
+        throw error;
+      });
     try {
       await expect(command().activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
-      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledTimes(2);
     } finally {
       spy.mockRestore();
     }
@@ -624,14 +658,17 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
   it('reports real Prisma callback expiration as a precommit refusal', async () => {
     const transaction = prisma.transaction.bind(prisma);
     let expired: unknown;
-    const timeout = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn) => {
-      try {
-        return await transaction(fn, { timeoutMs: 100 });
-      } catch (error) {
-        expired = error;
-        throw error;
-      }
-    });
+    const timeout = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementationOnce(transaction)
+      .mockImplementationOnce(async (fn) => {
+        try {
+          return await transaction(fn, { timeoutMs: 100 });
+        } catch (error) {
+          expired = error;
+          throw error;
+        }
+      });
     const enqueue = jest
       .spyOn(MaintenanceRepository.prototype, 'enqueueEvent')
       .mockImplementationOnce(async (tx) => {
@@ -681,12 +718,15 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
   });
   it('rollback after enqueue leaves no marker, inventory or audit event; missing fence never defaults', async () => {
     const transaction = prisma.transaction.bind(prisma);
-    const fail = jest.spyOn(prisma, 'transaction').mockImplementationOnce((fn, options) =>
-      transaction(async (tx) => {
-        await fn(tx);
-        throw new Error('rollback');
-      }, options),
-    );
+    const fail = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementationOnce(transaction)
+      .mockImplementationOnce((fn, options) =>
+        transaction(async (tx) => {
+          await fn(tx);
+          throw new Error('rollback');
+        }, options),
+      );
     try {
       await expect(command().activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
     } finally {

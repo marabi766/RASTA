@@ -56,7 +56,11 @@ export async function quarantineTransaction<T>(
           VALUES (${eventId}, ${error.assetId},
             (SELECT organization_id FROM meter_inventory_seal_asset WHERE asset_id = ${error.assetId}),
             ${error.namedOwner}, ${error.reason}, ${gate.run_id}) ON CONFLICT (event_id) DO NOTHING`;
-        return error;
+        const [overflow] = await tx.$queryRaw<{ present: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM meter_drift_overflow WHERE event_id = ${eventId}) AS present`;
+        return overflow.present
+          ? new SourceDriftRefusal('SOURCE_DRIFT_QUARANTINE_FULL', error.assetId, error.namedOwner)
+          : error;
       }
     });
   } catch (error) {

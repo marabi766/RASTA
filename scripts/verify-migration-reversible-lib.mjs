@@ -4495,6 +4495,7 @@ export const EXPECTED = {
     // or database; the migrator owns rasta_fleet.
     connectAs: 'migrator',
     tables: [
+      'meter_drift_overflow',
       'meter_drift_quarantine',
       'meter_drift_capacity',
       'meter_inventory_seal_asset',
@@ -4509,6 +4510,8 @@ export const EXPECTED = {
       'usage_record',
     ],
     triggers: [
+      'meter_drift_overflow_guard',
+      'meter_drift_overflow_no_truncate',
       'meter_drift_quarantine_guard',
       'meter_drift_quarantine_no_truncate',
       'meter_inventory_seal_asset_fixed',
@@ -4542,6 +4545,7 @@ export const EXPECTED = {
     indexes: [
       'ux_availability_window_live',
       'usage_record_asset_id_period_end_id_idx',
+      'meter_drift_overflow_oldest',
       'meter_drift_quarantine_run',
     ],
   },
