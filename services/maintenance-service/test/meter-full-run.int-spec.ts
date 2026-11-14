@@ -236,26 +236,31 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     expect(await c.status(runId, actor)).toBeNull();
     expect(await eventRows()).toHaveLength(0);
   });
-  it('refuses an old authority without the required clearance capability and an unreadable channel', async () => {
-    const authority = {
-      withSealedInventory: async <T>(_runId: string, fn: (value: unknown) => Promise<T>) =>
-        fn(inventory([])),
-    };
-    // Deliberately model an older deployed adapter at the runtime boundary.
-    const old = new MeterFullRun(
-      prisma,
-      authority as import('../src/maintenance/meter-full-run').MeterInventoryAuthority,
-    );
-    await expect(old.activate(runId, actor, [])).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
-    const unreadable = new MeterFullRun(prisma, {
-      ...authority,
-      withQuarantineClear: async () => {
-        throw new Error('unreadable');
-      },
-    });
-    await expect(unreadable.activate(runId, actor, [])).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
-    expect(await eventRows()).toHaveLength(0);
-  });
+  it.each(['lock wait', 'pool', 'connection', 'lost tx1 response'])(
+    'classifies pre-callback %s without claiming quarantine',
+    async (failure) => {
+      const authority = {
+        withSealedInventory: async <T>(_runId: string, fn: (value: unknown) => Promise<T>) =>
+          fn(inventory([])),
+      };
+      // Deliberately model an older deployed adapter at the runtime boundary.
+      const old = new MeterFullRun(
+        prisma,
+        authority as import('../src/maintenance/meter-full-run').MeterInventoryAuthority,
+      );
+      await expect(old.activate(runId, actor, [])).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+      const unreadable = new MeterFullRun(prisma, {
+        ...authority,
+        withQuarantineClear: async () => {
+          throw new Error(failure);
+        },
+      });
+      await expect(unreadable.activate(runId, actor, [])).rejects.toThrow(
+        'SOURCE_CLEARANCE_UNCONFIRMED',
+      );
+      expect(await eventRows()).toHaveLength(0);
+    },
+  );
   it.each(['inventory', 'quarantine'])(
     'keeps %s authority abandonment unconfirmed while maintenance is still running',
     async (layer) => {

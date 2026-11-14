@@ -111,7 +111,8 @@ function quarantineClearAuthority(
                 );
               })
               .catch((error: unknown) => {
-                if (!entered) throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+                if (!entered && !(error instanceof MeterFullRunRefusal))
+                  throw new Error('SOURCE_CLEARANCE_UNCONFIRMED');
                 throw error;
               });
           })(),

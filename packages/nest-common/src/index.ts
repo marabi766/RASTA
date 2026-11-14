@@ -201,6 +201,7 @@ export {
   EventConsumer,
   ConsumerStoppingError,
   EventHandlingUnconfirmedError,
+  handlingFailureCause,
   UnprocessableEventError,
   deadLetterHeaders,
   DeadLetterHeaderError,

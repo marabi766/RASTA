@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
-  EventHandlingUnconfirmedError,
+  handlingFailureCause,
   allocateStreamSeqSql,
   buildOutboxRow,
   createSystemContext,
@@ -1055,7 +1055,7 @@ export class FleetRepository {
           const refusal = sourceFenceRefusal(error);
           throw refusal
             ? new SourceDriftRefusal(refusal.reason, id, data.organizationId)
-            : new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED');
+            : new Error('SOURCE_WRITE_FAILED', { cause: handlingFailureCause(error) });
         }),
     );
   }
@@ -1103,7 +1103,7 @@ export class FleetRepository {
           const refusal = sourceFenceRefusal(error);
           throw refusal
             ? new SourceDriftRefusal(refusal.reason, row.assetId, row.organizationId)
-            : new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED');
+            : new Error('SOURCE_WRITE_FAILED', { cause: handlingFailureCause(error) });
         });
     });
   }
