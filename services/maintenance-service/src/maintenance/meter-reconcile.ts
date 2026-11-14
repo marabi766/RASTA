@@ -60,6 +60,11 @@ const sourcePage = z
   })
   .strict();
 export type MeterUsagePage = z.infer<typeof sourcePage>;
+function readSourcePage(value: unknown): MeterUsagePage {
+  const parsed = sourcePage.safeParse(value);
+  if (!parsed.success) throw new UsageMeterRefusal('SOURCE_PAGE_MALFORMED');
+  return parsed.data;
+}
 export interface MeterUsageSource {
   certificate?(organizationId: string, assetId: string): Promise<MeterCertificate>;
   page(organizationId: string, assetId: string, cursor?: string): Promise<MeterUsagePage>;
@@ -90,7 +95,7 @@ export class MeterUsageClient implements MeterUsageSource {
       organizationId,
     );
     if (response.status !== 200) throw new Error('SOURCE_READ_FAILED');
-    return sourcePage.parse(response.body);
+    return readSourcePage(response.body);
   }
 }
 type Quantities = { hours: string; kilometres: string };
@@ -204,7 +209,7 @@ export class MeterReconcile {
         const cursors = new Set<string>();
         const ids = new Set<string>();
         for (let page = 0; page < MAX_PAGES; page++) {
-          const result = sourcePage.parse(await this.source.page(organizationId, assetId, cursor));
+          const result = readSourcePage(await this.source.page(organizationId, assetId, cursor));
           for (const row of result.items) {
             if (ids.has(row.id) || records.length >= MAX_RECORDS)
               throw new Error('SOURCE_READ_FAILED');
@@ -223,8 +228,13 @@ export class MeterReconcile {
         }
         if (!report.pagesExhausted) throw new Error('SOURCE_READ_FAILED');
       }
-    } catch {
-      return { ...report, recordsRead: records.length, refusal: 'SOURCE_READ_FAILED' };
+    } catch (error) {
+      // Source reads precede the transaction: no apply could have been sent.
+      return {
+        ...report,
+        recordsRead: records.length,
+        refusal: error instanceof UsageMeterRefusal ? error.code : 'SOURCE_READ_FAILED',
+      };
     }
     report.recordsRead = records.length;
     try {

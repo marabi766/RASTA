@@ -97,7 +97,9 @@ export class MeterFullRun {
     let confirmed = false;
     return this.authority
       .withSealedInventory(runId, async (value) => {
-        const inventory = inventorySchema.parse(value);
+        const parsed = inventorySchema.safeParse(value);
+        if (!parsed.success) throw new MeterFullRunRefusal('SOURCE_INVENTORY_MALFORMED');
+        const inventory = parsed.data;
         const assets = [...inventory.assets].sort((a, b) =>
           a.assetId < b.assetId ? -1 : a.assetId > b.assetId ? 1 : 0,
         );
@@ -192,11 +194,11 @@ export class MeterFullRun {
                     { timeoutMs: 30_000 },
                   );
                 } catch (error) {
+                  if (callbackReturned) throw new Error('FULL_RUN_UNCONFIRMED');
                   if (error instanceof MeterFullRunRefusal) throw error;
                   // Prisma cannot commit until our callback returns. Pool acquisition,
                   // statement errors and callback timeouts therefore prove refusal.
-                  if (!callbackReturned) throw new MeterFullRunRefusal('FULL_RUN_PRECOMMIT_FAILED');
-                  throw new Error('FULL_RUN_UNCONFIRMED');
+                  throw new MeterFullRunRefusal('FULL_RUN_PRECOMMIT_FAILED');
                 }
               },
             ),

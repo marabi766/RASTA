@@ -358,8 +358,9 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       { timeoutMs: 5000 },
     );
     await Promise.race([locked.ready, writer]);
+    let sealing: ReturnType<FleetMeterInventorySeal['seal']> | undefined;
     try {
-      const sealing = command.seal(runId, actor);
+      sealing = command.seal(runId, actor);
       let settled = false;
       void sealing.then(
         () => {
@@ -369,13 +370,15 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
           settled = true;
         },
       );
-      // A blocking-lock mutant reaches this waiter; let the writer attempt its second table.
+      // NOWAIT must settle without entering a Lock wait; assert before releasing the writer.
       await waiter('LOCK TABLE', () => settled);
+      expect(settled).toBe(true);
       finish.release();
       await expect(sealing).rejects.toThrow('SOURCE_WRITERS_ACTIVE');
       expect(await events()).toHaveLength(0);
     } finally {
       finish.release();
+      await Promise.allSettled([writer, sealing]);
     }
     await writer;
     expect((await command.seal(runId, actor)).assets).toEqual([{ assetId, organizationId: org.a }]);
