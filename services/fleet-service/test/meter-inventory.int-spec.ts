@@ -663,9 +663,9 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
           ownershipGeneration: 1,
         }),
       };
-      await prisma.client.$executeRaw`INSERT INTO insurance_pending_verification
+      await eligibilityClockWrite(prisma.client)`INSERT INTO insurance_pending_verification
         (event_id, asset_id, organization_id, envelope, source_topic, reason, next_attempt_at)
-        VALUES (${row.eventId}, ${row.assetId}, ${row.organizationId}, ${JSON.stringify(envelope)}::jsonb, 'TEST', 'NO_ANSWER', now())`;
+        VALUES (${row.eventId}, ${row.assetId}, ${row.organizationId}, ${JSON.stringify(envelope)}::jsonb, 'TEST', 'NO_ANSWER', now() - interval '1 second')`;
     }
     const verify = jest.fn(async (organizationId: string) => ({
       counts: true as const,
@@ -699,8 +699,9 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
           .$queryRaw`SELECT count(*)::int AS n FROM insurance_pending_verification WHERE attempts = 1`,
       ).toEqual([{ n: 50 }]);
       // Transfers can keep failing rows explicitly due: ordering must still admit the untouched tenant.
-      await prisma.client
-        .$executeRaw`UPDATE insurance_pending_verification SET next_attempt_at = now()`;
+      await eligibilityClockWrite(prisma.client)`UPDATE insurance_pending_verification
+        SET next_attempt_at = now() - interval '1 second'
+        WHERE event_id = ANY(${events.map((row) => row.eventId)}::text[])`;
       expect(await consumer.sweepParked()).toMatchObject({ APPLIED: 1, DEAD_LETTERED: 49 });
       expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 1 });
       expect(await prisma.client.$queryRaw`SELECT * FROM insurance_pending_verification`).toEqual(
