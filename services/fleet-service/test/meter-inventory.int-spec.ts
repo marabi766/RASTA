@@ -370,10 +370,13 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
           `ALTER TABLE "${schema}".meter_drift_quarantine RENAME TO unavailable_quarantine`,
         );
         try {
-          await expect(
-            dispatch.handleMessage(topic, 0, Buffer.from(JSON.stringify(envelope)), undefined),
-          ).rejects.toBeInstanceOf(EventHandlingUnconfirmedError);
-          expect(sent).toHaveLength(0);
+          await dispatch.handleMessage(topic, 0, Buffer.from(JSON.stringify(envelope)), undefined);
+          expect(sent).toHaveLength(1);
+          expect(sent[0].messages[0].headers).toMatchObject({
+            'x-dlq-reason': 'MAX_RETRIES_EXCEEDED',
+            'x-dlq-attempts': '3',
+          });
+          sent.length = 0;
           expect(await snapshot()).toEqual(before);
         } finally {
           await owner.client.$executeRawUnsafe(
@@ -641,6 +644,147 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       command.withQuarantineClear(runId, sealed.boundary, async () => 'active'),
     ).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
   });
+  it('non-fence park constraint failure retries to DLQ and the next tenant safety event runs', async () => {
+    const repository = new FleetRepository(prisma),
+      eventId = id('EVT');
+    const envelope: EventEnvelope = {
+      eventId,
+      eventName: 'INSURANCE_RECORDED',
+      eventVersion: 1,
+      occurredAt: new Date().toISOString(),
+      producer: 'asset-service',
+      producerVersion: 'test',
+      aggregateType: 'Asset',
+      aggregateId: id('AST'),
+      tenantId: org.a,
+      correlationId: id('COR'),
+      payload: {},
+    };
+    await owner.client.$executeRawUnsafe(`ALTER TABLE "${schema}".insurance_pending_verification
+      ADD CONSTRAINT park_refused CHECK (reason <> 'DETERMINISTIC_FAILURE')`);
+    const handler = jest.fn(async (event: EventEnvelope) =>
+      repository.transaction(
+        async (tx) => {
+          await repository.markEventProcessed(tx, event.eventId, 'constraint-test');
+          if (event.eventId === eventId)
+            await repository.parkInsuranceEvent(tx, {
+              eventId,
+              assetId: event.aggregateId,
+              organizationId: org.a,
+              envelope: event,
+              sourceTopic: 'rasta.asset.v1',
+              reason: 'DETERMINISTIC_FAILURE',
+              messageKey: null,
+              sourcePartition: 0,
+              sourceOffset: '0',
+              correlationId: event.correlationId,
+            });
+        },
+        undefined,
+        event.eventId,
+      ),
+    );
+    const transport = new EventConsumer(
+      {
+        brokers: ['localhost:9092'],
+        clientId: 'fleet-constraint',
+        groupId: 'fleet-constraint',
+        topics: ['rasta.asset.v1'],
+        deadLetterTopic: 'rasta.fleet.v1.dlq',
+        maxRetries: 3,
+        retryBackoffMs: 0,
+      },
+      handler,
+      { log: () => undefined, warn: () => undefined, error: () => undefined },
+    );
+    const sent: ProducerRecord[] = [];
+    const dispatch = transport as unknown as {
+      dlqProducer: { send(record: ProducerRecord): Promise<void> };
+      handleMessage(
+        topic: string,
+        partition: number,
+        value: Buffer,
+        headers: undefined,
+      ): Promise<void>;
+    };
+    dispatch.dlqProducer = {
+      send: async (record) => {
+        sent.push(record);
+      },
+    };
+    await dispatch.handleMessage(
+      'rasta.asset.v1',
+      0,
+      Buffer.from(JSON.stringify(envelope)),
+      undefined,
+    );
+    expect(handler).toHaveBeenCalledTimes(3);
+    await expect(handler.mock.results[0].value).rejects.toMatchObject({
+      message: 'SOURCE_WRITE_FAILED',
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].messages[0].headers).toMatchObject({
+      'x-dlq-reason': 'MAX_RETRIES_EXCEEDED',
+      'x-dlq-attempts': '3',
+    });
+    expect(await prisma.client.$queryRaw`SELECT * FROM processed_event`).toEqual([]);
+    expect(await prisma.client.$queryRaw`SELECT * FROM insurance_pending_verification`).toEqual([]);
+    const next = {
+      ...envelope,
+      eventId: id('EVT'),
+      eventName: 'INSURANCE_EXPIRED',
+      tenantId: org.b,
+    };
+    await dispatch.handleMessage('rasta.asset.v1', 0, Buffer.from(JSON.stringify(next)), undefined);
+    expect(handler).toHaveBeenCalledTimes(4);
+    expect(await prisma.client.$queryRaw`SELECT event_id FROM processed_event`).toEqual([
+      { event_id: next.eventId },
+    ]);
+  });
+  it('replays identical evidence before checking a retained activation token', async () => {
+    await command.seal(runId, actor);
+    const insert = () => prisma.client.$executeRaw`INSERT INTO meter_drift_quarantine
+      (event_id, asset_id, named_owner, reason, run_id) VALUES ('REPLAY', 'AST', ${org.a}, 'SOURCE_INVENTORY_SEALED', ${runId})`;
+    await insert();
+    await prisma.client
+      .$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${randomUUID()}::uuid`;
+    expect(await insert()).toBe(0);
+    await expect(prisma.client.$executeRaw`INSERT INTO meter_drift_quarantine
+      (event_id, asset_id, named_owner, reason, run_id) VALUES ('NEW', 'AST', ${org.a}, 'SOURCE_INVENTORY_SEALED', ${runId})`).rejects.toThrow(
+      'SOURCE_ACTIVATION_HELD',
+    );
+  });
+  it('marks a lost ordinary source commit response unconfirmed with a sanitized cause', async () => {
+    const repository = new FleetRepository(prisma),
+      eventId = id('EVT');
+    const transaction = prisma.transaction.bind(prisma);
+    jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
+      await transaction(fn, options);
+      throw Object.assign(new Error(`SELECT private_query ${org.a}`), { code: 'P1017' });
+    });
+    const write = () =>
+      repository.transaction(
+        async (tx) => {
+          if (!(await repository.markEventProcessed(tx, eventId, 'lost-source-commit'))) return;
+          await repository.upsertAssetRef(tx, {
+            id: 'AST_COMMIT',
+            organizationId: org.a,
+            sourceEvent: 'TEST',
+          });
+        },
+        undefined,
+        eventId,
+      );
+    await expect(write()).rejects.toMatchObject({
+      message: 'SOURCE_WRITE_UNCONFIRMED',
+      cause: { message: 'P1017' },
+    });
+    await write();
+    expect(await prisma.client.$queryRaw`SELECT event_id FROM processed_event`).toEqual([
+      { event_id: eventId },
+    ]);
+    expect(await prisma.client.assetRef.count()).toBe(1);
+  });
   it('retains evidence after a lost commit response; an unenclosed statement never becomes terminal', async () => {
     const sealed = await command.seal(runId, actor),
       repository = new FleetRepository(prisma),
@@ -655,7 +799,10 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       `ALTER TABLE "${schema}".asset_ref RENAME TO unavailable_asset_ref`,
     );
     try {
-      await expect(repository.transaction(write)).rejects.toThrow('SOURCE_WRITE_UNCONFIRMED');
+      await expect(repository.transaction(write)).rejects.toMatchObject({
+        message: 'SOURCE_WRITE_FAILED',
+        cause: { message: 'P2021' },
+      });
     } finally {
       await owner.client.$executeRawUnsafe(
         `ALTER TABLE "${schema}".unavailable_asset_ref RENAME TO asset_ref`,

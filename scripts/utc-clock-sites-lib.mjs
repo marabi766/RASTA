@@ -1657,7 +1657,7 @@ export const REVIEWED_FUNCTIONS = [
   {
     service: 'fleet-service',
     name: 'meter_drift_quarantine_guard',
-    sha256: 'e63c76cf923d6ea2cdc3f1826f8bf2760bb5d72dae481a668899f6d6b4c1a390',
+    sha256: 'd3b66531bd077e4f84d9cab280a580b90d46eb796fe7a6871d3e835908e2f02c',
     why: 'Clock-free bounded append-only quarantine and durable activation barrier; trusted TG_TABLE_SCHEMA is identifier-quoted in schema-local set_config; no EXECUTE, expiry or timestamp conversion.',
   },
   {

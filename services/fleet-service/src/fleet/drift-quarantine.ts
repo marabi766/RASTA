@@ -23,6 +23,7 @@ export async function quarantineTransaction<T>(
   fn: (tx: ExtendedPrismaClient) => Promise<T>,
 ): Promise<T> {
   let refused = false;
+  let callbackReturned = false;
   let result: T | SourceDriftRefusal;
   try {
     result = await transaction(async (tx) => {
@@ -31,7 +32,9 @@ export async function quarantineTransaction<T>(
       if (!gate) throw new EventHandlingUnconfirmedError('SOURCE_FENCE_MISSING');
       await tx.$executeRaw`SAVEPOINT source_event_effects`;
       try {
-        return await fn(tx);
+        const value = await fn(tx);
+        callbackReturned = true;
+        return value;
       } catch (error) {
         if (!(error instanceof SourceDriftRefusal)) throw error;
         refused = true;
@@ -46,7 +49,7 @@ export async function quarantineTransaction<T>(
       }
     });
   } catch (error) {
-    // Includes cap/write failures and ambiguous COMMIT: no transport DLQ without evidence.
+    // Includes persistence failures and ambiguous COMMIT; retry/DLQ retains the unresolved classification.
     if (refused) {
       const full =
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -55,8 +58,11 @@ export async function quarantineTransaction<T>(
         error.meta?.message === 'ERROR: SOURCE_DRIFT_QUARANTINE_FULL';
       throw new EventHandlingUnconfirmedError(
         full ? 'SOURCE_DRIFT_QUARANTINE_FULL' : 'SOURCE_DRIFT_QUARANTINE_UNCONFIRMED',
+        error,
       );
     }
+    if (callbackReturned)
+      throw new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED', error);
     throw error;
   }
   if (result instanceof SourceDriftRefusal)

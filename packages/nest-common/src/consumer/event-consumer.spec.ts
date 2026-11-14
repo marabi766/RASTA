@@ -12,7 +12,7 @@ import type {
   EventHandler,
 } from './event-consumer';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
-import { dlqMessagesTotal, registry } from '@rasta/observability';
+import { consumerHandlingFailuresTotal, dlqMessagesTotal, registry } from '@rasta/observability';
 
 /**
  * The delivery-metadata contract added for ADR-053 AUD-001.
@@ -87,21 +87,45 @@ describe('EventConsumer delivery metadata', () => {
     return (consumer as unknown as PrivateHandle).handleMessage(topic, partition, value, undefined);
   }
 
-  it('leaves unconfirmed handling unacknowledged even with one allowed attempt', async () => {
-    const failure = new EventHandlingUnconfirmedError('SOURCE_DRIFT_QUARANTINE_UNCONFIRMED');
-    const handler = jest.fn(async () => {
-      throw failure;
-    });
-    const consumer = new EventConsumer(
-      { ...options, maxRetries: 1, deadLetterTopic: 'test.dlq' },
-      handler,
-      silentLogger,
+  it('bounds unconfirmed handling, logs only the cause code, and moves the partition after DLQ', async () => {
+    const failure = new EventHandlingUnconfirmedError(
+      'SOURCE_WRITE_UNCONFIRMED',
+      Object.assign(new Error('SELECT secret_owner FROM private_query'), { code: 'P2010' }),
     );
-    const send = jest.fn();
+    const handler = jest.fn().mockRejectedValue(failure);
+    const logger = { ...silentLogger, error: jest.fn() };
+    const consumer = new EventConsumer(
+      { ...options, maxRetries: 3, retryBackoffMs: 1, deadLetterTopic: 'test.dlq' },
+      handler,
+      logger,
+    );
+    const pause = jest.spyOn(
+      consumer as unknown as { pause(run: unknown, ms: number): Promise<void> },
+      'pause',
+    );
+    const send = jest.fn().mockResolvedValue(undefined);
     (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
-    await expect(deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes())).rejects.toBe(failure);
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(send).not.toHaveBeenCalled();
+    const labels = { service: options.clientId, topic: 'rasta.asset.v1' };
+    const count = async () =>
+      (await consumerHandlingFailuresTotal.get()).values.find(
+        (v) => v.labels.service === labels.service && v.labels.topic === labels.topic,
+      )?.value ?? 0;
+    const before = await count();
+    await deliver(consumer, labels.topic, 0, envelopeBytes());
+    expect(handler).toHaveBeenCalledTimes(3);
+    expect(pause.mock.calls.map((call) => call[1])).toEqual([1, 2]);
+    expect(send.mock.calls[0][0].messages[0].headers).toMatchObject({
+      'x-dlq-reason': 'MAX_RETRIES_EXCEEDED',
+      'x-dlq-attempts': '3',
+    });
+    expect(await count()).toBe(before + 3);
+    expect(logger.error.mock.calls.flat().join(' ')).toContain('cause=P2010');
+    expect(JSON.stringify([failure.cause, logger.error.mock.calls, send.mock.calls])).not.toMatch(
+      /secret_owner|private_query/,
+    );
+    handler.mockResolvedValue(undefined);
+    await deliver(consumer, labels.topic, 0, envelopeBytes({ eventId: 'NEXT_EVENT' }));
+    expect(handler).toHaveBeenCalledTimes(4);
   });
   it('gives the handler the topic and partition the broker reported', async () => {
     const seen: EventDelivery[] = [];

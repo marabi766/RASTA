@@ -289,21 +289,28 @@ The fleet-owned `meter_drift_quarantine` now retains terminal drift from creatio
 transfer, refresh, `.retry`, insurance parking and the parked sweep. It stores the
 event ID, asset, sealed owner (null for an unknown asset), named owner, reason,
 sealed run and database first-seen time. Identifier evidence is bounded to 256
-UTF-8 bytes per field; oversized evidence refuses persistence and stays unacknowledged. Entries are immutable and idempotent per
+UTF-8 bytes per field; oversized evidence refuses persistence and enters bounded retry/DLQ handling. Entries are immutable and idempotent per
 event ID; conflicting reuse refuses `SOURCE_DRIFT_EVENT_CONFLICT`. All entries are
 unresolved until the separate operator reconciliation slice exists.
 
 Atomicity uses a savepoint: fleet takes the seal's share lock before the event's
 savepoint, rolls back every refused effect (including marker/outbox) to that
 savepoint, then commits only quarantine evidence. The lock survives that rollback.
-The terminal error is raised only after confirmed commit. A failed or ambiguous
-quarantine write raises `EventHandlingUnconfirmedError`; Kafka leaves the delivery
-unacknowledged without retry exhaustion or DLQ acknowledgement. Unrecognized
-source-write failures also stay unacknowledged as `SOURCE_WRITE_UNCONFIRMED`,
-so a changed driver error shape cannot bypass quarantine. The global durable
-cap is 10,000 entries, serialized under `meter_drift_capacity`; duplicate replay is
-checked before the cap. Overflow refuses `SOURCE_DRIFT_QUARANTINE_FULL`; no eviction.
+The terminal drift reason is raised only after confirmed quarantine commit.
+Non-fence statement failures use normal bounded retries and `MAX_RETRIES_EXCEEDED`.
+Lost commit responses are `SOURCE_WRITE_UNCONFIRMED`; failed quarantine persistence
+remains unresolved. Both use bounded backoff, an error log with a code-only cause,
+and `rasta_consumer_handling_failures_total`, then the existing exhaustion DLQ.
+Acknowledgement follows confirmed DLQ publication; replay must reconcile the marker
+or evidence first, since an unconfirmed write may have committed. Missing DLQ
+configuration or a failed send propagates instead of acknowledging without evidence.
+The global durable cap is 10,000 entries, serialized under `meter_drift_capacity`;
+identical replay is checked before the activation token and cap. Overflow refuses
+`SOURCE_DRIFT_QUARANTINE_FULL`; no eviction.
 Missing capacity, stale transaction isolation or wrong-run inserts also refuse.
+An exhaustion DLQ is transport evidence, not proof that fleet quarantine is clear.
+Production activation stays unwired pending the separate durable-hold, token
+recovery and evidence-reconciliation obligations (FU-355).
 
 `MeterFullRun.activate` requires `withQuarantineClear` on the existing trusted
 `MeterInventoryAuthority`, including replay. Fleet's clearance primitive takes the
@@ -317,7 +324,8 @@ retain it and refuse further activation until the separate operator recovery sli
 and before its final marker write. An expired callback/transaction refuses.
 The proof is scoped to that callback; it cannot be cached
 or reused as a certificate snapshot. Missing, stale, malformed or unreadable
-clearance refuses `SOURCE_DRIFT_QUARANTINED`. Both lock orders are covered against
+proof refuses `SOURCE_DRIFT_QUARANTINED`. Infrastructure failure before proof delivery
+reports `SOURCE_CLEARANCE_UNCONFIRMED`, including a lost tx1 response. Both lock orders are covered against
 PostgreSQL: earlier drift is quarantined before activation reads; earlier
 activation excludes drift until its callback settles. The REST channel is not
 wired: a future reviewed adapter must preserve this lock-through-commit contract,

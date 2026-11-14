@@ -33,7 +33,6 @@ BEGIN
   END IF;
   SELECT activation_token INTO activation_hold FROM meter_drift_capacity WHERE id = true FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'SOURCE_DRIFT_CAPACITY_MISSING'; END IF;
-  IF activation_hold IS NOT NULL THEN RAISE EXCEPTION 'SOURCE_ACTIVATION_HELD'; END IF;
   IF EXISTS (SELECT 1 FROM meter_drift_quarantine WHERE event_id = NEW.event_id) THEN
     IF NOT EXISTS (SELECT 1 FROM meter_drift_quarantine q WHERE q.event_id = NEW.event_id
       AND q.asset_id = NEW.asset_id AND q.sealed_owner IS NOT DISTINCT FROM NEW.sealed_owner
@@ -42,6 +41,7 @@ BEGIN
     END IF;
     RETURN NULL;
   END IF;
+  IF activation_hold IS NOT NULL THEN RAISE EXCEPTION 'SOURCE_ACTIVATION_HELD'; END IF;
   -- Global durable cap, checked after replay under the capacity lock. Never evict.
   IF (SELECT count(*) FROM meter_drift_quarantine) >= 10000 THEN
     RAISE EXCEPTION 'SOURCE_DRIFT_QUARANTINE_FULL';
