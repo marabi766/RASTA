@@ -251,6 +251,8 @@ const refusals = [
     DLQ_REASONS.PRODUCER_NOT_ALLOWED,
     DLQ_REASONS.SOURCE_UNCONFIRMED,
     DLQ_REASONS.BACKFILL_REQUIRED,
+    DLQ_REASONS.SOURCE_OWNER_DRIFT,
+    DLQ_REASONS.SOURCE_INVENTORY_SEALED,
   ].map((reason) => [
     `reason ${reason}, which a replay cannot change`,
     deadLetter(envelope(), { [DLQ_HEADERS.reason]: Buffer.from(reason) }),

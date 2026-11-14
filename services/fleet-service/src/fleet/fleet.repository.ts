@@ -17,6 +17,7 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { SERVICE_NAME } from '../config/env';
 import { Prisma } from '../generated/prisma';
 import type { InsuranceCover } from './dispatch-blocks';
+import { sourceFenceRefusal } from './source-fence-refusal';
 import type {
   AvailabilityQuery,
   ListAssignmentsQuery,
@@ -1020,18 +1021,24 @@ export class FleetRepository {
     const patch = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
 
     return runUnscoped('asset reference replica is platform-wide, written from events', () =>
-      tx.assetRef.upsert({
-        where: { id },
-        create: {
-          id,
-          organizationId: data.organizationId,
-          status: data.status ?? 'REGISTERED',
-          ...patch,
-          sourceEvent,
-          syncedAt: new Date(),
-        },
-        update: { ...patch, sourceEvent, syncedAt: new Date() },
-      }),
+      tx.assetRef
+        .upsert({
+          where: { id },
+          create: {
+            id,
+            organizationId: data.organizationId,
+            status: data.status ?? 'REGISTERED',
+            ...patch,
+            sourceEvent,
+            syncedAt: new Date(),
+          },
+          update: { ...patch, sourceEvent, syncedAt: new Date() },
+        })
+        .catch((error: unknown) => {
+          // Shared by ordinary creation/transfer, authoritative refresh and the parked sweep.
+          // The transaction still rejects: marker, effects and outbox roll back together.
+          throw sourceFenceRefusal(error) ?? error;
+        }),
     );
   }
 

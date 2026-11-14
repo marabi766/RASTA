@@ -329,6 +329,8 @@ export function assess(record, { dlq, topology, topics, contracts }) {
     DLQ_REASONS.PRODUCER_NOT_ALLOWED,
     DLQ_REASONS.SOURCE_UNCONFIRMED,
     DLQ_REASONS.BACKFILL_REQUIRED,
+    DLQ_REASONS.SOURCE_OWNER_DRIFT,
+    DLQ_REASONS.SOURCE_INVENTORY_SEALED,
   ];
   if (unfixable.includes(summary.reason)) return refuse('REASON_NOT_REPLAYABLE');
   if (NEVER_AUTO_REPLAY.has(envelope.eventName)) return refuse('NEVER_AUTO_REPLAY');
