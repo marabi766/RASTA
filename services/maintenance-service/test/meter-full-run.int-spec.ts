@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Prisma } from '../src/generated/prisma';
 import type { EventEnvelope } from '@rasta/contracts';
 import { MeterFullRun, MeterFullRunRefusal } from '../src/maintenance/meter-full-run';
 import { lockUsageMeter } from '../src/maintenance/usage-meter';
@@ -216,7 +217,7 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     );
     await expect(
       command({ ...inventory([]), complete: false }).activate(runId, actor, []),
-    ).rejects.toThrow();
+    ).rejects.toThrow('SOURCE_INVENTORY_MALFORMED');
     await expect(
       asActor({ organizationId: org.a }, () => command().activate(runId, actor, [])),
     ).rejects.toThrow('OPERATOR_CONTEXT_REQUIRED');
@@ -269,6 +270,43 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     await expect(releaseLost.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
     expect(await eventRows()).toHaveLength(1);
   });
+  it.each(['write', 'replay'])(
+    'keeps post-callback %s errors unconfirmed, including known refusal shapes',
+    async (phase) => {
+      if (phase === 'replay') await command().activate(runId, actor, []);
+      const transaction = prisma.transaction.bind(prisma);
+      for (const error of [
+        new MeterFullRunRefusal('FULL_RUN_CONFLICT'),
+        new Prisma.PrismaClientKnownRequestError('lost response', {
+          code: 'P2034',
+          clientVersion: 'test',
+        }),
+      ]) {
+        jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
+          await transaction(fn, options);
+          throw error;
+        });
+        await expect(command().activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
+      }
+      expect(await eventRows()).toHaveLength(1);
+      expect(await command().activate(runId, actor, [])).toBe(runId);
+    },
+  );
+  it.each([null, { ...inventory([]), extra: true }])(
+    'names malformed source inventory before any transaction: %j',
+    async (value) => {
+      const transaction = jest.spyOn(prisma, 'transaction');
+      try {
+        await expect(command(value).activate(runId, actor, [])).rejects.toEqual(
+          new MeterFullRunRefusal('SOURCE_INVENTORY_MALFORMED'),
+        );
+        expect(transaction).not.toHaveBeenCalled();
+      } finally {
+        transaction.mockRestore();
+      }
+      expect(await eventRows()).toHaveLength(0);
+    },
+  );
   it('measures the hot gate under eight concurrent folds and an exclusive activation waiter', async () => {
     const assets = Array.from({ length: 8 }, () => ({ assetId: id('AST'), organizationId: org.a }));
     const finish = latch();

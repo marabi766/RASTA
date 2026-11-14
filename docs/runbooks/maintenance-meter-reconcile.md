@@ -239,12 +239,20 @@ refuses `SEALED_SOURCE_ROLLBACK_REFUSED`; no automatic repair or reopening exist
 
 Before applying or rolling back `20261113220000_meter_inventory_owner_fence`,
 pause all fleet source writers (consumers, parked sweep, API commands and seeds),
-then wait for their transactions to drain. Its existing ACCESS EXCLUSIVE NOWAIT
-gate lock conflicts with each in-flight writer's FOR SHARE lock. Keep that applied
+seal/replay operators, seal-membership writers (`meter_inventory_seal_asset`),
+status readers and other sessions touching `meter_inventory_seal`, including
+autovacuum and concurrent migration/maintenance
+sessions; wait for every lock holder to drain. Its existing ACCESS EXCLUSIVE NOWAIT
+gate lock conflicts with every table lock, including plain SELECT and FOR SHARE. Keep that applied
 migration unchanged to preserve recorded checksums; a later migration cannot fix
 its earlier lock acquisition. A refusal aborts the entire transaction: retry only
 after draining, never bypass the lock. The identity-update follow-up instead waits
-up to `lock_timeout = '5s'` for the gate; timeout still aborts atomically.
+up to `lock_timeout = '5s'` for the gate; timeout still aborts atomically. Use the
+same drain procedure for that migration: INSERTs and UPDATEs on all seven source
+tables (`asset_ref`, `usage_record`, `assignment`, `availability_window`,
+`asset_transfer_fence`, `asset_transfer_release`, `insurance_pending_verification`) queue
+for up to 5s, including the parked sweep and consumers. Allow for request timeouts
+and consumer retries if accepting that pause instead of draining.
 
 Malformed source rows refuse `SOURCE_INVENTORY_MALFORMED`; malformed stored inventory
 refuses `SOURCE_SEAL_INVALID`. Pool, statement and callback failures proven before

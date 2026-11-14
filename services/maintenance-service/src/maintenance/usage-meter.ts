@@ -43,7 +43,9 @@ export class UsageMeterRefusal extends Error {
       | 'UNKNOWN_METER_SOURCE'
       | 'ENTRY_CONFLICT'
       | 'CUTOVER_PROOF_REQUIRED'
-      | 'CUTOVER_AUDIT_INVALID',
+      | 'CUTOVER_AUDIT_INVALID'
+      | 'SOURCE_CERTIFICATE_INVALID'
+      | 'SOURCE_PAGE_MALFORMED',
   ) {
     super(code);
   }

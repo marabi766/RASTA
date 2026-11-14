@@ -6,12 +6,15 @@ import {
   meterCertificateSchema,
   type MeterCertificate,
 } from '@rasta/contracts';
+import { UsageMeterRefusal } from './usage-meter';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 
 export function readMeterCertificate(value: unknown, assetId: string): MeterCertificate {
-  const c = meterCertificateSchema.parse(value);
+  const parsed = meterCertificateSchema.safeParse(value);
+  if (!parsed.success) throw new UsageMeterRefusal('SOURCE_CERTIFICATE_INVALID');
+  const c = parsed.data;
   if (c.assetId !== assetId || digest(c) !== c.digest)
-    throw new Error('SOURCE_CERTIFICATE_INVALID');
+    throw new UsageMeterRefusal('SOURCE_CERTIFICATE_INVALID');
   return c;
 }
 function digest(c: Omit<MeterCertificate, 'digest'>): string {
