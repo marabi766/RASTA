@@ -234,6 +234,13 @@ The owner-fence migration refuses an already-active legacy seal as
 `SOURCE_SEAL_UPGRADE_REFUSED`: its ownership may already have drifted. Active down
 refuses `SEALED_SOURCE_ROLLBACK_REFUSED`; no automatic repair or reopening exists.
 
+Malformed source rows refuse `SOURCE_INVENTORY_MALFORMED`; malformed stored inventory
+refuses `SOURCE_SEAL_INVALID`. Pool, statement and callback failures proven before
+commit refuse `SOURCE_SEAL_PRECOMMIT_FAILED`. Ambiguous or post-callback failures
+remain `SOURCE_SEAL_UNCONFIRMED`; no failure implies success. The mode trigger pins
+`search_path` to `pg_catalog, pg_temp`; its down migration refuses an active full
+run or any LEDGER meter (`ACTIVE_METER_MODE_ROLLBACK_REFUSED`).
+
 Replay the SAME run and operator after `SOURCE_SEAL_UNCONFIRMED`: it re-serves the
 immutable pair inventory after a lost commit response. A different run
 or operator refuses `SOURCE_SEAL_CONFLICT`. Ambient request/service contexts are

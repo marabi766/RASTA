@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { EventEnvelope } from '@rasta/contracts';
 import { MeterFullRun, MeterFullRunRefusal } from '../src/maintenance/meter-full-run';
 import { lockUsageMeter } from '../src/maintenance/usage-meter';
@@ -420,6 +422,55 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       WHERE asset_id = ${assetId}`).rejects.toThrow('USAGE_METER_MODE_REGRESSION');
     expect((await bootstrap(assetId)).meter_source).toBe('LEDGER');
   });
+  it('pins mode operators against a hostile scratch-schema search_path', async () => {
+    const assetId = id('AST');
+    await bootstrap(assetId);
+    await prisma.client
+      .$executeRaw`UPDATE asset_usage_meter SET meter_source = 'LEDGER' WHERE asset_id = ${assetId}`;
+    await expect(
+      owner.transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`CREATE FUNCTION "${schema}".mode_equal(text, text) RETURNS boolean
+        LANGUAGE sql AS 'SELECT true'`);
+        await tx.$executeRawUnsafe(`CREATE OPERATOR "${schema}".= (LEFTARG = text, RIGHTARG = text,
+        FUNCTION = "${schema}".mode_equal)`);
+        await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+        // Prove the caller operator is hostile before exercising the migrated function.
+        const [probe] = await tx.$queryRaw<
+          { equal: boolean }[]
+        >`SELECT 'LEDGER'::text = 'LEGACY'::text AS equal`;
+        expect(probe.equal).toBe(true);
+        await tx.$executeRaw`UPDATE asset_usage_meter SET meter_source = 'LEGACY' WHERE asset_id = ${assetId}`;
+      }),
+    ).rejects.toThrow('USAGE_METER_MODE_REGRESSION');
+    expect((await bootstrap(assetId)).meter_source).toBe('LEDGER');
+  });
+  it.each(['marker', 'meter'])(
+    'refuses mode-path down with an active %s in the scratch schema',
+    async (active) => {
+      if (active === 'marker') await command().activate(runId, actor, []);
+      else {
+        const assetId = id('AST');
+        await bootstrap(assetId);
+        await prisma.client
+          .$executeRaw`UPDATE asset_usage_meter SET meter_source = 'LEDGER' WHERE asset_id = ${assetId}`;
+      }
+      const down = readFileSync(
+        join(
+          __dirname,
+          '../prisma/migrations/20261114090000_usage_meter_mode_search_path/down.sql',
+        ),
+        'utf8',
+      );
+      const guard = down.match(/DO \$\$ BEGIN[\s\S]*?END \$\$;/)?.[0];
+      expect(guard).toBeDefined();
+      await expect(
+        owner.transaction(async (tx) => {
+          await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+          await tx.$executeRawUnsafe(guard!);
+        }),
+      ).rejects.toThrow('ACTIVE_METER_MODE_ROLLBACK_REFUSED');
+    },
+  );
   it('reports real Prisma callback expiration as a precommit refusal', async () => {
     const transaction = prisma.transaction.bind(prisma);
     let expired: unknown;
