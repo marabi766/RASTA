@@ -237,6 +237,7 @@ export class MeterReconcile {
       };
     }
     report.recordsRead = records.length;
+    let callbackReturned = false;
     try {
       await runWithContext(
         createSystemContext({
@@ -338,32 +339,32 @@ export class MeterReconcile {
                   last_usage_record_id = ${ledger.last_usage_record_id},
                   record_count = ${ledger.record_count}, updated_at = ${now}
                 WHERE asset_id = ${assetId}`;
+              callbackReturned = true;
             },
             { timeoutMs: 30_000 },
           ),
       );
     } catch (error) {
-      if (error instanceof PreviewComplete) return error.report;
+      if (!callbackReturned && error instanceof PreviewComplete) return error.report;
+      const unconfirmed =
+        apply &&
+        (callbackReturned ||
+          (!(error instanceof UsageMeterRefusal) &&
+            !(error instanceof Error && error.message === 'SOURCE_LEDGER_MISMATCH')));
       return {
         ...report,
         L: null,
         diff: null,
         schedulesWouldAnnounce: [],
         snapshotVerified: false,
-        outcome:
-          apply &&
-          !(error instanceof UsageMeterRefusal) &&
-          !(error instanceof Error && error.message === 'SOURCE_LEDGER_MISMATCH')
-            ? 'UNCONFIRMED'
-            : 'REFUSED',
-        refusal:
-          error instanceof UsageMeterRefusal
+        outcome: unconfirmed ? 'UNCONFIRMED' : 'REFUSED',
+        refusal: unconfirmed
+          ? 'APPLY_UNCONFIRMED'
+          : error instanceof UsageMeterRefusal
             ? error.code
             : error instanceof Error && error.message === 'SOURCE_LEDGER_MISMATCH'
               ? 'SOURCE_LEDGER_MISMATCH'
-              : apply
-                ? 'APPLY_UNCONFIRMED'
-                : 'PREVIEW_FAILED',
+              : 'PREVIEW_FAILED',
       };
     }
     report.sourceComplete = true;
