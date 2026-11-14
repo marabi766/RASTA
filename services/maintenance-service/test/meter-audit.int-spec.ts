@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { canonicalMeterCertificate, type EventEnvelope } from '@rasta/contracts';
+import { UsageMeterRefusal } from '../src/maintenance/usage-meter';
 import { MeterReconcile } from '../src/maintenance/meter-reconcile';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { cleanup, id, newPrisma, seedAsset, seedMeter, tenants } from './helpers';
@@ -109,16 +110,21 @@ describe('meter transition audit boundary', () => {
     expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
     expect((await repository.findMeter(f.assetId))!.hourMeter.toString()).toBe('100');
   });
-  it('lost commit response replays without another transition', async () => {
+  it.each([
+    new Error('lost commit response'),
+    new UsageMeterRefusal('ENTRY_CONFLICT'),
+    new Error('SOURCE_LEDGER_MISMATCH'),
+  ])('lost commit response (%s) replays without another transition', async (error) => {
     const f = await fixture();
     const transaction = prisma.transaction.bind(prisma);
     const lost = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
       await transaction(fn, options);
-      throw new Error('lost commit response');
+      throw error;
     });
     try {
       expect(await f.command.reportAsset(org.a, f.assetId, new Date(), true)).toMatchObject({
         outcome: 'UNCONFIRMED',
+        refusal: 'APPLY_UNCONFIRMED',
       });
     } finally {
       lost.mockRestore();

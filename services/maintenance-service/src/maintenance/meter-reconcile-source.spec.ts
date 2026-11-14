@@ -54,7 +54,7 @@ describe('fleet meter read boundary', () => {
   ])('refuses malformed or over-broad source fact %#', async (item) => {
     await expect(
       client({ items: [item], hasMore: false, nextCursor: null }).client.page('ORG_A', 'AST_A'),
-    ).rejects.toThrow();
+    ).rejects.toThrow('SOURCE_PAGE_MALFORMED');
   });
   it('validates certificate asset, digest, uniqueness and canonical decimal/UTC facts', async () => {
     const body = { version: 1 as const, assetId: 'AST_A', snapshot: '1:2:', facts: [row] };
@@ -76,7 +76,9 @@ describe('fleet meter read boundary', () => {
       { ...c, facts: [{ ...row, hours: '3' }] },
       { ...c, facts: [{ ...row, periodStart: null }] },
     ]) {
-      await expect(client(bad).client.certificate('ORG_A', 'AST_A')).rejects.toThrow();
+      await expect(client(bad).client.certificate('ORG_A', 'AST_A')).rejects.toThrow(
+        'SOURCE_CERTIFICATE_INVALID',
+      );
     }
     await expect(client({}, 503).client.certificate('ORG_A', 'AST_A')).rejects.toThrow(
       'SOURCE_READ_FAILED',
@@ -99,7 +101,7 @@ describe('fleet meter read boundary', () => {
         'ORG_A',
         'AST_A',
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow('SOURCE_CERTIFICATE_INVALID');
   });
   it('accepts a bounded manifest larger than the ordinary one-MiB page ceiling', async () => {
     const body = {

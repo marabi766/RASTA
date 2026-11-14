@@ -162,6 +162,63 @@ describe('maintenance-meter-reconcile dry run', () => {
       ),
     ).toBe(1);
   });
+  it.each([false, true])('refuses invalid certificates before writes; apply=%s', async (apply) => {
+    const assetId = await machine();
+    const body = { version: 1 as const, assetId, snapshot: '1:2:', facts: [anchor()] };
+    const valid = {
+      ...body,
+      digest: createHash('sha256').update(canonicalMeterCertificate(body)).digest('hex'),
+    };
+    for (const value of [
+      null,
+      { ...valid, assetId: 'OTHER' },
+      { ...valid, digest: '0'.repeat(64) },
+    ]) {
+      const transaction = jest.spyOn(prisma, 'transaction');
+      try {
+        const report = await new MeterReconcile(
+          prisma,
+          { certificate: jest.fn().mockResolvedValue(value), page: jest.fn() },
+          undefined,
+          'USR_ITEST',
+        ).reportAsset(org.a, assetId, new Date(), apply);
+        expect(report).toMatchObject({
+          outcome: 'REFUSED',
+          refusal: 'SOURCE_CERTIFICATE_INVALID',
+          sourceComplete: false,
+          L: null,
+        });
+        expect(transaction).not.toHaveBeenCalled();
+      } finally {
+        transaction.mockRestore();
+      }
+    }
+    expect(
+      await new MeterReconcile(
+        prisma,
+        { certificate: jest.fn().mockRejectedValue(new Error('unavailable')), page: jest.fn() },
+        undefined,
+        'USR_ITEST',
+      ).reportAsset(org.a, assetId, new Date(), apply),
+    ).toMatchObject({
+      outcome: 'REFUSED',
+      refusal: 'SOURCE_READ_FAILED',
+      L: null,
+    });
+    expect((await repository.findMeter(assetId))!.meterSource).toBe('LEGACY');
+  });
+  it('names a malformed adapter page before any write', async () => {
+    const assetId = await machine();
+    const transaction = jest.spyOn(prisma, 'transaction');
+    try {
+      expect(
+        await command({ page: jest.fn().mockResolvedValue(null) }).reportAsset(org.a, assetId),
+      ).toMatchObject({ outcome: 'REFUSED', refusal: 'SOURCE_PAGE_MALFORMED', L: null });
+      expect(transaction).not.toHaveBeenCalled();
+    } finally {
+      transaction.mockRestore();
+    }
+  });
   it('follows a filtered-empty page and refuses a missing continuation without a partial L', async () => {
     const assetId = await machine();
     const page = jest
