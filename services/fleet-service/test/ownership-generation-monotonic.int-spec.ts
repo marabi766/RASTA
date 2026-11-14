@@ -1,6 +1,11 @@
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
-import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import {
+  RastaError,
+  EventHandlingUnconfirmedError,
+  runWithContext,
+  type RequestContext,
+} from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
@@ -340,8 +345,11 @@ describe('the ownership generation only rises (#240 r12)', () => {
           );
         const took = Date.now() - started;
 
-        expect(outcome).toBeInstanceOf(Error);
-        expect(String((outcome as Error).message)).toMatch(/transaction|maxWait|time/i);
+        expect(outcome).toBeInstanceOf(EventHandlingUnconfirmedError);
+        expect(outcome).toMatchObject({
+          message: 'SOURCE_DRIFT_QUARANTINE_UNCONFIRMED',
+          evidencePolicy: { attempts: 8, backoffMs: 10_000 },
+        });
         expect(took).toBeGreaterThanOrEqual(250);
         expect(took).toBeLessThan(1_500);
       } finally {

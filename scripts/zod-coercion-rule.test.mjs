@@ -470,8 +470,8 @@ it('FU-181 refuses the stale partial contracts barrel', () => {
     writeFileSync(barrel, stale);
     assert.equal(
       createHash('sha256').update(stale).digest('hex'),
-      // Full-run and source-seal event exports are retained in this derived stale fixture.
-      'b1bfb0f6def012cd27b64df7453bffd7a5ce9c2d08a14fd4230d7044d8efcc7f',
+      // Full-run, source-seal and inventory-refusal exports remain in this derived stale fixture.
+      '3534776c084380eaa64cfe08c9f2ce48a6b0ca97f0f34aaec7c69b0556924731',
     );
     assert.equal(imported(root, '@rasta/contracts', 'isoDateTime'), undefined);
   } finally {

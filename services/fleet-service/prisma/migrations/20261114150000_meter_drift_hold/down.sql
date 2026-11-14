@@ -57,5 +57,5 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
-DELETE FROM "_prisma_migrations" WHERE migration_name = '20261114150000_meter_drift_hold';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261114150000_meter_drift_hold';
 COMMIT;
