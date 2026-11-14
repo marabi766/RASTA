@@ -46,6 +46,7 @@ export class FleetMeterInventorySeal {
         runUnscoped(
           'global operator source seal; all physical fleet identities across historical owners, never tenant-facing',
           async () => {
+            let callbackReturned = false;
             try {
               return await this.prisma.transaction(
                 async (tx) => {
@@ -78,13 +79,17 @@ export class FleetMeterInventorySeal {
                   if (gate.run_id !== null) {
                     if (gate.run_id !== runId || gate.operator_id !== operatorId)
                       throw new FleetMeterInventoryRefusal('SOURCE_SEAL_CONFLICT');
-                    const assets = assetsSchema.parse(gate.inventory);
+                    const stored = assetsSchema.safeParse(gate.inventory);
+                    if (!stored.success)
+                      throw new FleetMeterInventoryRefusal('SOURCE_SEAL_INVALID');
+                    const assets = stored.data;
                     const digest = createHash('sha256')
                       .update(JSON.stringify(assets))
                       .digest('hex');
                     const expectedBoundary = `fleet:${runId}:${digest}`;
                     if (gate.boundary !== expectedBoundary)
                       throw new FleetMeterInventoryRefusal('SOURCE_SEAL_INVALID');
+                    callbackReturned = true;
                     return {
                       complete: true,
                       scope: 'ALL_PHYSICAL_ASSETS',
@@ -111,7 +116,10 @@ export class FleetMeterInventorySeal {
                     throw new FleetMeterInventoryRefusal('SOURCE_INVENTORY_TOO_LARGE');
                   if (rows.some((r) => r.organizationId === null))
                     throw new FleetMeterInventoryRefusal('SOURCE_OWNER_UNCONFIRMED');
-                  const assets = assetsSchema.parse(rows);
+                  const source = assetsSchema.safeParse(rows);
+                  if (!source.success)
+                    throw new FleetMeterInventoryRefusal('SOURCE_INVENTORY_MALFORMED');
+                  const assets = source.data;
                   const digest = createHash('sha256').update(JSON.stringify(assets)).digest('hex');
                   const boundary = `fleet:${runId}:${digest}`;
                   await new FleetRepository(this.prisma).enqueueEvent(tx, {
@@ -131,19 +139,21 @@ export class FleetMeterInventorySeal {
                   });
                   await tx.$executeRaw`UPDATE meter_inventory_seal SET run_id = ${runId}, operator_id = ${operatorId},
               inventory = ${JSON.stringify(assets)}::jsonb, boundary = ${boundary} WHERE id = true`;
+                  callbackReturned = true;
                   return { complete: true, scope: 'ALL_PHYSICAL_ASSETS', boundary, assets };
                 },
                 { timeoutMs: 30_000 },
               );
             } catch (error) {
+              if (callbackReturned) throw new Error('SOURCE_SEAL_UNCONFIRMED');
               if (error instanceof FleetMeterInventoryRefusal) throw error;
               if (
                 error instanceof Prisma.PrismaClientKnownRequestError &&
                 (error.code === 'P2034' || ['55P03', '40P01'].includes(String(error.meta?.code)))
               )
                 throw new FleetMeterInventoryRefusal('SOURCE_WRITERS_ACTIVE');
-              // The seal/outbox may have committed. Reconcile by replaying the SAME run and actor.
-              throw new Error('SOURCE_SEAL_UNCONFIRMED');
+              // Prisma cannot commit before our callback returns (including replay).
+              throw new FleetMeterInventoryRefusal('SOURCE_SEAL_PRECOMMIT_FAILED');
             }
           },
         ),
