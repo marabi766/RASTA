@@ -19,7 +19,11 @@ import { SERVICE_NAME } from '../config/env';
 import { Prisma } from '../generated/prisma';
 import type { InsuranceCover } from './dispatch-blocks';
 import { sourceFenceRefusal } from './source-fence-refusal';
-import { quarantineTransaction, SourceDriftRefusal } from './drift-quarantine';
+import {
+  quarantineTransaction,
+  SourceDriftRefusal,
+  type SourceDriftCleanup,
+} from './drift-quarantine';
 import type {
   AvailabilityQuery,
   ListAssignmentsQuery,
@@ -54,12 +58,14 @@ export class FleetRepository {
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
     options?: { timeoutMs?: number; maxWaitMs?: number },
     sourceEventId?: string,
+    sourceDriftCleanup?: SourceDriftCleanup,
   ): Promise<T> {
     if (sourceEventId)
       return quarantineTransaction(
         (work) => this.prisma.transaction(work, options),
         sourceEventId,
         fn,
+        sourceDriftCleanup,
       );
     return this.prisma.transaction(fn, options);
   }
