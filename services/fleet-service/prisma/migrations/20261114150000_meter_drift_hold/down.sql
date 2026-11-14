@@ -1,11 +1,12 @@
 BEGIN;
 SET LOCAL lock_timeout = '5s';
-LOCK TABLE meter_drift_overflow IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE meter_drift_overflow, insurance_pending_verification IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
   IF current_setting('transaction_isolation') <> 'read committed' THEN
     RAISE EXCEPTION 'SOURCE_DRIFT_REQUIRES_READ_COMMITTED';
   END IF;
-  IF EXISTS(SELECT 1 FROM meter_drift_capacity WHERE overflow_count > 0)
+  IF EXISTS(SELECT 1 FROM insurance_pending_verification WHERE reason = 'SOURCE_REFUSAL_SEEN')
+    OR EXISTS(SELECT 1 FROM meter_drift_capacity WHERE overflow_count > 0)
     OR EXISTS(SELECT 1 FROM meter_drift_overflow WHERE reason = 'SOURCE_DRIFT_HOLD') THEN
     RAISE EXCEPTION 'ACTIVE_DRIFT_HOLD_ROLLBACK_REFUSED';
   END IF;

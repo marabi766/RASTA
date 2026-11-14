@@ -123,6 +123,20 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       return finished() || row.waiting;
     });
   }
+  async function assertHoldDownRefuses() {
+    const down = readFileSync(
+      join(__dirname, '../prisma/migrations/20261114150000_meter_drift_hold/down.sql'),
+      'utf8',
+    );
+    const guard = down.match(/DO \$\$ BEGIN[\s\S]*?END \$\$;/)?.[0];
+    if (!guard) throw new Error('hold rollback guard missing');
+    await expect(
+      owner.transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+        await tx.$executeRawUnsafe(guard);
+      }),
+    ).rejects.toThrow('ACTIVE_DRIFT_HOLD_ROLLBACK_REFUSED');
+  }
   const events = () => prisma.client.outboxMessage.findMany({ where: { aggregateId: runId } });
   it.each([
     'token',
@@ -243,18 +257,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
           await prisma.client.$queryRaw`SELECT overflow_count FROM meter_drift_capacity`,
         ).toEqual([{ overflow_count: ['seal-lock', 'token-clears'].includes(mode) ? 0n : 1n }]);
         if (mode === 'token') {
-          const down = readFileSync(
-            join(__dirname, '../prisma/migrations/20261114150000_meter_drift_hold/down.sql'),
-            'utf8',
-          );
-          const guard = down.match(/DO \$\$ BEGIN[\s\S]*?END \$\$;/)?.[0];
-          if (!guard) throw new Error('hold rollback guard missing');
-          await expect(
-            owner.transaction(async (tx) => {
-              await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
-              await tx.$executeRawUnsafe(guard);
-            }),
-          ).rejects.toThrow('ACTIVE_DRIFT_HOLD_ROLLBACK_REFUSED');
+          await assertHoldDownRefuses();
         }
       }
       expect(await prisma.client.$queryRaw`SELECT * FROM processed_event`).toEqual([]);
@@ -1301,6 +1304,8 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     'held-exhausted',
     'missing-gate-exhausted',
     'oversized-exhausted',
+    'refused-then-ambiguous-exhausted',
+    'refused-then-park-exhausted',
   ];
   it.each(sweepFailures)('sweep drift %s', async (mode) => {
     const assetId = id('AST'),
@@ -1360,7 +1365,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       validUntil: '2027-01-01T00:00:00.000Z',
       ownershipGeneration: 1,
     }));
-    if (mode === 'held-exhausted')
+    if (mode === 'held-exhausted' || mode.startsWith('refused-then-'))
       await prisma.client
         .$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${randomUUID()}::uuid`;
     if (mode === 'missing-gate-exhausted') {
@@ -1377,7 +1382,12 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       undefined,
       { verify },
       holdMode
-        ? { minAgeSeconds: 300, maxAttempts: 1, batchSize: 50, sweepIntervalMs: 60000 }
+        ? {
+            minAgeSeconds: 300,
+            maxAttempts: mode.startsWith('refused-then-') ? 2 : 1,
+            batchSize: 50,
+            sweepIntervalMs: 60000,
+          }
         : undefined,
     );
 
@@ -1406,12 +1416,40 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         `ALTER TABLE "${schema}".meter_drift_quarantine RENAME TO unavailable_quarantine`,
       );
     try {
+      if (mode.startsWith('refused-then-')) {
+        expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1 });
+        expect(
+          await prisma.client
+            .$queryRaw`SELECT reason = 'SOURCE_REFUSAL_SEEN' AS refusal_seen FROM insurance_pending_verification`,
+        ).toEqual([{ refusal_seen: true }]);
+        await assertHoldDownRefuses();
+        await prisma.client.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL`;
+        await prisma.transaction((tx) => repository.markParkedInsuranceDue(tx, assetId));
+        if (mode === 'refused-then-ambiguous-exhausted')
+          verify.mockImplementationOnce(async () => {
+            jest.spyOn(prisma, 'transaction').mockImplementationOnce((fn, options) =>
+              transaction(async (tx) => {
+                await fn(tx); // callback returned; model a lost/failed commit result, with rollback.
+                throw new Error('ambiguous commit result');
+              }, options),
+            );
+            throw new Error('upstream unavailable');
+          });
+        else verify.mockRejectedValueOnce(new Error('upstream unavailable'));
+      }
       expect(await consumer.sweepParked()).toMatchObject({
         QUARANTINED: ['confirmed', 'inventory-sealed'].includes(mode) ? 1 : 0,
       });
       if (holdMode) {
-        expect(await prisma.client.$queryRaw`SELECT reason FROM meter_drift_overflow`).toEqual([
-          { reason: 'SOURCE_DRIFT_HOLD' },
+        expect(
+          await prisma.client.$queryRaw`SELECT reason, run_id FROM meter_drift_overflow`,
+        ).toEqual([
+          {
+            reason: 'SOURCE_DRIFT_HOLD',
+            run_id: mode.startsWith('refused-then-')
+              ? 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL'
+              : 'SOURCE_REFUSAL_UNCONFIRMED',
+          },
         ]);
         expect(
           await prisma.client.$queryRaw`SELECT overflow_count FROM meter_drift_capacity`,

@@ -268,7 +268,7 @@ export class EventHandlingUnconfirmedError extends Error {
     readonly evidencePolicy?: {
       attempts: number;
       backoffMs: number;
-      persist: () => Promise<void>;
+      persist: (lastError?: unknown) => Promise<void>;
     },
   ) {
     // Driver messages/stacks can contain SQL and tenant values. Keep only a closed SDK code.
@@ -346,6 +346,9 @@ export const DEFAULT_BACKOFF_MS = 500;
  * does between attempts.
  */
 export const CONSUMER_SESSION_TIMEOUT_MS = 60_000;
+/** Fleet's startup-checked ordinary budget <57s; 7 extra attempts plus HOLD
+ * each <57/3 s, and seven 10s pauses total <279s. Allow broker/tx margin. */
+export const CONSUMER_REBALANCE_TIMEOUT_MS = 300_000;
 
 /**
  * One run of the consumer, from a `start()` to its stop. A message keeps the
@@ -516,6 +519,7 @@ export class EventConsumer {
       // 30s heartbeat window on a cold cache; 60s avoids a rebalance storm
       // that would only make the backlog worse.
       sessionTimeout: CONSUMER_SESSION_TIMEOUT_MS,
+      rebalanceTimeout: CONSUMER_REBALANCE_TIMEOUT_MS,
       allowAutoTopicCreation: false,
     });
 
@@ -775,8 +779,9 @@ export class EventConsumer {
           !(error instanceof UnprocessableEventError)
         ) {
           // A failed evidence commit propagates, leaving the offset uncommitted.
-          await evidencePolicy.persist();
+          await evidencePolicy.persist(error);
           this.abandonIfPastDeadline(run, { topic, partition, offset });
+          if (!this.options.deadLetterTopic) throw error;
         }
         if (error instanceof EventHandlingUnconfirmedError) {
           this.logger.error(
