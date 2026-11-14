@@ -194,6 +194,14 @@ export const consumerCrashesTotal = new Counter({
   registers: [registry],
 });
 
+/** Closed outcome only; no event ids, owners, query text or error-message labels. */
+export const consumerHandlingFailuresTotal = new Counter({
+  name: 'rasta_consumer_handling_failures_total',
+  help: 'Unconfirmed handling attempts entering bounded retry or DLQ reconciliation',
+  labelNames: ['service', 'topic'] as const,
+  registers: [registry],
+});
+
 /** Only constructed (enabled), declared consumer groups export this gate. */
 export const consumerExpected = new Gauge({
   name: 'rasta_consumer_expected',

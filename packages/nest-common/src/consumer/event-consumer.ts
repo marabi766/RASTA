@@ -25,7 +25,12 @@ import {
   type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
-import { dlqMessagesTotal, consumerCrashesTotal, consumerExpected } from '@rasta/observability';
+import {
+  dlqMessagesTotal,
+  consumerCrashesTotal,
+  consumerExpected,
+  consumerHandlingFailuresTotal,
+} from '@rasta/observability';
 import { consumerFailures } from './consumer-health';
 import { fatalShutdown } from '../lifecycle/fatal-shutdown';
 import { createSystemContext, runWithContext } from '../context/request-context';
@@ -35,6 +40,7 @@ import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connect
 import { kafkaShutdownDeadline } from '../kafka/bounded-disconnect';
 import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
 import { WorkerAbandonedError } from '../worker-boundary';
+import { clientFailureCode } from '../database/client-failure';
 
 /**
  * The consuming half of the outbox pattern (ADR-021).
@@ -238,6 +244,27 @@ export class UnprocessableEventError extends Error {
   ) {
     super(message);
     this.name = 'UnprocessableEventError';
+  }
+}
+
+/** Code-only diagnostics: no foreign message, stack, query or metadata survives. */
+export function handlingFailureCause(error: unknown): Error {
+  try {
+    const code =
+      error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined;
+    return new Error(
+      typeof code === 'string' && /^P20[0-3][0-9]$/.test(code) ? code : clientFailureCode(error),
+    );
+  } catch {
+    return new Error('unknown');
+  }
+}
+
+/** Ambiguous handling: bounded retry, then DLQ for reconciliation, never a success claim. */
+export class EventHandlingUnconfirmedError extends Error {
+  constructor(message: string, cause?: unknown) {
+    // Driver messages/stacks can contain SQL and tenant values. Keep only a closed SDK code.
+    super(message, { cause: handlingFailureCause(cause) });
   }
 }
 
@@ -726,6 +753,15 @@ export class EventConsumer {
         const event = `${envelope.eventName} ${logField(envelope.eventId)}`;
         const message = handlerMessage(error);
 
+        if (error instanceof EventHandlingUnconfirmedError) {
+          this.logger.error(
+            `Handling unconfirmed ${event}: ${message}; cause=${(error.cause as Error).message}`,
+          );
+          consumerHandlingFailuresTotal.inc({ service: this.options.clientId, topic });
+          if (attempt === maxRetries && !this.options.deadLetterTopic) throw error;
+          // Fall through to bounded retries/DLQ. A successful DLQ publish accounts
+          // for this delivery even when quarantine/commit cannot be confirmed.
+        }
         if (error instanceof UnprocessableEventError) {
           this.logger.error(`Handler refused ${event} (${error.reason}): ${message}`);
           await this.deadLetter(

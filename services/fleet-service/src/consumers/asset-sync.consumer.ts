@@ -956,6 +956,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
         envelope.eventName === CONSUMED_EVENTS.ASSET_CREATED
         ? { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs }
         : { maxWaitMs: this.transactionMaxWaitMs },
+      envelope.eventId,
     );
 
     // Committed: the sweep, outside this handler, decides what the transfer made
@@ -1235,6 +1236,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
         return 'KEPT';
       },
       { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs },
+      eventId,
     );
 
     if (lettered) {

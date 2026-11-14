@@ -3288,5 +3288,75 @@
     "hash": "0f27964faf72269df41699294b9bda7e15cd1ff98086989f211601a40e559465",
     "occurrence": 0,
     "decision": "platform-wide: operator-only sealed physical inventory and activation under exclusive rollout fence; source spans historical owners, no tenant-facing output or authorization"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 29,
+    "hash": "e6329a7646e653a33900db925bbc3484a743c680109d1543eec18b25eb157b40",
+    "occurrence": 0,
+    "decision": "platform-wide: locks the global source seal across refusal rollback or activation; never returns owner evidence to a tenant"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 32,
+    "hash": "0e2449d8a34003295589628136d16990f15278486a46b6d0898512c23f2117b1",
+    "occurrence": 0,
+    "decision": "platform-wide: savepoint boundary rolls back all refused consumer effects before durable drift evidence commits"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 38,
+    "hash": "fd49d7e5abf50aa1b6c22c933cf128d1de28f07d5613c32cc526ae1a96a781ed",
+    "occurrence": 0,
+    "decision": "platform-wide: savepoint boundary rolls back all refused consumer effects before durable drift evidence commits"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 40,
+    "hash": "c4f56417e43508496ca48c9b0c51728b1c82d893346a2908039bafd815a41a52",
+    "occurrence": 0,
+    "decision": "platform-wide: bounded event-id quarantine records both owners only for platform activation hold; no tenant API"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 50,
+    "hash": "9c9404ba2fa23ed44ac7e92638ddf66b95f7ac86f8904aa7a0a0d3e46f04ba32",
+    "occurrence": 0,
+    "decision": "platform-wide: locks the global source seal across refusal rollback or activation; never returns owner evidence to a tenant"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 67,
+    "hash": "f0da4f5ff017f2a68333e9d0d2f1a08fd4e7188f920898d20a3ab04352574432",
+    "occurrence": 0,
+    "decision": "platform-wide: verifies the durable activation token in the singleton capacity gate under sealed source authority; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 69,
+    "hash": "90eb7d8c856cd222319b3256b67d0350344e6ca1ccaf9efb87c4a8346f1c1bfe",
+    "occurrence": 0,
+    "decision": "platform-wide: checks unresolved drift for the exact sealed run under exclusive source lock before activation"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 73,
+    "hash": "79e325a0839ed6fd546e30e9d06f2a6fdede84f63ed7377627d251abad4398c4",
+    "occurrence": 0,
+    "decision": "platform-wide: durably arms or releases the activation barrier under sealed-run operator authority; blocks drift on transaction loss"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 81,
+    "hash": "1ce203053673e96a9fe4c6e1c8678b95dfec5a7372f26ac74696e20e81f45047",
+    "occurrence": 0,
+    "decision": "platform-wide: verifies the durable activation token in the singleton capacity gate under sealed source authority; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 92,
+    "hash": "e8e1e32ef788395750691c907e8195264589678b356e3f78098d22beba95d48a",
+    "occurrence": 0,
+    "decision": "platform-wide: durably arms or releases the activation barrier under sealed-run operator authority; blocks drift on transaction loss"
   }
 ]
