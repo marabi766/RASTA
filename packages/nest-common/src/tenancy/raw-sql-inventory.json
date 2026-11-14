@@ -1296,13 +1296,6 @@
   },
   {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
-    "line": 1071,
-    "hash": "9d5bebbaeb8b3dfe3e41b03356a9cf505ec3efce8bb20b8b72d64ff14331b975",
-    "occurrence": 0,
-    "decision": "platform-wide: insurance projection retry queue is a consumer-wide worklist keyed by source event or global asset; verified source controls final effect"
-  },
-  {
-    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 1095,
     "hash": "118b03c64c0e2c7c3dab3411f30d2aa527e84aa07a27865c1e6dfbe15b9e8fb5",
     "occurrence": 0,
@@ -3333,13 +3326,6 @@
   },
   {
     "file": "services/fleet-service/src/fleet/meter-inventory.ts",
-    "line": 69,
-    "hash": "90eb7d8c856cd222319b3256b67d0350344e6ca1ccaf9efb87c4a8346f1c1bfe",
-    "occurrence": 0,
-    "decision": "platform-wide: checks unresolved drift for the exact sealed run under exclusive source lock before activation"
-  },
-  {
-    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
     "line": 73,
     "hash": "79e325a0839ed6fd546e30e9d06f2a6fdede84f63ed7377627d251abad4398c4",
     "occurrence": 0,
@@ -3358,5 +3344,33 @@
     "hash": "e8e1e32ef788395750691c907e8195264589678b356e3f78098d22beba95d48a",
     "occurrence": 0,
     "decision": "platform-wide: durably arms or releases the activation barrier under sealed-run operator authority; blocks drift on transaction loss"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 59,
+    "hash": "fe62bd4b4c035e2e62232d1e903cbc73eb56246e83d0eb1288c0144f90a631db",
+    "occurrence": 0,
+    "decision": "platform-wide: detects bounded durable overflow or its permanent activation hold under source/capacity locks; no tenant-facing evidence"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 70,
+    "hash": "9efdd4ec5e0b7fc85543483234c1fdcdfb3bff3551de86c5d0c18d15021f8671",
+    "occurrence": 0,
+    "decision": "platform-wide: detects bounded durable overflow or its permanent activation hold under source/capacity locks; no tenant-facing evidence"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 119,
+    "hash": "723f63f9b47e17435d5db8aaef36b6c9289928bd90c5499b9829d46f8c5e495d",
+    "occurrence": 0,
+    "decision": "platform-wide: releases only the exact activation token under the source seal after a proven-unused callback; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 1181,
+    "hash": "ba2803215c7b7c30e31de594c222901adf28912e536818cf172db2878fa14383",
+    "occurrence": 0,
+    "decision": "platform-wide: least-recently-tried insurance sweep spans tenants with bounded batches; each decision rechecks under its asset lock"
   }
 ]

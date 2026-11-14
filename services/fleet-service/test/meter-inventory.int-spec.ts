@@ -59,6 +59,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       ...sources,
       'meter_inventory_seal',
       'meter_inventory_seal_asset',
+      'meter_drift_overflow',
       'meter_drift_quarantine',
       'meter_drift_capacity',
       'processed_event',
@@ -90,6 +91,9 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await owner.client
       .$executeRawUnsafe(`CREATE TRIGGER meter_drift_quarantine_no_truncate BEFORE TRUNCATE
       ON "${schema}".meter_drift_quarantine FOR EACH STATEMENT EXECUTE FUNCTION public.meter_drift_quarantine_guard()`);
+    await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_drift_overflow_guard
+      BEFORE INSERT OR UPDATE OR DELETE ON "${schema}".meter_drift_overflow
+      FOR EACH ROW EXECUTE FUNCTION public.meter_drift_quarantine_guard()`);
     const role = decodeURIComponent(runtime.username).replaceAll('"', '""');
     await owner.client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`);
     await owner.client.$executeRawUnsafe(
@@ -588,6 +592,131 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       ]);
     },
   );
+  it.each(['before-callback', 'definite-refusal', 'sync-refusal', 'uncertain'])(
+    'releases only proven-unused activation tokens: %s',
+    async (mode) => {
+      const sealed = await command.seal(runId, actor);
+      const transaction = prisma.transaction.bind(prisma);
+      const refusal = new Error('DEFINITE_REFUSAL');
+      const callback = jest.fn(() => {
+        if (mode === 'sync-refusal') throw refusal;
+        return Promise.reject(refusal);
+      });
+      let calls = 0;
+      const spy = jest.spyOn(prisma, 'transaction').mockImplementation((fn, options) => {
+        if (++calls === 2 && mode === 'before-callback')
+          return Promise.reject(new Error('pool wait'));
+        return transaction(fn, options);
+      });
+      try {
+        await expect(
+          command.withQuarantineClear(
+            runId,
+            sealed.boundary,
+            callback,
+            (error) => ['definite-refusal', 'sync-refusal'].includes(mode) && error === refusal,
+          ),
+        ).rejects.toThrow();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(callback).toHaveBeenCalledTimes(mode === 'before-callback' ? 0 : 1);
+      const [row] = await prisma.client.$queryRaw<{ activation_token: string | null }[]>`
+        SELECT activation_token FROM meter_drift_capacity`;
+      if (mode === 'uncertain') expect(row.activation_token).not.toBeNull();
+      else {
+        expect(row.activation_token).toBeNull();
+        expect(await command.withQuarantineClear(runId, sealed.boundary, async () => 'ok')).toBe(
+          'ok',
+        );
+      }
+    },
+  );
+  it('advances 50 failing decisions and decides another tenant, then exhausts them', async () => {
+    const repository = new FleetRepository(prisma);
+    const healthy = id('AST');
+    const events = Array.from({ length: 51 }, (_, n) => ({
+      eventId: `EVT_LIVENESS_${String(n).padStart(3, '0')}`,
+      assetId: n === 50 ? healthy : id('AST'),
+      organizationId: n === 50 ? org.b : org.a,
+    }));
+    for (const row of events) {
+      const envelope: EventEnvelope = {
+        eventId: row.eventId,
+        eventName: 'INSURANCE_RECORDED',
+        eventVersion: 1,
+        tenantId: row.organizationId,
+        producer: 'asset-service',
+        producerVersion: '0.1.0',
+        occurredAt: '2026-01-01T00:00:00.000Z',
+        correlationId: id('COR'),
+        aggregateType: 'Asset',
+        aggregateId: row.assetId,
+        payload: producerShaped('INSURANCE_RECORDED', {
+          assetId: row.assetId,
+          organizationId: row.organizationId,
+          policyId: id('INS'),
+          insurerName: 'TEST',
+          coverage: 'COMPREHENSIVE',
+          validFrom: '2026-01-01T00:00:00.000Z',
+          validTo: '2027-01-01T00:00:00.000Z',
+          ownershipGeneration: 1,
+        }),
+      };
+      await prisma.client.$executeRaw`INSERT INTO insurance_pending_verification
+        (event_id, asset_id, organization_id, envelope, source_topic, reason, next_attempt_at)
+        VALUES (${row.eventId}, ${row.assetId}, ${row.organizationId}, ${JSON.stringify(envelope)}::jsonb, 'TEST', 'NO_ANSWER', now())`;
+    }
+    const verify = jest.fn(async (organizationId: string) => ({
+      counts: true as const,
+      organizationId,
+      coverage: 'COMPREHENSIVE',
+      validFrom: '2026-01-01T00:00:00.000Z',
+      validUntil: '2027-01-01T00:00:00.000Z',
+      ownershipGeneration: 1,
+    }));
+    const consumer = new AssetSyncConsumer(
+      null,
+      repository,
+      undefined,
+      undefined,
+      undefined,
+      { verify },
+      { minAgeSeconds: 300, maxAttempts: 2, batchSize: 50, sweepIntervalMs: 60000 },
+    );
+    const upsert = repository.upsertAssetRef.bind(repository);
+    const fail = jest.spyOn(repository, 'upsertAssetRef').mockImplementation((tx, data) =>
+      data.id === healthy
+        ? upsert(tx, data)
+        : tx.$executeRaw`SELECT 1/0`.then(() => {
+            throw new Error('unreachable');
+          }),
+    );
+    try {
+      await consumer.sweepParked();
+      expect(
+        await prisma.client
+          .$queryRaw`SELECT count(*)::int AS n FROM insurance_pending_verification WHERE attempts = 1`,
+      ).toEqual([{ n: 50 }]);
+      // Transfers can keep failing rows explicitly due: ordering must still admit the untouched tenant.
+      await prisma.client
+        .$executeRaw`UPDATE insurance_pending_verification SET next_attempt_at = now()`;
+      expect(await consumer.sweepParked()).toMatchObject({ APPLIED: 1, DEAD_LETTERED: 49 });
+      expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 1 });
+      expect(await prisma.client.$queryRaw`SELECT * FROM insurance_pending_verification`).toEqual(
+        [],
+      );
+      expect(await prisma.client.assetRef.findUnique({ where: { id: healthy } })).toMatchObject({
+        organizationId: org.b,
+      });
+      expect(
+        await prisma.client
+          .$queryRaw`SELECT count(*)::int AS n FROM outbox_message WHERE headers->>'x-dlq-reason' = 'PARKED_VERIFICATION_EXHAUSTED'`,
+      ).toEqual([{ n: 50 }]);
+    } finally {
+      fail.mockRestore();
+    }
+  });
   it('keeps the activation barrier durable after its live transaction expires', async () => {
     const sealed = await command.seal(runId, actor),
       entered = latch(),
@@ -856,7 +985,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       ),
     ).rejects.toThrow('SOURCE_DRIFT_REQUIRES_READ_COMMITTED');
   });
-  it('bounds concurrent new entries, permits replay at cap and never evicts', async () => {
+  it('bounds concurrent primary and overflow entries and permits replay at cap', async () => {
     await command.seal(runId, actor);
     await owner.client.$executeRawUnsafe(
       `ALTER TABLE "${schema}".meter_drift_quarantine DISABLE TRIGGER meter_drift_quarantine_guard`,
@@ -870,15 +999,10 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     const insert = (eventId: string) => prisma.client.$executeRaw`INSERT INTO meter_drift_quarantine
       (event_id, asset_id, named_owner, reason, run_id) VALUES (${eventId}, 'AST_CAP', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId})`;
     const results = await Promise.allSettled([insert('LAST_A'), insert('LAST_B')]);
-    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    expect(results.filter((r) => r.status === 'rejected')).toEqual([
-      {
-        status: 'rejected',
-        reason: expect.objectContaining({
-          message: expect.stringContaining('SOURCE_DRIFT_QUARANTINE_FULL'),
-        }),
-      },
-    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    expect(
+      await prisma.client.$queryRaw`SELECT count(*)::int AS n FROM meter_drift_overflow`,
+    ).toEqual([{ n: 1 }]);
     await expect(insert('CAP_1')).resolves.toBe(0);
     const repository = new FleetRepository(prisma);
     await expect(
@@ -889,10 +1013,64 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         undefined,
         'OVER_CAP',
       ),
-    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_FULL');
+    ).rejects.toMatchObject({ reason: 'SOURCE_DRIFT_QUARANTINE_FULL' });
+    expect(
+      await prisma.client
+        .$queryRaw`SELECT event_id FROM meter_drift_overflow WHERE event_id = 'OVER_CAP'`,
+    ).toEqual([{ event_id: 'OVER_CAP' }]);
     expect(
       await prisma.client.$queryRaw`SELECT count(*)::int AS n FROM meter_drift_quarantine`,
     ).toEqual([{ n: 10000 }]);
+    const transaction = prisma.transaction.bind(prisma);
+    const lost = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
+      await transaction(fn, options);
+      throw new Error('overflow commit response lost');
+    });
+    const refuse = () =>
+      repository.transaction(
+        async () => {
+          throw new SourceDriftRefusal(DLQ_REASONS.SOURCE_INVENTORY_SEALED, 'AST_CAP', org.b);
+        },
+        undefined,
+        'LOST_OVERFLOW',
+      );
+    try {
+      await expect(refuse()).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_UNCONFIRMED');
+    } finally {
+      lost.mockRestore();
+    }
+    expect(
+      await prisma.client
+        .$queryRaw`SELECT event_id FROM meter_drift_overflow WHERE event_id = 'LOST_OVERFLOW'`,
+    ).toEqual([{ event_id: 'LOST_OVERFLOW' }]);
+    await expect(refuse()).rejects.toMatchObject({ reason: 'SOURCE_DRIFT_QUARANTINE_FULL' });
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_overflow DISABLE TRIGGER meter_drift_overflow_guard`,
+    );
+    await prisma.client
+      .$executeRaw`INSERT INTO meter_drift_overflow(event_id, asset_id, named_owner, reason, run_id)
+      SELECT 'OLD_' || n, 'AST_CAP', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId} FROM generate_series(1,10000) n`;
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_overflow ENABLE TRIGGER meter_drift_overflow_guard`,
+    );
+    await insert('BOUNDED');
+    expect(
+      await prisma.client.$queryRaw`SELECT count(*)::int AS n FROM meter_drift_overflow`,
+    ).toEqual([{ n: 10000 }]);
+    expect(await prisma.client.$queryRaw`SELECT overflow_count FROM meter_drift_capacity`).toEqual([
+      { overflow_count: 4n },
+    ]);
+    await prisma.client
+      .$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${randomUUID()}::uuid`;
+    expect(await insert('BOUNDED')).toBe(0);
+    await prisma.client.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL`;
+    await expect(
+      command.withQuarantineClear(
+        runId,
+        (await command.seal(runId, actor)).boundary,
+        async () => 'unsafe',
+      ),
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
     await expect(
       prisma.client.$executeRaw`DELETE FROM meter_drift_quarantine WHERE event_id = 'CAP_1'`,
     ).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_FIXED');
@@ -909,6 +1087,24 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       (event_id, asset_id, named_owner, reason, run_id) VALUES ('CAP_1', 'OTHER', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId})`,
       ),
     ).rejects.toThrow('SOURCE_DRIFT_EVENT_CONFLICT');
+    await prisma.client
+      .$executeRaw`UPDATE meter_drift_capacity SET overflow_count = 9223372036854775807`;
+    await insert('SATURATED');
+    expect(await prisma.client.$queryRaw`SELECT overflow_count FROM meter_drift_capacity`).toEqual([
+      { overflow_count: 9223372036854775807n },
+    ]);
+    // Even after a future operator clears the primary set, eviction must never reopen activation.
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_quarantine DISABLE TRIGGER meter_drift_quarantine_guard`,
+    );
+    await prisma.client.$executeRaw`DELETE FROM meter_drift_quarantine`;
+    await expect(
+      command.withQuarantineClear(
+        runId,
+        (await command.seal(runId, actor)).boundary,
+        async () => 'unsafe',
+      ),
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
   });
   const sweepFailures = [
     'confirmed',
@@ -1021,6 +1217,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         );
     }
     if (['cleanup-failed', 'quarantine-failed', 'unknown-write'].includes(mode)) {
+      await prisma.transaction((tx) => repository.markParkedInsuranceDue(tx, assetId));
       const answer = await verify();
       const both = latch();
       let waiting = 0;
@@ -1079,8 +1276,11 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       `ALTER TABLE "${schema}".meter_inventory_seal DISABLE TRIGGER meter_inventory_seal_fixed`,
     );
     await owner.client.$executeRawUnsafe(`DELETE FROM "${schema}".meter_inventory_seal`);
+    await prisma.transaction(async (tx) => {
+      expect(await repository.recordParkedAttempt(tx, parkedId, 'DECISION_FAILED')).toBe(2);
+    });
     await expect(prisma.client.$executeRaw`UPDATE insurance_pending_verification
-      SET attempts = attempts + 1`).rejects.toThrow('SOURCE_FENCE_MISSING');
+      SET organization_id = 'OTHER'`).rejects.toThrow('SOURCE_FENCE_MISSING');
   });
   it('refuses a malformed stored seal boundary on same-run replay', async () => {
     await prisma.client.$executeRaw`UPDATE meter_inventory_seal SET run_id = ${runId},

@@ -1657,14 +1657,14 @@ export const REVIEWED_FUNCTIONS = [
   {
     service: 'fleet-service',
     name: 'meter_drift_quarantine_guard',
-    sha256: 'd3b66531bd077e4f84d9cab280a580b90d46eb796fe7a6871d3e835908e2f02c',
+    sha256: '0f76d1b506c509f5721413554f2dc2cd88c4011a723d8b66b4a892f919ac7421',
     why: 'Clock-free bounded append-only quarantine and durable activation barrier; trusted TG_TABLE_SCHEMA is identifier-quoted in schema-local set_config; no EXECUTE, expiry or timestamp conversion.',
   },
   {
     service: 'fleet-service',
     name: 'meter_inventory_creation_fence',
-    sha256: 'a7f41abc0429af2217362261526ba47393f541820e69c90d125a93bd6f2b9f31',
-    why: 'Clock-free indexed asset/owner fence; unchanged UPDATE identity is safe; schema-local set_config quotes trusted TG_TABLE_SCHEMA; assetId is a JSON data key, never SQL; no EXECUTE.',
+    sha256: 'ebbe03e0f2ceda9a861f72c5cf2ebd7848873c0e8448eb49584a6bc2c3496b5d',
+    why: 'Clock-free indexed asset/owner fence; exact attempt-metadata-only updates remain possible with a missing gate; other unchanged UPDATE identities require the gate; schema-local set_config quotes trusted TG_TABLE_SCHEMA; assetId is a JSON data key, never SQL; no EXECUTE.',
   },
   {
     service: 'fleet-service',

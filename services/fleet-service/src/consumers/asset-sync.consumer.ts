@@ -463,7 +463,7 @@ type InsuranceOutcome =
   | { readonly kind: 'PARK'; readonly reason: ParkReason };
 
 /** Why an event is (still) parked: the source ahead, or no answer from it. */
-type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER';
+type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER' | 'DECISION_FAILED';
 
 /**
  * What one re-verification of a parked event did. `STOPPED`: the shutdown began
@@ -1248,16 +1248,56 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
         },
       },
     );
-    const outcome = await decision.catch((error: unknown): ParkedOutcome => {
+    const outcome = await decision.catch(async (error: unknown): Promise<ParkedOutcome> => {
       if (
         error instanceof UnprocessableEventError &&
         (error.reason === DLQ_REASONS.SOURCE_OWNER_DRIFT ||
-          error.reason === DLQ_REASONS.SOURCE_INVENTORY_SEALED)
+          error.reason === DLQ_REASONS.SOURCE_INVENTORY_SEALED ||
+          error.reason === DLQ_REASONS.SOURCE_DRIFT_QUARANTINE_FULL)
       )
         return 'QUARANTINED'; // Raised only after evidence + removal committed.
-      throw error;
+      if (this.sweepStopped) return 'STOPPED';
+      // The decision rolled back (or its response was lost). Persist progress
+      // separately, under the same asset lock and observed attempt version.
+      const failed = await this.repository.transaction(async (tx) => {
+        await this.repository.lockAssetRef(tx, assetId);
+        const row = await this.repository.findParkedInsurance(
+          tx,
+          eventId,
+          this.parking.minAgeSeconds,
+        );
+        if (!row || row.attempts !== read.row.attempts) return null;
+        const attempts = await this.repository.recordParkedAttempt(tx, eventId, 'DECISION_FAILED');
+        return { row, attempts };
+      });
+      if (this.sweepStopped) return 'STOPPED';
+      if (!failed || failed.attempts < this.parking.maxAttempts) return 'KEPT';
+      // Even if terminal cleanup fails, the attempt above remains durable and
+      // this row leaves the head of the least-recently-tried order.
+      return this.repository.transaction(async (tx): Promise<ParkedOutcome> => {
+        await this.repository.lockAssetRef(tx, assetId);
+        const row = await this.repository.findParkedInsurance(
+          tx,
+          eventId,
+          this.parking.minAgeSeconds,
+        );
+        if (!row || row.attempts !== failed.attempts) return 'GONE';
+        await this.repository.enqueueDeadLetter(
+          tx,
+          this.parkedDeadLetter(row, row.attempts, 'DECISION_FAILED'),
+        );
+        await this.repository.deleteParkedInsurance(tx, eventId);
+        await this.repository.unmarkEventProcessed(tx, eventId, CONSUMER_NAME);
+        lettered = {
+          sourceTopic: row.sourceTopic,
+          attempts: row.attempts,
+          last: 'DECISION_FAILED',
+        };
+        return 'DEAD_LETTERED';
+      });
     });
 
+    if (this.sweepStopped) return 'STOPPED';
     if (lettered) {
       // Counted once committed: the relay publishes what the outbox holds.
       dlqMessagesTotal.inc({

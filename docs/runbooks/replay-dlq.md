@@ -350,7 +350,7 @@ REPLAY_OPERATOR=<نام اپراتور، بی Secret> node … scripts/replay-dl
 - **رد می‌شوند:** `NEVER_AUTO_REPLAY` (همهٔ رویدادهای economic و `ORDER_RECEIPT_CONFIRMED`، `STATEMENT_APPROVED`)، و هر پیامی
   از Topic مبدأ `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1` یا `.retry` آن) **هر نامی داشته باشد** — بی هیچ Override؛ و
   دلیل‌هایی که بازپخش عوضشان نمی‌کند: `PRODUCER_NOT_ALLOWED`، `SOURCE_UNCONFIRMED`، `BACKFILL_REQUIRED`،
-  `SOURCE_OWNER_DRIFT`، `SOURCE_INVENTORY_SEALED`.
+  `SOURCE_OWNER_DRIFT`، `SOURCE_INVENTORY_SEALED`، `SOURCE_DRIFT_QUARANTINE_FULL`.
 - **کهنگی (ADR-051 § R6):** Dry-run Topic مبدأ را از پس از Offset اصلی می‌خواند؛ اگر رویداد تازه‌تری با همان کلید جریان هست
   `stale: true`، و اگر نمی‌تواند ببیند (مبدأ `.retry` — `ops-replay` آن را نمی‌خواند و Offset آن با Topic اصلی مقایسه‌پذیر
   نیست —، بی موقعیت، خواندن ناقص، یا **Retention از Offset اصلی گذشته**: Low Watermark پارتیشن بعد از `Offset اصلی + ۱` است؛
