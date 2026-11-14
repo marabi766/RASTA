@@ -14,7 +14,8 @@
  *     a field whose header is missing, is a disagreement too (refused, not
  *     repaired);
  *   - its reason is one a replay can change (`PRODUCER_NOT_ALLOWED`,
- *     `SOURCE_UNCONFIRMED` and `BACKFILL_REQUIRED` are not: the same claim gets
+ *     `SOURCE_UNCONFIRMED`, `BACKFILL_REQUIRED`, `SOURCE_OWNER_DRIFT` and
+ *     `SOURCE_INVENTORY_SEALED` are not: the same claim gets
  *     the same answer);
  *   - it is not a `NEVER_AUTO_REPLAY` event, nor from a
  *     `NEVER_AUTO_REPLAY_TOPICS` topic (or its `.retry`) whatever its name —

@@ -87,6 +87,8 @@ recomputes the same set; it does not add deltas again. Existing LEDGER assets
 are never demoted by refusal. APPLIED is reported only after confirmed commit;
 APPLY_UNCONFIRMED means a lost transaction result may have committed: inspect
 and rerun verification, never assume LEGACY or an untouched counter.
+Unknown pool/statement failures before the callback returns are definite
+`APPLY_PRECOMMIT_FAILED` refusals; known refusals retain their named code.
 announceForAsset runs in tenant context after commit. ANNOUNCEMENT_UNCONFIRMED
 preserves the confirmed meter and can be retried by apply or the normal scan;
 previous announcements are not retracted. Review L < M with maintenance staff.
@@ -253,7 +255,8 @@ up to `lock_timeout = '5s'` for the gate; timeout still aborts atomically. Use t
 same drain procedure for that migration: INSERTs and UPDATEs on all seven source
 tables (`asset_ref`, `usage_record`, `assignment`, `availability_window`,
 `asset_transfer_fence`, `asset_transfer_release`, `insurance_pending_verification`) queue
-for up to 5s, including the parked sweep and consumers. Allow for request timeouts
+for up to 5s, including the parked sweep and consumers. Seal/replay/status
+operators and seal-membership writers also queue. Allow for request timeouts
 and consumer retries if accepting that pause instead of draining.
 
 Malformed source rows refuse `SOURCE_INVENTORY_MALFORMED`; malformed stored inventory
@@ -285,14 +288,65 @@ specific reason after one attempt. The replay tool refuses both reasons as
 same fence also refuses immediately. Commit-response failures are not classified
 by this statement-only mapper.
 
-PM option 2 requires unresolved drift quarantine to hold every activation with
-`SOURCE_DRIFT_QUARANTINED`, including missing/unreadable quarantine state. **That
-durable, bounded, platform-only quarantine and activation hold are the next
-stacked slice, not implemented here.** The existing Kafka DLQ is transport
-evidence, not a run-scoped unresolved quarantine or an activation proof. Do not
-activate or wire the production authority/CLI until this prerequisite exists.
-Operator reconciliation (clearing quarantine), REST authority, activation CLI,
-durable progress and the versioned reopening protocol remain subsequent slices.
+The fleet-owned `meter_drift_quarantine` now retains terminal drift from creation,
+transfer, refresh, `.retry`, insurance parking and the parked sweep. It stores the
+event ID, asset, sealed owner (null for an unknown asset), named owner, reason,
+sealed run and database first-seen time. Identifier evidence is bounded to 256
+UTF-8 bytes per field; oversized evidence refuses persistence and enters bounded retry/DLQ handling. Entries are immutable and idempotent per
+event ID; conflicting reuse refuses `SOURCE_DRIFT_EVENT_CONFLICT`. All entries are
+unresolved until the separate operator reconciliation slice exists.
+
+Atomicity uses a savepoint: fleet takes the seal's share lock before the event's
+savepoint, rolls back every refused effect (including marker/outbox) to that
+savepoint, then commits only quarantine evidence. The lock survives that rollback.
+The sweep also takes its asset lock before the savepoint, so competing sweeps
+remain serialized through refusal cleanup. For sweep APPLY refusals, quarantine
+evidence and parked-row removal commit
+together; the named outcome is `QUARANTINED`. The original processed marker stays,
+and later sweeps do not ask the source again for that row. Failed removal rolls
+back the evidence too.
+The terminal drift reason is raised only after confirmed quarantine commit.
+Non-fence statement failures use normal bounded retries and `MAX_RETRIES_EXCEEDED`.
+Lost commit responses are `SOURCE_WRITE_UNCONFIRMED`; failed quarantine persistence
+remains unresolved. Both use bounded backoff, an error log with a code-only cause,
+and `rasta_consumer_handling_failures_total`, then the existing exhaustion DLQ.
+Acknowledgement follows confirmed DLQ publication; replay must reconcile the marker
+or evidence first, since an unconfirmed write may have committed. Missing DLQ
+configuration or a failed send propagates instead of acknowledging without evidence.
+The global durable cap is 10,000 entries, serialized under `meter_drift_capacity`;
+identical replay is checked before the activation token and cap. Overflow refuses
+`SOURCE_DRIFT_QUARANTINE_FULL`; no eviction.
+Missing capacity, stale transaction isolation or wrong-run inserts also refuse.
+An exhaustion DLQ is transport evidence, not proof that fleet quarantine is clear.
+Production activation stays unwired pending the separate durable-hold, token
+recovery and evidence-reconciliation obligations (FU-355).
+
+`MeterFullRun.activate` requires `withQuarantineClear` on the existing trusted
+`MeterInventoryAuthority`, including replay. Fleet's clearance primitive takes the
+exclusive seal lock, checks READ COMMITTED, the exact run/boundary, readable
+capacity and zero unresolved entries, and first commits a durable activation token under those locks. It then holds
+the exclusive seal lock through the activation
+callback's settlement. Quarantine inserts refuse `SOURCE_ACTIVATION_HELD` while
+that token exists, even if the live transaction times out or loses its connection.
+Only a confirmed activation callback clears the token; errors or ambiguous commits
+retain it and refuse further activation until the separate operator recovery slice. Maintenance also requires a live `assertHeld` capability inside its transaction
+and before its final marker write. An expired callback/transaction refuses.
+The proof is scoped to that callback; it cannot be cached
+or reused as a certificate snapshot. Missing, stale, malformed or unreadable
+proof refuses `SOURCE_DRIFT_QUARANTINED`. Infrastructure failure before proof delivery
+reports `SOURCE_CLEARANCE_UNCONFIRMED`, including a lost tx1 response. Both lock orders are covered against
+PostgreSQL: earlier drift is quarantined before activation reads; earlier
+activation excludes drift until its callback settles. The REST channel is not
+wired: a future reviewed adapter must preserve this lock-through-commit contract,
+including failure and cancellation, before production activation is permitted.
+No cross-service table access or new trust path is introduced.
+
+Drain consumers, sweeps, seal/replay/status operators and membership writers before
+applying/downing `20261114120000_meter_drift_quarantine`; its gate lock waits at
+most 5s. Down refuses an active seal or any retained evidence with
+`ACTIVE_DRIFT_QUARANTINE_ROLLBACK_REFUSED`. Operator reconciliation/clearing, REST
+authority, activation CLI, durable progress and versioned reopening remain next.
+FU-353 (#1136 r1 L1/L2/L3) remains a separate size-bounded follow-up.
 
 Per-asset apply refuses oversized snapshots as `SNAPSHOT_NOT_AUDITABLE` and invalid
 post-lock audit payloads as `CUTOVER_AUDIT_INVALID`; neither is an ambiguous commit.

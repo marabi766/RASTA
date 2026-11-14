@@ -221,6 +221,8 @@ docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
 | `BACKFILL_REQUIRED`             | پاداشِ رویدادی پیش از Cutover ارزیابی (ADR-061 § ۴.۲)                                                       | **بازپخش نکن** — فقط Backfill مجاز و ثبت‌شده؛ بازپخش همان پاسخ را می‌دهد                                            |
 | `PRODUCER_NOT_ALLOWED`          | ناشر روی این Topic مجاز نیست (ADR-061 § ۲)                                                                  | **بررسی امنیتی؛ بازپخش نکن** — ناشر مجاز؟ `TOPIC_PRODUCERS` را اصلاح کن                                             |
 | `PARKED_VERIFICATION_EXHAUSTED` | `INSURANCE_RECORDED` پارک‌شده در fleet؛ منبع پس از همهٔ تلاش‌ها هنوز مالک دیگری را نشان می‌دهد (#240 دور ۸) | انتقالی که fleet ندیده را پیدا و مصرف کن (`rasta.asset.v1`)، سپس بازپخش — علامت پردازش برداشته شده، پس اعمال می‌شود |
+| `SOURCE_OWNER_DRIFT`            | مالک با فهرست مهرشده ناهمخوان است                                                                           | **بازپخش نکن** — [تطبیق منبع](maintenance-meter-reconcile.md)                                                       |
+| `SOURCE_INVENTORY_SEALED`       | دارایی در فهرست مهرشده نیست                                                                                 | **بازپخش نکن** — [تطبیق منبع](maintenance-meter-reconcile.md)                                                       |
 
 ### گام ۲ — رفع علت ریشه‌ای
 
@@ -347,7 +349,8 @@ REPLAY_OPERATOR=<نام اپراتور، بی Secret> node … scripts/replay-dl
   `aggregateId`.
 - **رد می‌شوند:** `NEVER_AUTO_REPLAY` (همهٔ رویدادهای economic و `ORDER_RECEIPT_CONFIRMED`، `STATEMENT_APPROVED`)، و هر پیامی
   از Topic مبدأ `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1` یا `.retry` آن) **هر نامی داشته باشد** — بی هیچ Override؛ و
-  دلیل‌هایی که بازپخش عوضشان نمی‌کند: `PRODUCER_NOT_ALLOWED`، `SOURCE_UNCONFIRMED`، `BACKFILL_REQUIRED`.
+  دلیل‌هایی که بازپخش عوضشان نمی‌کند: `PRODUCER_NOT_ALLOWED`، `SOURCE_UNCONFIRMED`، `BACKFILL_REQUIRED`،
+  `SOURCE_OWNER_DRIFT`، `SOURCE_INVENTORY_SEALED`.
 - **کهنگی (ADR-051 § R6):** Dry-run Topic مبدأ را از پس از Offset اصلی می‌خواند؛ اگر رویداد تازه‌تری با همان کلید جریان هست
   `stale: true`، و اگر نمی‌تواند ببیند (مبدأ `.retry` — `ops-replay` آن را نمی‌خواند و Offset آن با Topic اصلی مقایسه‌پذیر
   نیست —، بی موقعیت، خواندن ناقص، یا **Retention از Offset اصلی گذشته**: Low Watermark پارتیشن بعد از `Offset اصلی + ۱` است؛

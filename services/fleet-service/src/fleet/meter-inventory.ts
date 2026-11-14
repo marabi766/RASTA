@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   FLEET_METER_INVENTORY_SEALED,
@@ -11,7 +11,7 @@ import {
   runWithContext,
   tryGetContext,
 } from '@rasta/nest-common';
-import type { PrismaService } from '../prisma/prisma.service';
+import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
 import { FLEET_TOPIC } from '../config/env';
 import { FleetRepository } from './fleet.repository';
 import { Prisma } from '../generated/prisma';
@@ -31,6 +31,76 @@ export class FleetMeterInventoryRefusal extends Error {}
 /** Durable source fence, with no activation or release path in this slice. */
 export class FleetMeterInventorySeal {
   constructor(private readonly prisma: PrismaService) {}
+
+  /** Existing trusted authority channel: proof is a live lock, never a reusable snapshot. */
+  async withQuarantineClear<T>(
+    runId: string,
+    boundary: string,
+    commit: (proof: {
+      runId: string;
+      boundary: string;
+      clear: true;
+      assertHeld: () => Promise<void>;
+    }) => Promise<T>,
+  ): Promise<T> {
+    if (tryGetContext()) throw new FleetMeterInventoryRefusal('OPERATOR_CONTEXT_REQUIRED');
+    identifier.parse(runId);
+    const token = randomUUID();
+    const lockGate = async (tx: ExtendedPrismaClient): Promise<void> => {
+      const [gate] = await tx.$queryRaw<
+        { run_id: string | null; boundary: string | null; isolation: string }[]
+      >`SELECT run_id, boundary, current_setting('transaction_isolation') AS isolation
+        FROM meter_inventory_seal WHERE id = true FOR UPDATE`;
+      if (
+        !gate ||
+        gate.isolation !== 'read committed' ||
+        gate.run_id !== runId ||
+        gate.boundary !== boundary
+      )
+        throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+    };
+    return runUnscoped('platform activation hold; no tenant-visible quarantine data', async () => {
+      // Commit the barrier BEFORE entering maintenance. Connection loss/timeout must
+      // never let quarantine writers slip into an activation still committing remotely.
+      await this.prisma.transaction(async (tx) => {
+        await lockGate(tx);
+        const [capacity] = await tx.$queryRaw<{ token: string | null }[]>`
+          SELECT activation_token AS token FROM meter_drift_capacity WHERE id = true FOR UPDATE`;
+        const [state] = await tx.$queryRaw<{ blocked: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM meter_drift_quarantine WHERE run_id = ${runId}) AS blocked`;
+        if (!capacity || capacity.token !== null || !state || state.blocked)
+          throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+        await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${token}::uuid WHERE id = true`;
+      });
+      return this.prisma.transaction(
+        async (tx) => {
+          await lockGate(tx);
+          let held = true;
+          const assertHeld = async (): Promise<void> => {
+            if (!held) throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+            const [capacity] = await tx.$queryRaw<{ token: string | null }[]>`
+            SELECT activation_token AS token FROM meter_drift_capacity WHERE id = true FOR SHARE`;
+            if (!capacity || capacity.token !== token)
+              throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+          };
+          try {
+            await assertHeld();
+            const result = await commit({ runId, boundary, clear: true, assertHeld });
+            // Only a confirmed callback releases the durable barrier. Any failure or
+            // ambiguous commit retains it for the later operator recovery slice.
+            const released =
+              await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL
+            WHERE id = true AND activation_token = ${token}::uuid`;
+            if (released !== 1) throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+            return result;
+          } finally {
+            held = false;
+          }
+        },
+        { timeoutMs: 30_000 },
+      );
+    });
+  }
 
   async seal(runId: string, operatorId: string): Promise<FleetMeterInventory> {
     if (tryGetContext()) throw new FleetMeterInventoryRefusal('OPERATOR_CONTEXT_REQUIRED');
