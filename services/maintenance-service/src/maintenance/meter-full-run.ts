@@ -47,8 +47,78 @@ const refusalsSchema = z
 export interface MeterInventoryAuthority {
   // A run must re-serve its original durable seal, never enumerate a fresh one.
   withSealedInventory<T>(runId: string, commit: (inventory: unknown) => Promise<T>): Promise<T>;
+  /** MUST durably bar quarantine writes through callback settlement, even on lock/connection loss. */
+  withQuarantineClear<T>(
+    runId: string,
+    boundary: string,
+    commit: (proof: unknown) => Promise<T>,
+  ): Promise<T>;
 }
 export class MeterFullRunRefusal extends Error {}
+
+/** Same reviewed authority boundary; the proof is valid only while its owner lock is held. */
+function quarantineClearAuthority(
+  authority: MeterInventoryAuthority,
+  observe: <T>(action: Promise<T>) => Promise<T>,
+): {
+  withSealedInventory<T>(
+    runId: string,
+    commit: (
+      inventory: z.infer<typeof inventorySchema>,
+      assertHeld: () => Promise<void>,
+    ) => Promise<T>,
+  ): Promise<T>;
+} {
+  return {
+    withSealedInventory: (runId, commit) =>
+      authority.withSealedInventory(runId, (value) =>
+        observe(
+          (async () => {
+            const parsed = inventorySchema.safeParse(value);
+            if (!parsed.success) throw new MeterFullRunRefusal('SOURCE_INVENTORY_MALFORMED');
+            const inventory = parsed.data;
+            if (typeof authority.withQuarantineClear !== 'function')
+              throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+            let entered = false;
+            return authority
+              .withQuarantineClear(runId, inventory.boundary, (proof) => {
+                const clear = z
+                  .object({
+                    runId: identifier,
+                    boundary: z.string(),
+                    clear: z.literal(true),
+                    assertHeld: z.custom<() => Promise<void>>(
+                      (value) => typeof value === 'function',
+                    ),
+                  })
+                  .strict()
+                  .safeParse(proof);
+                if (
+                  !clear.success ||
+                  clear.data.runId !== runId ||
+                  clear.data.boundary !== inventory.boundary
+                )
+                  throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+                entered = true;
+                return observe(
+                  commit(inventory, async () => {
+                    try {
+                      await clear.data.assertHeld();
+                    } catch {
+                      throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+                    }
+                  }),
+                );
+              })
+              .catch((error: unknown) => {
+                if (!entered) throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+                throw error;
+              });
+          })(),
+        ),
+      ),
+  };
+}
 
 export interface MeterFullRunStatus {
   runId: string;
@@ -95,11 +165,19 @@ export class MeterFullRun {
     const refusals = refusalsSchema.parse(explicitRefusals);
     if (!this.authority) throw new MeterFullRunRefusal('AUTHORITATIVE_INVENTORY_REQUIRED');
     let confirmed = false;
-    return this.authority
-      .withSealedInventory(runId, async (value) => {
-        const parsed = inventorySchema.safeParse(value);
-        if (!parsed.success) throw new MeterFullRunRefusal('SOURCE_INVENTORY_MALFORMED');
-        const inventory = parsed.data;
+    const pending = new Set<Promise<unknown>>();
+    const observe = <T>(action: Promise<T>): Promise<T> => {
+      pending.add(action);
+      const settled = (): void => {
+        pending.delete(action);
+      };
+      // An authority may lose its response before a callback settles. Keep every
+      // result observed, and never turn that in-flight write into a refusal.
+      void action.then(settled, settled);
+      return action;
+    };
+    return quarantineClearAuthority(this.authority, observe)
+      .withSealedInventory(runId, async (inventory, assertHeld) => {
         const assets = [...inventory.assets].sort((a, b) =>
           a.assetId < b.assetId ? -1 : a.assetId > b.assetId ? 1 : 0,
         );
@@ -142,6 +220,7 @@ export class MeterFullRun {
                       >`
                 SELECT run_id, inventory_digest, operator_id FROM meter_full_run WHERE id = true FOR UPDATE`;
                       if (!gate) throw new MeterFullRunRefusal('FULL_RUN_GATE_MISSING');
+                      await assertHeld();
                       if (gate.run_id !== null) {
                         if (gate.run_id !== runId || gate.operator_id !== operatorId)
                           throw new MeterFullRunRefusal('FULL_RUN_CONFLICT');
@@ -185,6 +264,7 @@ export class MeterFullRun {
                           refusedCount: refused.size,
                         }),
                       });
+                      await assertHeld();
                       await tx.$executeRaw`UPDATE meter_full_run SET run_id = ${runId}, operator_id = ${operatorId},
                 inventory_digest = ${digest}, source_boundary = ${inventory.boundary}, activated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
                 WHERE id = true`;
@@ -208,12 +288,13 @@ export class MeterFullRun {
       })
       .then(
         (result) => {
-          if (!confirmed || result !== runId) throw new Error('FULL_RUN_UNCONFIRMED');
+          if (!confirmed || pending.size > 0 || result !== runId)
+            throw new Error('FULL_RUN_UNCONFIRMED');
           return result;
         },
         (error: unknown) => {
           // An owner fence/release error cannot erase a confirmed maintenance commit.
-          if (confirmed) throw new Error('FULL_RUN_UNCONFIRMED');
+          if (confirmed || pending.size > 0) throw new Error('FULL_RUN_UNCONFIRMED');
           throw error;
         },
       );

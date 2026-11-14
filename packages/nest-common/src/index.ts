@@ -200,6 +200,7 @@ export type {
 export {
   EventConsumer,
   ConsumerStoppingError,
+  EventHandlingUnconfirmedError,
   UnprocessableEventError,
   deadLetterHeaders,
   DeadLetterHeaderError,

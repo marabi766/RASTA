@@ -1,4 +1,9 @@
-import { EventConsumer, UnprocessableEventError, subscribedTopics } from './event-consumer';
+import {
+  EventConsumer,
+  EventHandlingUnconfirmedError,
+  UnprocessableEventError,
+  subscribedTopics,
+} from './event-consumer';
 import { RastaError } from '../errors/rasta-error';
 import type {
   ConsumerLogger,
@@ -82,6 +87,22 @@ describe('EventConsumer delivery metadata', () => {
     return (consumer as unknown as PrivateHandle).handleMessage(topic, partition, value, undefined);
   }
 
+  it('leaves unconfirmed handling unacknowledged even with one allowed attempt', async () => {
+    const failure = new EventHandlingUnconfirmedError('SOURCE_DRIFT_QUARANTINE_UNCONFIRMED');
+    const handler = jest.fn(async () => {
+      throw failure;
+    });
+    const consumer = new EventConsumer(
+      { ...options, maxRetries: 1, deadLetterTopic: 'test.dlq' },
+      handler,
+      silentLogger,
+    );
+    const send = jest.fn();
+    (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
+    await expect(deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes())).rejects.toBe(failure);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+  });
   it('gives the handler the topic and partition the broker reported', async () => {
     const seen: EventDelivery[] = [];
     const consumer = new EventConsumer(

@@ -241,6 +241,9 @@ export class UnprocessableEventError extends Error {
   }
 }
 
+/** Durable handling evidence failed: never retry-to-DLQ or acknowledge this delivery. */
+export class EventHandlingUnconfirmedError extends Error {}
+
 /**
  * Thrown out of kafkajs's `eachMessage` for a message a stopping consumer gives
  * up on: before its handler runs, instead of a further attempt or the pause
@@ -726,6 +729,7 @@ export class EventConsumer {
         const event = `${envelope.eventName} ${logField(envelope.eventId)}`;
         const message = handlerMessage(error);
 
+        if (error instanceof EventHandlingUnconfirmedError) throw error;
         if (error instanceof UnprocessableEventError) {
           this.logger.error(`Handler refused ${event} (${error.reason}): ${message}`);
           await this.deadLetter(

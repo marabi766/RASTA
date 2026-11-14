@@ -1656,6 +1656,12 @@ export const REVIEWED_LITERALS = [
 export const REVIEWED_FUNCTIONS = [
   {
     service: 'fleet-service',
+    name: 'meter_drift_quarantine_guard',
+    sha256: 'e63c76cf923d6ea2cdc3f1826f8bf2760bb5d72dae481a668899f6d6b4c1a390',
+    why: 'Clock-free bounded append-only quarantine and durable activation barrier; trusted TG_TABLE_SCHEMA is identifier-quoted in schema-local set_config; no EXECUTE, expiry or timestamp conversion.',
+  },
+  {
+    service: 'fleet-service',
     name: 'meter_inventory_creation_fence',
     sha256: 'a7f41abc0429af2217362261526ba47393f541820e69c90d125a93bd6f2b9f31',
     why: 'Clock-free indexed asset/owner fence; unchanged UPDATE identity is safe; schema-local set_config quotes trusted TG_TABLE_SCHEMA; assetId is a JSON data key, never SQL; no EXECUTE.',

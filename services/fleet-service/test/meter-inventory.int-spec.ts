@@ -1,10 +1,17 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { SourceDriftRefusal } from '../src/fleet/drift-quarantine';
 import { Prisma } from '../src/generated/prisma';
 import { eligibilityClockWrite } from '@rasta/testing';
 import { createHash, randomUUID } from 'node:crypto';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
-import { EventConsumer, UnprocessableEventError } from '@rasta/nest-common';
+import {
+  EventConsumer,
+  UnprocessableEventError,
+  EventHandlingUnconfirmedError,
+} from '@rasta/nest-common';
 import type { ProducerRecord } from 'kafkajs';
-import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
+import { AssetSyncConsumer, CONSUMER_NAME } from '../src/consumers/asset-sync.consumer';
 import { FleetMeterInventoryRefusal, FleetMeterInventorySeal } from '../src/fleet/meter-inventory';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -52,6 +59,8 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       ...sources,
       'meter_inventory_seal',
       'meter_inventory_seal_asset',
+      'meter_drift_quarantine',
+      'meter_drift_capacity',
       'processed_event',
       'outbox_message',
       'outbox_stream_sequence',
@@ -75,6 +84,12 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_inventory_seal_asset_no_truncate
       BEFORE TRUNCATE ON "${schema}".meter_inventory_seal_asset
       FOR EACH STATEMENT EXECUTE FUNCTION public.meter_inventory_seal_asset_fixed()`);
+    await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_drift_quarantine_guard
+      BEFORE INSERT OR UPDATE OR DELETE ON "${schema}".meter_drift_quarantine
+      FOR EACH ROW EXECUTE FUNCTION public.meter_drift_quarantine_guard()`);
+    await owner.client
+      .$executeRawUnsafe(`CREATE TRIGGER meter_drift_quarantine_no_truncate BEFORE TRUNCATE
+      ON "${schema}".meter_drift_quarantine FOR EACH STATEMENT EXECUTE FUNCTION public.meter_drift_quarantine_guard()`);
     const role = decodeURIComponent(runtime.username).replaceAll('"', '""');
     await owner.client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`);
     await owner.client.$executeRawUnsafe(
@@ -82,6 +97,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     );
     prisma = new PrismaService(runtime.toString());
     command = new FleetMeterInventorySeal(prisma);
+    await prisma.client.$executeRaw`INSERT INTO meter_drift_capacity(id) VALUES(true)`;
     await prisma.client.$executeRaw`INSERT INTO meter_inventory_seal(id) VALUES(true)`;
   });
   afterEach(async () => {
@@ -218,14 +234,14 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
   });
   describe('terminal consumer refusals', () => {
     it.each(
-      ['transfer', 'creation', 'creation-refresh', 'refresh'].flatMap((path) =>
+      ['transfer', 'creation', 'creation-refresh', 'refresh', 'insurance-park'].flatMap((path) =>
         [false, true].map((known) => ({ path, known })),
       ),
     )(
       '$path known=$known refuses once per delivery with its exact DLQ reason',
       async ({ path, known }) => {
         const assetId = id('AST');
-        const orphan = path === 'creation';
+        const orphan = path === 'creation' || path === 'insurance-park';
         if (known) {
           if (orphan)
             await prisma.client.$executeRaw`INSERT INTO usage_record(id, asset_id,
@@ -235,24 +251,33 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         }
         await command.seal(runId, actor);
         const repository = new FleetRepository(prisma);
-        const consumer = new AssetSyncConsumer(null, repository, {
-          snapshot: async () => ({
-            assetId,
-            organizationId: org.b,
-            status: 'ACTIVE',
-            name: 'TEST',
-            type: 'GRADER',
-            assetTag: null,
-            transferGeneration: 1,
-            viaTransfer: true,
-          }),
-        });
+        const consumer = new AssetSyncConsumer(
+          null,
+          repository,
+          {
+            snapshot: async () => ({
+              assetId,
+              organizationId: org.b,
+              status: 'ACTIVE',
+              name: 'TEST',
+              type: 'GRADER',
+              assetTag: null,
+              transferGeneration: 1,
+              viaTransfer: true,
+            }),
+          },
+          undefined,
+          undefined,
+          { verify: async () => ({ counts: false, reason: 'NOT_CURRENT_OWNER' }) },
+        );
         const eventName =
-          path === 'transfer'
-            ? 'ASSET_TRANSFERRED'
-            : path === 'refresh'
-              ? 'ASSET_UPDATED'
-              : 'ASSET_CREATED';
+          path === 'insurance-park'
+            ? 'INSURANCE_RECORDED'
+            : path === 'transfer'
+              ? 'ASSET_TRANSFERRED'
+              : path === 'refresh'
+                ? 'ASSET_UPDATED'
+                : 'ASSET_CREATED';
         // Refresh always uses .retry; creation-refresh also refreshes an existing row on the original.
         const topic = path === 'refresh' ? 'rasta.asset.v1.retry' : 'rasta.asset.v1';
         const envelope: EventEnvelope = {
@@ -269,6 +294,16 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
           payload: producerShaped(eventName, {
             assetId,
             organizationId: org.b,
+            ...(eventName === 'INSURANCE_RECORDED'
+              ? {
+                  policyId: id('INS'),
+                  insurerName: 'TEST',
+                  coverage: 'COMPREHENSIVE',
+                  validFrom: '2026-01-01T00:00:00.000Z',
+                  validTo: '2027-01-01T00:00:00.000Z',
+                  ownershipGeneration: 1,
+                }
+              : {}),
             ...(eventName === 'ASSET_UPDATED' ? { updatedFields: ['status'] } : {}),
             ...(eventName === 'ASSET_CREATED' ? { status: 'REGISTERED' } : {}),
             ...(eventName === 'ASSET_TRANSFERRED'
@@ -331,9 +366,25 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
             ),
           );
         const before = await snapshot();
+        await owner.client.$executeRawUnsafe(
+          `ALTER TABLE "${schema}".meter_drift_quarantine RENAME TO unavailable_quarantine`,
+        );
+        try {
+          await expect(
+            dispatch.handleMessage(topic, 0, Buffer.from(JSON.stringify(envelope)), undefined),
+          ).rejects.toBeInstanceOf(EventHandlingUnconfirmedError);
+          expect(sent).toHaveLength(0);
+          expect(await snapshot()).toEqual(before);
+        } finally {
+          await owner.client.$executeRawUnsafe(
+            `ALTER TABLE "${schema}".unavailable_quarantine RENAME TO meter_drift_quarantine`,
+          );
+        }
+        transaction.mockClear();
+        refused.length = 0;
         await dispatch.handleMessage(topic, 0, Buffer.from(JSON.stringify(envelope)), undefined);
         expect(transaction).toHaveBeenCalledTimes(1);
-        expect(refused).toEqual([new UnprocessableEventError(reason, reason)]);
+        expect(refused[0]).toMatchObject({ reason, message: reason });
         expect(refused[0]).toBeInstanceOf(UnprocessableEventError);
         expect(sent).toHaveLength(1);
         expect(sent[0].topic).toBe('rasta.fleet.v1.dlq');
@@ -363,6 +414,25 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
             'x-dlq-attempts': '1',
           });
         expect(await snapshot()).toEqual(before);
+        const evidence = await prisma.client.$queryRaw`SELECT * FROM meter_drift_quarantine`;
+        expect(evidence).toEqual([
+          expect.objectContaining({
+            event_id: envelope.eventId,
+            asset_id: assetId,
+            sealed_owner: known ? org.a : null,
+            named_owner: org.b,
+            reason,
+            run_id: runId,
+            first_seen_at: expect.any(Date),
+          }),
+        ]);
+        await expect(
+          command.withQuarantineClear(
+            runId,
+            (await command.seal(runId, actor)).boundary,
+            async () => 'activated',
+          ),
+        ).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
         expect(await prisma.client.$queryRaw`SELECT * FROM processed_event`).toEqual([]);
         expect(await prisma.client.outboxMessage.count()).toBe(1); // only the pre-existing seal audit
         expect(
@@ -370,6 +440,390 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         ).toBeNull();
       },
     );
+  });
+  it('refuses missing, wrong-run, stale, unreadable and stale-snapshot clearance', async () => {
+    const sealed = await command.seal(runId, actor),
+      commit = jest.fn(async () => 'active');
+    const stale = await command.withQuarantineClear(runId, sealed.boundary, async (proof) => proof);
+    await expect(stale.assertHeld()).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+    await expect(command.withQuarantineClear('OTHER', sealed.boundary, commit)).rejects.toThrow(
+      'SOURCE_DRIFT_QUARANTINED',
+    );
+    await expect(command.withQuarantineClear(runId, 'STALE', commit)).rejects.toThrow(
+      'SOURCE_DRIFT_QUARANTINED',
+    );
+    await expect(
+      asActor({ organizationId: org.b }, () =>
+        command.withQuarantineClear(runId, sealed.boundary, commit),
+      ),
+    ).rejects.toThrow('OPERATOR_CONTEXT_REQUIRED');
+    await prisma.client.$executeRaw`DELETE FROM meter_drift_capacity`;
+    await expect(command.withQuarantineClear(runId, sealed.boundary, commit)).rejects.toThrow(
+      'SOURCE_DRIFT_QUARANTINED',
+    );
+    await expect(prisma.client
+      .$executeRaw`INSERT INTO meter_drift_quarantine(event_id, asset_id, named_owner, reason, run_id)
+      VALUES ('MISSING_CAP', 'AST', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId})`).rejects.toThrow(
+      'SOURCE_DRIFT_CAPACITY_MISSING',
+    );
+    await prisma.client.$executeRaw`INSERT INTO meter_drift_capacity(id) VALUES(true)`;
+    await expect(prisma.client
+      .$executeRaw`INSERT INTO meter_drift_quarantine(event_id, asset_id, named_owner, reason, run_id)
+      VALUES ('OVERSIZE', 'AST', ${'x'.repeat(257)}, 'SOURCE_INVENTORY_SEALED', ${runId})`).rejects.toThrow(
+      'source_drift_evidence_size',
+    );
+    await expect(prisma.client
+      .$executeRaw`INSERT INTO meter_drift_quarantine(event_id, asset_id, named_owner, reason, run_id)
+      VALUES ('WRONG_RUN', 'AST', ${org.b}, 'SOURCE_INVENTORY_SEALED', 'OTHER')`).rejects.toThrow(
+      'SOURCE_DRIFT_RUN_INVALID',
+    );
+    await expect(
+      prisma.client.$transaction(
+        (
+          tx,
+        ) => tx.$executeRaw`INSERT INTO meter_drift_quarantine(event_id, asset_id, named_owner, reason, run_id)
+      VALUES ('STALE', 'AST', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId})`,
+        { isolationLevel: 'RepeatableRead' },
+      ),
+    ).rejects.toThrow('SOURCE_DRIFT_REQUIRES_READ_COMMITTED');
+    const snapshot = jest.spyOn(prisma, 'transaction').mockImplementationOnce((fn) =>
+      prisma.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), {
+        isolationLevel: 'RepeatableRead',
+      }),
+    );
+    try {
+      await expect(command.withQuarantineClear(runId, sealed.boundary, commit)).rejects.toThrow(
+        'SOURCE_DRIFT_QUARANTINED',
+      );
+    } finally {
+      snapshot.mockRestore();
+    }
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_quarantine RENAME TO unavailable_quarantine`,
+    );
+    try {
+      await expect(command.withQuarantineClear(runId, sealed.boundary, commit)).rejects.toThrow();
+    } finally {
+      await owner.client.$executeRawUnsafe(
+        `ALTER TABLE "${schema}".unavailable_quarantine RENAME TO meter_drift_quarantine`,
+      );
+    }
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_inventory_seal DISABLE TRIGGER meter_inventory_seal_fixed`,
+    );
+    await owner.client.$executeRawUnsafe(`DELETE FROM "${schema}".meter_inventory_seal`);
+    await expect(command.withQuarantineClear(runId, sealed.boundary, commit)).rejects.toThrow(
+      'SOURCE_DRIFT_QUARANTINED',
+    );
+    expect(commit).not.toHaveBeenCalled();
+  });
+  it.each(['event-first', 'activation-first'])(
+    'serializes quarantine and activation: %s',
+    async (order) => {
+      const assetId = id('AST'),
+        eventId = id('EVT');
+      await asset(assetId);
+      const sealed = await command.seal(runId, actor);
+      const repository = new FleetRepository(prisma);
+      const entered = latch(),
+        finish = latch();
+      let activated = false;
+      const event = () =>
+        repository.transaction(
+          async (tx) => {
+            if (order === 'event-first') {
+              entered.release();
+              await finish.ready;
+            }
+            await repository.markEventProcessed(tx, eventId, 'quarantine-race');
+            await repository.upsertAssetRef(tx, {
+              id: assetId,
+              organizationId: org.b,
+              sourceEvent: 'TEST',
+            });
+          },
+          { timeoutMs: 30_000 },
+          eventId,
+        );
+      const activate = () =>
+        command.withQuarantineClear(runId, sealed.boundary, async (proof) => {
+          expect(proof).toEqual({
+            runId,
+            boundary: sealed.boundary,
+            clear: true,
+            assertHeld: expect.any(Function),
+          });
+          entered.release();
+          await finish.ready;
+          activated = true;
+          return 'active';
+        });
+      const first = order === 'event-first' ? event() : activate();
+      // Attach rejection handling immediately, before waiting for the contender.
+      const firstResult = first.then(
+        () => 'ok',
+        (error: unknown) => error,
+      );
+      await entered.ready;
+      const secondResult = (order === 'event-first' ? activate() : event()).then(
+        () => 'ok',
+        (error: unknown) => error,
+      );
+      try {
+        await waiter(order === 'event-first' ? 'FOR UPDATE' : 'FOR SHARE');
+      } finally {
+        finish.release();
+        await Promise.allSettled([firstResult, secondResult]);
+      }
+      const results = await Promise.all([firstResult, secondResult]);
+      expect(results[order === 'event-first' ? 0 : 1]).toBeInstanceOf(UnprocessableEventError);
+      if (order === 'event-first')
+        expect(results[1]).toEqual(new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED'));
+      expect(activated).toBe(order === 'activation-first');
+      expect(await prisma.client.$queryRaw`SELECT * FROM processed_event`).toEqual([]);
+      expect(await prisma.client.$queryRaw`SELECT event_id FROM meter_drift_quarantine`).toEqual([
+        { event_id: eventId },
+      ]);
+    },
+  );
+  it('keeps the activation barrier durable after its live transaction expires', async () => {
+    const sealed = await command.seal(runId, actor),
+      entered = latch(),
+      finish = latch();
+    const transaction = prisma.transaction.bind(prisma);
+    let calls = 0;
+    const expire = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementation((fn, options) =>
+        transaction(fn, ++calls === 2 ? { ...options, timeoutMs: 100 } : options),
+      );
+    const proof = command.withQuarantineClear(runId, sealed.boundary, async () => {
+      entered.release();
+      await finish.ready;
+      return 'active';
+    });
+    const result = proof.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    try {
+      await entered.ready;
+      const repository = new FleetRepository(prisma);
+      await expect(
+        repository.transaction(
+          (tx) =>
+            repository.upsertAssetRef(tx, {
+              id: 'AST_UNKNOWN',
+              organizationId: org.b,
+              sourceEvent: 'TEST',
+            }),
+          undefined,
+          id('EVT'),
+        ),
+      ).rejects.toBeInstanceOf(EventHandlingUnconfirmedError);
+      expect(await prisma.client.$queryRaw`SELECT * FROM meter_drift_quarantine`).toEqual([]);
+      await expect(prisma.client
+        .$executeRaw`INSERT INTO meter_drift_quarantine(event_id, asset_id, named_owner, reason, run_id)
+        VALUES ('HELD', 'AST', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId})`).rejects.toThrow(
+        'SOURCE_ACTIVATION_HELD',
+      );
+      const [capacity] = await prisma.client.$queryRaw<
+        { activation_token: string | null }[]
+      >`SELECT activation_token FROM meter_drift_capacity`;
+      expect(capacity.activation_token).not.toBeNull();
+    } finally {
+      finish.release();
+      await result;
+      expire.mockRestore();
+    }
+    expect(await result).toBeInstanceOf(Error);
+    await expect(
+      command.withQuarantineClear(runId, sealed.boundary, async () => 'active'),
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+  });
+  it('retains evidence after a lost commit response; an unenclosed statement never becomes terminal', async () => {
+    const sealed = await command.seal(runId, actor),
+      repository = new FleetRepository(prisma),
+      eventId = id('EVT');
+    const write = (tx: ExtendedPrismaClient) =>
+      repository.upsertAssetRef(tx, {
+        id: 'AST_UNKNOWN',
+        organizationId: org.b,
+        sourceEvent: 'TEST',
+      });
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".asset_ref RENAME TO unavailable_asset_ref`,
+    );
+    try {
+      await expect(repository.transaction(write)).rejects.toThrow('SOURCE_WRITE_UNCONFIRMED');
+    } finally {
+      await owner.client.$executeRawUnsafe(
+        `ALTER TABLE "${schema}".unavailable_asset_ref RENAME TO asset_ref`,
+      );
+    }
+    await expect(repository.transaction(write)).rejects.toBeInstanceOf(
+      EventHandlingUnconfirmedError,
+    );
+    const transaction = prisma.transaction.bind(prisma);
+    const lost = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, opts) => {
+      await transaction(fn, opts);
+      throw new Error('lost commit response');
+    });
+    try {
+      await expect(repository.transaction(write, undefined, eventId)).rejects.toThrow(
+        'SOURCE_DRIFT_QUARANTINE_UNCONFIRMED',
+      );
+    } finally {
+      lost.mockRestore();
+    }
+    const before = await prisma.client.$queryRaw`SELECT * FROM meter_drift_quarantine`;
+    expect(before).toHaveLength(1);
+    await expect(repository.transaction(write, undefined, eventId)).rejects.toBeInstanceOf(
+      UnprocessableEventError,
+    );
+    expect(await prisma.client.$queryRaw`SELECT * FROM meter_drift_quarantine`).toEqual(before);
+    await expect(
+      command.withQuarantineClear(runId, sealed.boundary, async () => 'active'),
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+  });
+  it('refuses active quarantine down before dropping evidence', async () => {
+    await command.seal(runId, actor);
+    const down = readFileSync(
+      join(__dirname, '../prisma/migrations/20261114120000_meter_drift_quarantine/down.sql'),
+      'utf8',
+    );
+    const guard = down.match(/DO \$\$ BEGIN[\s\S]*?END \$\$;/)?.[0];
+    if (!guard) throw new Error('migration down guard missing');
+    await expect(
+      owner.transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+        await tx.$executeRawUnsafe(guard);
+      }),
+    ).rejects.toThrow('ACTIVE_DRIFT_QUARANTINE_ROLLBACK_REFUSED');
+    await expect(
+      owner.client.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+          await tx.$executeRawUnsafe(guard);
+        },
+        { isolationLevel: 'RepeatableRead' },
+      ),
+    ).rejects.toThrow('SOURCE_DRIFT_REQUIRES_READ_COMMITTED');
+  });
+  it('bounds concurrent new entries, permits replay at cap and never evicts', async () => {
+    await command.seal(runId, actor);
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_quarantine DISABLE TRIGGER meter_drift_quarantine_guard`,
+    );
+    await prisma.client
+      .$executeRaw`INSERT INTO meter_drift_quarantine(event_id, asset_id, named_owner, reason, run_id)
+      SELECT 'CAP_' || n, 'AST_CAP', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId} FROM generate_series(1,9999) n`;
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_quarantine ENABLE TRIGGER meter_drift_quarantine_guard`,
+    );
+    const insert = (eventId: string) => prisma.client.$executeRaw`INSERT INTO meter_drift_quarantine
+      (event_id, asset_id, named_owner, reason, run_id) VALUES (${eventId}, 'AST_CAP', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId})`;
+    const results = await Promise.allSettled([insert('LAST_A'), insert('LAST_B')]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toEqual([
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({
+          message: expect.stringContaining('SOURCE_DRIFT_QUARANTINE_FULL'),
+        }),
+      },
+    ]);
+    await expect(insert('CAP_1')).resolves.toBe(0);
+    const repository = new FleetRepository(prisma);
+    await expect(
+      repository.transaction(
+        async () => {
+          throw new SourceDriftRefusal(DLQ_REASONS.SOURCE_INVENTORY_SEALED, 'AST_CAP', org.b);
+        },
+        undefined,
+        'OVER_CAP',
+      ),
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_FULL');
+    expect(
+      await prisma.client.$queryRaw`SELECT count(*)::int AS n FROM meter_drift_quarantine`,
+    ).toEqual([{ n: 10000 }]);
+    await expect(
+      prisma.client.$executeRaw`DELETE FROM meter_drift_quarantine WHERE event_id = 'CAP_1'`,
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_FIXED');
+    await expect(
+      prisma.client
+        .$executeRaw`UPDATE meter_drift_quarantine SET named_owner = ${org.a} WHERE event_id = 'CAP_1'`,
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_FIXED');
+    await expect(
+      owner.client.$executeRawUnsafe(`TRUNCATE "${schema}".meter_drift_quarantine`),
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_FIXED');
+    await expect(
+      insert('CAP_1').then(
+        () => prisma.client.$executeRaw`INSERT INTO meter_drift_quarantine
+      (event_id, asset_id, named_owner, reason, run_id) VALUES ('CAP_1', 'OTHER', ${org.b}, 'SOURCE_INVENTORY_SEALED', ${runId})`,
+      ),
+    ).rejects.toThrow('SOURCE_DRIFT_EVENT_CONFLICT');
+  });
+  it('quarantines insurance sweep drift while retaining its original parked row and marker', async () => {
+    const assetId = id('AST'),
+      eventId = id('EVT');
+    const envelope: EventEnvelope = {
+      eventId,
+      eventName: 'INSURANCE_RECORDED',
+      eventVersion: 1,
+      occurredAt: new Date().toISOString(),
+      producer: 'asset-service',
+      producerVersion: '0.1.0',
+      aggregateType: 'Asset',
+      aggregateId: assetId,
+      tenantId: org.b,
+      correlationId: id('COR'),
+      payload: producerShaped('INSURANCE_RECORDED', {
+        assetId,
+        organizationId: org.b,
+        policyId: id('INS'),
+        insurerName: 'TEST',
+        coverage: 'COMPREHENSIVE',
+        validFrom: '2026-01-01T00:00:00.000Z',
+        validTo: '2027-01-01T00:00:00.000Z',
+        ownershipGeneration: 1,
+      }),
+    };
+    await asset(assetId);
+    await prisma.client
+      .$executeRaw`INSERT INTO usage_record(id, asset_id, organization_id, period_start, period_end, hours, recorded_by)
+      VALUES (${id('USG')}, ${assetId}, ${org.a}, '2026-01-01', '2026-01-02', 1, 'TEST')`;
+    await prisma.client
+      .$executeRaw`INSERT INTO insurance_pending_verification(event_id, asset_id, organization_id, envelope, source_topic, reason)
+      VALUES (${eventId}, ${assetId}, ${org.b}, ${JSON.stringify(envelope)}::jsonb, 'TEST', 'TEST')`;
+    const repository = new FleetRepository(prisma);
+    await prisma.transaction((tx) => repository.markEventProcessed(tx, eventId, CONSUMER_NAME));
+    await command.seal(runId, actor);
+    await prisma.client.$executeRaw`DELETE FROM asset_ref WHERE id = ${assetId}`;
+    await prisma.transaction((tx) => repository.markParkedInsuranceDue(tx, assetId));
+    const consumer = new AssetSyncConsumer(null, repository, undefined, undefined, undefined, {
+      verify: async () => ({
+        counts: true,
+        organizationId: org.b,
+        coverage: 'COMPREHENSIVE',
+        validFrom: '2026-01-01T00:00:00.000Z',
+        validUntil: '2027-01-01T00:00:00.000Z',
+        ownershipGeneration: 1,
+      }),
+    });
+    await consumer.sweepParked();
+    await consumer.sweepParked();
+    expect(
+      await prisma.client.$queryRaw`SELECT event_id, reason FROM meter_drift_quarantine`,
+    ).toEqual([{ event_id: eventId, reason: 'SOURCE_OWNER_DRIFT' }]);
+    expect(
+      await prisma.client
+        .$queryRaw`SELECT attempts FROM insurance_pending_verification WHERE event_id = ${eventId}`,
+    ).toEqual([{ attempts: 0 }]);
+    expect(await prisma.client.$queryRaw`SELECT * FROM asset_ref`).toEqual([]);
+    expect(await prisma.client.$queryRaw`SELECT event_id FROM processed_event`).toEqual([
+      { event_id: eventId },
+    ]);
   });
   it('allows parked retries and due marking under a historical foreign owner after sealing', async () => {
     const currentId = id('AST'),

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
+  EventHandlingUnconfirmedError,
   allocateStreamSeqSql,
   buildOutboxRow,
   createSystemContext,
@@ -18,6 +19,7 @@ import { SERVICE_NAME } from '../config/env';
 import { Prisma } from '../generated/prisma';
 import type { InsuranceCover } from './dispatch-blocks';
 import { sourceFenceRefusal } from './source-fence-refusal';
+import { quarantineTransaction, SourceDriftRefusal } from './drift-quarantine';
 import type {
   AvailabilityQuery,
   ListAssignmentsQuery,
@@ -51,7 +53,14 @@ export class FleetRepository {
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
     options?: { timeoutMs?: number; maxWaitMs?: number },
+    sourceEventId?: string,
   ): Promise<T> {
+    if (sourceEventId)
+      return quarantineTransaction(
+        (work) => this.prisma.transaction(work, options),
+        sourceEventId,
+        fn,
+      );
     return this.prisma.transaction(fn, options);
   }
 
@@ -1037,7 +1046,10 @@ export class FleetRepository {
         .catch((error: unknown) => {
           // Shared by ordinary creation/transfer, authoritative refresh and the parked sweep.
           // The transaction still rejects: marker, effects and outbox roll back together.
-          throw sourceFenceRefusal(error) ?? error;
+          const refusal = sourceFenceRefusal(error);
+          throw refusal
+            ? new SourceDriftRefusal(refusal.reason, id, data.organizationId)
+            : new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED');
         }),
     );
   }
@@ -1066,20 +1078,27 @@ export class FleetRepository {
     // Awaited inside the context: a Prisma query is lazy and would otherwise run
     // after the context closed (test/helpers.ts `asActor`).
     await runWithContext(context, async () => {
-      await tx.insurancePendingVerification.create({
-        data: {
-          eventId: row.eventId,
-          assetId: row.assetId,
-          // Stated, and held by the guard to the context's tenant: the same one.
-          organizationId: row.organizationId,
-          envelope: row.envelope as Prisma.InputJsonValue,
-          messageKey: row.messageKey,
-          sourceTopic: row.sourceTopic,
-          sourcePartition: row.sourcePartition,
-          sourceOffset: row.sourceOffset,
-          reason: row.reason,
-        },
-      });
+      await tx.insurancePendingVerification
+        .create({
+          data: {
+            eventId: row.eventId,
+            assetId: row.assetId,
+            // Stated, and held by the guard to the context's tenant: the same one.
+            organizationId: row.organizationId,
+            envelope: row.envelope as Prisma.InputJsonValue,
+            messageKey: row.messageKey,
+            sourceTopic: row.sourceTopic,
+            sourcePartition: row.sourcePartition,
+            sourceOffset: row.sourceOffset,
+            reason: row.reason,
+          },
+        })
+        .catch((error: unknown) => {
+          const refusal = sourceFenceRefusal(error);
+          throw refusal
+            ? new SourceDriftRefusal(refusal.reason, row.assetId, row.organizationId)
+            : new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED');
+        });
     });
   }
 
