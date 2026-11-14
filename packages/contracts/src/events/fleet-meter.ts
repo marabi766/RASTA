@@ -11,3 +11,10 @@ export const fleetMeterInventorySealedPayloadV1 = z
     assetCount: z.number().int().nonnegative().max(20_000),
   })
   .strict();
+
+/** Trusted inventory authority refusal; callers accept only closed codes. */
+export class MeterInventoryAuthorityRefusal extends Error {
+  constructor(readonly code: string) {
+    super(code);
+  }
+}

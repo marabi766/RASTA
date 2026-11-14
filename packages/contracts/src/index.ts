@@ -387,3 +387,5 @@ export {
   maintenanceMeterReconciledPayloadV1,
   meterReconcileOperatorSchema,
 } from './events/maintenance-meter';
+
+export { MeterInventoryAuthorityRefusal } from './events/fleet-meter';
