@@ -261,6 +261,9 @@ export const DLQ_REASONS = {
   BUSINESS_RULE_VIOLATION: 'BUSINESS_RULE_VIOLATION',
   UPSTREAM_UNAVAILABLE: 'UPSTREAM_UNAVAILABLE',
   MAX_RETRIES_EXCEEDED: 'MAX_RETRIES_EXCEEDED',
+  /** Fleet's sealed inventory refuses a new identity or a different owner; replay cannot repair it. */
+  SOURCE_INVENTORY_SEALED: 'SOURCE_INVENTORY_SEALED',
+  SOURCE_OWNER_DRIFT: 'SOURCE_OWNER_DRIFT',
   /**
    * ADR-061 § 4. A consumer with a financial effect asked the fact's owning
    * service, and the owner did not confirm what the event claims: no such

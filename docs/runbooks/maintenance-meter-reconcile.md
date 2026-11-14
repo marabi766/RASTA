@@ -217,8 +217,10 @@ only the digest, boundary, count, run and configured operator, never the invento
 The durable database fence covers INSERT and UPDATE from old images, direct SQL,
 replication and future writers on these seven tables. Once sealed, new physical
 asset identities refuse `SOURCE_INVENTORY_SEALED`; existing identities may continue
-writing. Missing gates and non-READ-COMMITTED writes refuse. Pause asset creation
-and drain source writers before sealing. This deliberately blocks future creation
+writing. Missing gates and non-READ-COMMITTED writes refuse. The cutover must pause
+and drain creation, transfer and refresh writers before sealing (PM option 1),
+including asset-sync originals, `.retry` refreshes and late creation reconciliation.
+This deliberately blocks future creation
 until a later reviewed protocol can coordinate reopening with maintenance; this
 slice provides no release, expiry or automatic activation. Schema-down refuses an
 active source seal. Do not operate this primitive in production yet.
@@ -270,6 +272,27 @@ reconciliation/reporting and the explicit activation CLI remain separate work.
 Fleet sealing proves its own source inventory; it does not attest an undrained
 asset-service stream. That cross-service completeness check remains required
 before wiring the production authority.
+
+### Post-seal drift: terminal consumer classification (FU-352 first slice)
+
+The asset-sync replica write maps the database's exact `SOURCE_OWNER_DRIFT` and
+`SOURCE_INVENTORY_SEALED` statement refusals to terminal `UnprocessableEventError`.
+Creation (including a known orphan), transfer and authoritative refresh all use
+this write. The transaction rolls back its processed marker, replica changes and
+outbox; the consumer sends the original event to `rasta.fleet.v1.dlq` with that
+specific reason after one attempt. The replay tool refuses both reasons as
+`REASON_NOT_REPLAYABLE`; an independently delivered `.retry` event meeting the
+same fence also refuses immediately. Commit-response failures are not classified
+by this statement-only mapper.
+
+PM option 2 requires unresolved drift quarantine to hold every activation with
+`SOURCE_DRIFT_QUARANTINED`, including missing/unreadable quarantine state. **That
+durable, bounded, platform-only quarantine and activation hold are the next
+stacked slice, not implemented here.** The existing Kafka DLQ is transport
+evidence, not a run-scoped unresolved quarantine or an activation proof. Do not
+activate or wire the production authority/CLI until this prerequisite exists.
+Operator reconciliation (clearing quarantine), REST authority, activation CLI,
+durable progress and the versioned reopening protocol remain subsequent slices.
 
 Per-asset apply refuses oversized snapshots as `SNAPSHOT_NOT_AUDITABLE` and invalid
 post-lock audit payloads as `CUTOVER_AUDIT_INVALID`; neither is an ambiguous commit.
