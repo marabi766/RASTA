@@ -83,12 +83,12 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
   const asset = (assetId: string) => prisma.client.$executeRaw`
     INSERT INTO asset_ref(id, organization_id, status, synced_at, source_event)
     VALUES (${assetId}, ${org.a}, 'ACTIVE', ${new Date()}, 'TEST')`;
-  async function waiter(fragment: string) {
+  async function waiter(fragment: string, finished = () => false) {
     await waitFor('source PostgreSQL lock waiter', async () => {
       const [row] = await prisma.client.$queryRaw<{ waiting: boolean }[]>`
         SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = ${schema}
           AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${`%${fragment}%`}) AS waiting`;
-      return row.waiting;
+      return finished() || row.waiting;
     });
   }
   const events = () => prisma.client.outboxMessage.findMany({ where: { aggregateId: runId } });
@@ -130,6 +130,10 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     expect(sealed.assets).toContainEqual({ assetId: currentId, organizationId: org.a });
     for (const table of sources) {
       const key = table === 'asset_ref' ? 'id' : 'asset_id';
+      // Includes the historical (ids[0], B) usage row.
+      await expect(
+        prisma.client.$executeRawUnsafe(`UPDATE "${table}" SET organization_id = organization_id`),
+      ).resolves.toBeGreaterThan(0);
       await expect(
         prisma.client.$executeRawUnsafe(`UPDATE "${table}" SET "${key}" = $1`, id('AST')),
       ).rejects.toThrow('SOURCE_INVENTORY_SEALED');
@@ -160,6 +164,13 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         ),
       ).rejects.toThrow('SOURCE_OWNER_DRIFT');
     }
+    await expect(prisma.client.$executeRaw`UPDATE usage_record SET hours = 2
+      WHERE asset_id = ${currentId} AND organization_id = ${org.b}`).resolves.toBe(1);
+    // Keep the owner fixed but change the asset to an inventoried asset owned by A.
+    await expect(prisma.client.$executeRaw`UPDATE usage_record SET asset_id = ${ids[2]}
+      WHERE asset_id = ${currentId} AND organization_id = ${org.b}`).rejects.toThrow(
+      'SOURCE_OWNER_DRIFT',
+    );
     // A known orphan cannot acquire a different owner through the replica INSERT path.
     await expect(asset(ids[1])).rejects.toThrow('SOURCE_OWNER_DRIFT');
     await expect(prisma.client.$executeRaw`UPDATE meter_inventory_seal_asset
@@ -192,6 +203,36 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       correlationId: runId,
       payload: { runId, operatorId: actor, assetCount: 7, sourceBoundary: sealed.boundary },
     });
+  });
+  it('allows parked retries and due marking under a historical foreign owner after sealing', async () => {
+    const currentId = id('AST'),
+      parkedId = id('EVT');
+    await asset(currentId);
+    await prisma.client
+      .$executeRaw`INSERT INTO insurance_pending_verification(event_id, asset_id, organization_id,
+      envelope, source_topic, reason) VALUES (${parkedId}, ${currentId}, ${org.b}, '{}', 'TEST', 'TEST')`;
+    const sealed = await command.seal(runId, actor);
+    const repository = new FleetRepository(prisma);
+    await prisma.transaction(async (tx) => {
+      expect(await repository.markParkedInsuranceDue(tx, currentId)).toBe(1);
+      expect(await repository.recordParkedAttempt(tx, parkedId, 'NO_ANSWER')).toBe(1);
+    });
+    const [parked] = await prisma.client.$queryRaw<{ attempts: number; organization_id: string }[]>`
+      SELECT attempts, organization_id FROM insurance_pending_verification WHERE event_id = ${parkedId}`;
+    expect(parked).toEqual({ attempts: 1, organization_id: org.b });
+    expect(await command.seal(runId, actor)).toEqual(sealed);
+    await expect(
+      prisma.client.$transaction(
+        (tx) => tx.$executeRaw`UPDATE insurance_pending_verification SET attempts = attempts + 1`,
+        { isolationLevel: 'RepeatableRead' },
+      ),
+    ).rejects.toThrow('SOURCE_FENCE_REQUIRES_READ_COMMITTED');
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_inventory_seal DISABLE TRIGGER meter_inventory_seal_fixed`,
+    );
+    await owner.client.$executeRawUnsafe(`DELETE FROM "${schema}".meter_inventory_seal`);
+    await expect(prisma.client.$executeRaw`UPDATE insurance_pending_verification
+      SET attempts = attempts + 1`).rejects.toThrow('SOURCE_FENCE_MISSING');
   });
   it('refuses a malformed stored seal boundary on same-run replay', async () => {
     await prisma.client.$executeRaw`UPDATE meter_inventory_seal SET run_id = ${runId},
@@ -295,6 +336,12 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     expect((await command.seal(runId, actor)).assets).toEqual([{ assetId, organizationId: org.b }]);
   });
   it('refuses a reverse-order two-table writer without blocking its second write', async () => {
+    const deadlocks = async () => {
+      const [row] = await owner.client.$queryRaw<{ deadlocks: bigint }[]>`
+        SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()`;
+      return row.deadlocks;
+    };
+    const before = await deadlocks();
     const assetId = id('AST'),
       locked = latch(),
       finish = latch();
@@ -312,13 +359,29 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     );
     await Promise.race([locked.ready, writer]);
     try {
-      await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_WRITERS_ACTIVE');
+      const sealing = command.seal(runId, actor);
+      let settled = false;
+      void sealing.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      // A blocking-lock mutant reaches this waiter; let the writer attempt its second table.
+      await waiter('LOCK TABLE', () => settled);
+      finish.release();
+      await expect(sealing).rejects.toThrow('SOURCE_WRITERS_ACTIVE');
       expect(await events()).toHaveLength(0);
     } finally {
       finish.release();
     }
     await writer;
     expect((await command.seal(runId, actor)).assets).toEqual([{ assetId, organizationId: org.a }]);
+    // Disconnect flushes the seal backend's statistics; a deadlock victim is not NOWAIT proof.
+    await prisma.stop();
+    expect(await deadlocks()).toBe(before);
   });
   it('replays the stored pair while a source writer is active, without taking table locks', async () => {
     const assetId = id('AST'),
