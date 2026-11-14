@@ -262,7 +262,15 @@ export function handlingFailureCause(error: unknown): Error {
 
 /** Ambiguous handling: bounded retry, then DLQ for reconciliation, never a success claim. */
 export class EventHandlingUnconfirmedError extends Error {
-  constructor(message: string, cause?: unknown) {
+  constructor(
+    message: string,
+    cause?: unknown,
+    readonly evidencePolicy?: {
+      attempts: number;
+      backoffMs: number;
+      persist: (lastError?: unknown) => Promise<void>;
+    },
+  ) {
     // Driver messages/stacks can contain SQL and tenant values. Keep only a closed SDK code.
     super(message, { cause: handlingFailureCause(cause) });
   }
@@ -338,6 +346,9 @@ export const DEFAULT_BACKOFF_MS = 500;
  * does between attempts.
  */
 export const CONSUMER_SESSION_TIMEOUT_MS = 60_000;
+/** Fleet's startup-checked ordinary budget <57s; 7 extra attempts plus HOLD
+ * each <57/3 s, and seven 10s pauses total <279s. Allow broker/tx margin. */
+export const CONSUMER_REBALANCE_TIMEOUT_MS = 300_000;
 
 /**
  * One run of the consumer, from a `start()` to its stop. A message keeps the
@@ -508,6 +519,7 @@ export class EventConsumer {
       // 30s heartbeat window on a cold cache; 60s avoids a rebalance storm
       // that would only make the backlog worse.
       sessionTimeout: CONSUMER_SESSION_TIMEOUT_MS,
+      rebalanceTimeout: CONSUMER_REBALANCE_TIMEOUT_MS,
       allowAutoTopicCreation: false,
     });
 
@@ -706,8 +718,9 @@ export class EventConsumer {
       return;
     }
 
-    const maxRetries = this.options.maxRetries ?? DEFAULT_MAX_RETRIES;
-    const backoff = this.options.retryBackoffMs ?? DEFAULT_BACKOFF_MS;
+    let maxRetries = this.options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    let backoff = this.options.retryBackoffMs ?? DEFAULT_BACKOFF_MS;
+    let evidencePolicy: EventHandlingUnconfirmedError['evidencePolicy'];
 
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       // Once stopping, no attempt starts — the first included — and the pause
@@ -753,6 +766,23 @@ export class EventConsumer {
         const event = `${envelope.eventName} ${logField(envelope.eventId)}`;
         const message = handlerMessage(error);
 
+        if (error instanceof EventHandlingUnconfirmedError && error.evidencePolicy) {
+          // The evidence window starts at its first refusal, even after ordinary retries.
+          if (!evidencePolicy)
+            maxRetries = Math.max(maxRetries, attempt + error.evidencePolicy.attempts - 1);
+          evidencePolicy = error.evidencePolicy;
+          backoff = Math.max(backoff, evidencePolicy.backoffMs);
+        }
+        if (
+          attempt === maxRetries &&
+          evidencePolicy &&
+          !(error instanceof UnprocessableEventError)
+        ) {
+          // A failed evidence commit propagates, leaving the offset uncommitted.
+          await evidencePolicy.persist(error);
+          this.abandonIfPastDeadline(run, { topic, partition, offset });
+          if (!this.options.deadLetterTopic) throw error;
+        }
         if (error instanceof EventHandlingUnconfirmedError) {
           this.logger.error(
             `Handling unconfirmed ${event}: ${message}; cause=${(error.cause as Error).message}`,
@@ -794,7 +824,7 @@ export class EventConsumer {
         this.logger.warn(`Attempt ${attempt}/${maxRetries} failed for ${event}: ${message}`);
         // The member stays in its group across the pause (#240 r12).
         beat?.();
-        await this.pause(run, backoff * attempt);
+        await this.pause(run, evidencePolicy ? backoff : backoff * attempt);
         beat?.();
       }
     }

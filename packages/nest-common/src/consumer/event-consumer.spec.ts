@@ -1,9 +1,13 @@
 import {
   EventConsumer,
+  CONSUMER_SESSION_TIMEOUT_MS,
+  CONSUMER_REBALANCE_TIMEOUT_MS,
   EventHandlingUnconfirmedError,
+  handlingFailureCause,
   UnprocessableEventError,
   subscribedTopics,
 } from './event-consumer';
+import { FakeKafkaConsumer, FakeDlqProducer } from './__tests__/fake-kafka';
 import { RastaError } from '../errors/rasta-error';
 import type {
   ConsumerLogger,
@@ -126,6 +130,137 @@ describe('EventConsumer delivery metadata', () => {
     handler.mockResolvedValue(undefined);
     await deliver(consumer, labels.topic, 0, envelopeBytes({ eventId: 'NEXT_EVENT' }));
     expect(handler).toHaveBeenCalledTimes(4);
+  });
+  it.each(['test.dlq', undefined])(
+    'keeps a seen refusal through a different final error before DLQ %s',
+    async (deadLetterTopic) => {
+      const persist = jest.fn().mockResolvedValue(undefined);
+      const finalError = new Error('ordinary final failure');
+      const handler = jest
+        .fn()
+        .mockRejectedValue(finalError)
+        .mockRejectedValueOnce(
+          new EventHandlingUnconfirmedError('REFUSAL', undefined, {
+            attempts: 8,
+            backoffMs: 10_000,
+            persist,
+          }),
+        );
+      const consumer = new EventConsumer(
+        { ...options, maxRetries: 3, retryBackoffMs: 0, deadLetterTopic },
+        handler,
+        silentLogger,
+      );
+      const send = jest.fn().mockImplementation(async () => {
+        expect(persist).toHaveBeenCalledWith(finalError);
+      });
+      (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
+      jest
+        .spyOn(consumer as unknown as { pause(run: unknown, ms: number): Promise<void> }, 'pause')
+        .mockResolvedValue(undefined);
+      if (deadLetterTopic) await deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes());
+      else
+        await expect(deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes())).rejects.toBe(
+          finalError,
+        );
+      expect(persist).toHaveBeenCalledWith(finalError);
+      expect(handler).toHaveBeenCalledTimes(8);
+      expect(send).toHaveBeenCalledTimes(deadLetterTopic ? 1 : 0);
+    },
+  );
+
+  it('sets rebalance above the full evidence/transaction budget and heartbeats through all pauses', async () => {
+    jest.useFakeTimers();
+    const kafka = new FakeKafkaConsumer(),
+      producer = new FakeDlqProducer();
+    const persist = jest.fn().mockResolvedValue(undefined);
+    const consumer = new EventConsumer(
+      { ...options, deadLetterTopic: 'test.dlq' },
+      async () => {
+        throw new EventHandlingUnconfirmedError('REFUSAL', undefined, {
+          attempts: 8,
+          backoffMs: 10_000,
+          persist,
+        });
+      },
+      silentLogger,
+    );
+    const factory = jest.fn(() => kafka);
+    (consumer as unknown as { kafka: unknown }).kafka = {
+      consumer: factory,
+      producer: () => producer,
+    };
+    try {
+      await consumer.start();
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionTimeout: 60_000,
+          rebalanceTimeout: CONSUMER_REBALANCE_TIMEOUT_MS,
+        }),
+      );
+      expect(CONSUMER_REBALANCE_TIMEOUT_MS).toBeGreaterThan(70_000 + 11 * (57_000 / 3) + 3000);
+      const heartbeat = jest.fn().mockResolvedValue(undefined);
+      const dispatch = consumer as unknown as {
+        handleMessage(
+          topic: string,
+          partition: number,
+          value: Buffer,
+          headers: undefined,
+          offset: string,
+          key: null,
+          heartbeat: () => Promise<void>,
+        ): Promise<void>;
+      };
+      const pending = dispatch.handleMessage(
+        'rasta.asset.v1',
+        0,
+        envelopeBytes(),
+        undefined,
+        '0',
+        null,
+        heartbeat,
+      );
+      await jest.advanceTimersByTimeAsync(70_000);
+      await pending;
+      expect(heartbeat).toHaveBeenCalledTimes(14);
+      expect(10_000).toBeLessThan(CONSUMER_SESSION_TIMEOUT_MS);
+      expect(producer.sent).toHaveLength(1);
+    } finally {
+      await consumer.stop();
+      jest.useRealTimers();
+    }
+  });
+
+  it('rethrows unconfirmed handling without a configured DLQ', async () => {
+    const failure = new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED');
+    const send = jest.fn();
+    const consumer = new EventConsumer(
+      { ...options, maxRetries: 1 },
+      async () => {
+        throw failure;
+      },
+      silentLogger,
+    );
+    (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
+    await expect(deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes())).rejects.toBe(failure);
+    expect(send).not.toHaveBeenCalled();
+  });
+  it.each([
+    Object.defineProperty({}, 'code', {
+      get() {
+        throw new Error('private getter');
+      },
+    }),
+    new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('private proxy');
+        },
+      },
+    ),
+  ])('sanitizes foreign access failures to unknown', (foreign) => {
+    expect(handlingFailureCause(foreign).message).toBe('unknown');
   });
   it('gives the handler the topic and partition the broker reported', async () => {
     const seen: EventDelivery[] = [];

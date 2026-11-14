@@ -1,10 +1,11 @@
 import { CompressionTypes } from 'kafkajs';
 import { WorkerAbandonedError } from '../worker-boundary';
 import { DLQ_REASONS } from '@rasta/contracts';
-import { dlqMessagesTotal } from '@rasta/observability';
+import { dlqMessagesTotal, consumerHandlingFailuresTotal } from '@rasta/observability';
 import {
   ConsumerStoppingError,
   EventConsumer,
+  EventHandlingUnconfirmedError,
   UnprocessableEventError,
   type ConsumerLogger,
   type EventConsumerOptions,
@@ -303,6 +304,44 @@ describe('EventConsumer.stop by a deadline (Codex on #267)', () => {
       expect(h.lines.join('\n')).not.toMatch(/Attempt .* failed|Handler failed|Handler refused/);
       expect(h.lines.join('\n')).toMatch(/ABANDONED.*UNCONFIRMED/);
       await h.consumer.stop();
+    });
+
+    it('a late evidence commit produces no handling metric, failure log or DLQ', async () => {
+      let release!: () => void;
+      let entered = false;
+      const pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const h = await started(
+        async () => {
+          throw new EventHandlingUnconfirmedError(
+            'SOURCE_DRIFT_QUARANTINE_UNCONFIRMED',
+            undefined,
+            {
+              attempts: 1,
+              backoffMs: 0,
+              persist: () => {
+                entered = true;
+                return pending;
+              },
+            },
+          );
+        },
+        { maxRetries: 1 },
+      );
+      const delivered = h.kafka.deliver(message('62'));
+      await until(() => entered);
+      await timedStop(h.consumer, 100);
+      const before = await consumerHandlingFailuresTotal.get();
+      release();
+      await delivered;
+      expect(await consumerHandlingFailuresTotal.get()).toEqual(before);
+      expect(h.lines.join('\n')).not.toMatch(
+        /Handling unconfirmed|Attempt .* failed|Handler failed/,
+      );
+      expect(h.kafka.committed).toEqual([]);
+      expect(h.kafka.uncommitted[0]?.error).toBeInstanceOf(ConsumerStoppingError);
+      expect(h.producer.sent).toEqual([]);
     });
 
     it('a failure after the deadline goes to no attempt and no dead letter', async () => {
