@@ -234,9 +234,9 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
   });
   describe('terminal consumer refusals', () => {
     it.each(
-      ['transfer', 'creation', 'creation-refresh', 'refresh', 'insurance-park'].flatMap((path) =>
-        [false, true].map((known) => ({ path, known })),
-      ),
+      ['transfer', 'creation', 'creation-refresh', 'refresh', 'insurance-park']
+        .flatMap((path) => [false, true].map((known) => ({ path, known })))
+        .concat([{ path: 'insurance-park-current', known: true }]),
     )(
       '$path known=$known refuses once per delivery with its exact DLQ reason',
       async ({ path, known }) => {
@@ -270,14 +270,13 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
           undefined,
           { verify: async () => ({ counts: false, reason: 'NOT_CURRENT_OWNER' }) },
         );
-        const eventName =
-          path === 'insurance-park'
-            ? 'INSURANCE_RECORDED'
-            : path === 'transfer'
-              ? 'ASSET_TRANSFERRED'
-              : path === 'refresh'
-                ? 'ASSET_UPDATED'
-                : 'ASSET_CREATED';
+        const eventName = path.startsWith('insurance-park')
+          ? 'INSURANCE_RECORDED'
+          : path === 'transfer'
+            ? 'ASSET_TRANSFERRED'
+            : path === 'refresh'
+              ? 'ASSET_UPDATED'
+              : 'ASSET_CREATED';
         // Refresh always uses .retry; creation-refresh also refreshes an existing row on the original.
         const topic = path === 'refresh' ? 'rasta.asset.v1.retry' : 'rasta.asset.v1';
         const envelope: EventEnvelope = {
@@ -764,7 +763,15 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       ),
     ).rejects.toThrow('SOURCE_DRIFT_EVENT_CONFLICT');
   });
-  it('quarantines insurance sweep drift while retaining its original parked row and marker', async () => {
+  const sweepFailures = [
+    'confirmed',
+    'inventory-sealed',
+    'cleanup-failed',
+    'quarantine-failed',
+    'commit-lost',
+    'unknown-write',
+  ];
+  it.each(sweepFailures)('sweep drift %s', async (mode) => {
     const assetId = id('AST'),
       eventId = id('EVT');
     const envelope: EventEnvelope = {
@@ -789,37 +796,110 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         ownershipGeneration: 1,
       }),
     };
-    await asset(assetId);
-    await prisma.client
-      .$executeRaw`INSERT INTO usage_record(id, asset_id, organization_id, period_start, period_end, hours, recorded_by)
+    if (mode === 'inventory-sealed') {
+      await command.seal(runId, actor);
+      // Model a legacy parked row inconsistent with the immutable inventory.
+      await owner.client.$executeRawUnsafe(
+        `ALTER TABLE "${schema}".insurance_pending_verification DISABLE TRIGGER meter_inventory_creation_fence`,
+      );
+    } else {
+      await asset(assetId);
+      await prisma.client
+        .$executeRaw`INSERT INTO usage_record(id, asset_id, organization_id, period_start, period_end, hours, recorded_by)
       VALUES (${id('USG')}, ${assetId}, ${org.a}, '2026-01-01', '2026-01-02', 1, 'TEST')`;
+    }
     await prisma.client
       .$executeRaw`INSERT INTO insurance_pending_verification(event_id, asset_id, organization_id, envelope, source_topic, reason)
       VALUES (${eventId}, ${assetId}, ${org.b}, ${JSON.stringify(envelope)}::jsonb, 'TEST', 'TEST')`;
     const repository = new FleetRepository(prisma);
     await prisma.transaction((tx) => repository.markEventProcessed(tx, eventId, CONSUMER_NAME));
-    await command.seal(runId, actor);
+    if (mode === 'inventory-sealed')
+      await owner.client.$executeRawUnsafe(
+        `ALTER TABLE "${schema}".insurance_pending_verification ENABLE TRIGGER meter_inventory_creation_fence`,
+      );
+    else await command.seal(runId, actor);
     await prisma.client.$executeRaw`DELETE FROM asset_ref WHERE id = ${assetId}`;
     await prisma.transaction((tx) => repository.markParkedInsuranceDue(tx, assetId));
+    const verify = jest.fn(async () => ({
+      counts: true as const,
+      organizationId: org.b,
+      coverage: 'COMPREHENSIVE',
+      validFrom: '2026-01-01T00:00:00.000Z',
+      validUntil: '2027-01-01T00:00:00.000Z',
+      ownershipGeneration: 1,
+    }));
     const consumer = new AssetSyncConsumer(null, repository, undefined, undefined, undefined, {
-      verify: async () => ({
-        counts: true,
-        organizationId: org.b,
-        coverage: 'COMPREHENSIVE',
-        validFrom: '2026-01-01T00:00:00.000Z',
-        validUntil: '2027-01-01T00:00:00.000Z',
-        ownershipGeneration: 1,
-      }),
+      verify,
     });
-    await consumer.sweepParked();
-    await consumer.sweepParked();
+    const transaction = prisma.transaction.bind(prisma);
+    if (mode === 'cleanup-failed')
+      jest
+        .spyOn(repository, 'deleteParkedInsurance')
+        .mockRejectedValueOnce(new Error('delete failed'));
+    if (mode === 'unknown-write')
+      jest
+        .spyOn(repository, 'upsertAssetRef')
+        .mockRejectedValueOnce(new Error('SOURCE_OWNER_DRIFT'));
+    if (mode === 'commit-lost') {
+      const answer = await verify();
+      verify.mockClear();
+      verify.mockImplementationOnce(async () => {
+        jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
+          await transaction(fn, options);
+          throw new Error('commit response lost');
+        });
+        return answer;
+      });
+    }
+    if (mode === 'quarantine-failed')
+      await owner.client.$executeRawUnsafe(
+        `ALTER TABLE "${schema}".meter_drift_quarantine RENAME TO unavailable_quarantine`,
+      );
+    try {
+      expect(await consumer.sweepParked()).toMatchObject({
+        QUARANTINED: ['confirmed', 'inventory-sealed'].includes(mode) ? 1 : 0,
+      });
+      if (['cleanup-failed', 'quarantine-failed', 'unknown-write'].includes(mode)) {
+        expect(
+          await prisma.client.$queryRaw`SELECT event_id FROM insurance_pending_verification`,
+        ).toEqual([{ event_id: eventId }]);
+        if (mode !== 'quarantine-failed')
+          expect(await prisma.client.$queryRaw`SELECT * FROM meter_drift_quarantine`).toEqual([]);
+      }
+    } finally {
+      jest.restoreAllMocks();
+      if (mode === 'quarantine-failed')
+        await owner.client.$executeRawUnsafe(
+          `ALTER TABLE "${schema}".unavailable_quarantine RENAME TO meter_drift_quarantine`,
+        );
+    }
+    if (['cleanup-failed', 'quarantine-failed', 'unknown-write'].includes(mode)) {
+      const answer = await verify();
+      const both = latch();
+      let waiting = 0;
+      verify.mockImplementation(async () => {
+        if (++waiting === 2) both.release();
+        await both.ready;
+        return answer;
+      });
+      const outcomes = await Promise.all([consumer.sweepParked(), consumer.sweepParked()]);
+      expect(outcomes.reduce((n, c) => n + c.QUARANTINED, 0)).toBe(1);
+    }
+    const calls = verify.mock.calls.length;
+    expect(await consumer.sweepParked()).toMatchObject({ QUARANTINED: 0 });
+    expect(verify).toHaveBeenCalledTimes(calls);
     expect(
       await prisma.client.$queryRaw`SELECT event_id, reason FROM meter_drift_quarantine`,
-    ).toEqual([{ event_id: eventId, reason: 'SOURCE_OWNER_DRIFT' }]);
+    ).toEqual([
+      {
+        event_id: eventId,
+        reason: mode === 'inventory-sealed' ? 'SOURCE_INVENTORY_SEALED' : 'SOURCE_OWNER_DRIFT',
+      },
+    ]);
     expect(
       await prisma.client
         .$queryRaw`SELECT attempts FROM insurance_pending_verification WHERE event_id = ${eventId}`,
-    ).toEqual([{ attempts: 0 }]);
+    ).toEqual([]);
     expect(await prisma.client.$queryRaw`SELECT * FROM asset_ref`).toEqual([]);
     expect(await prisma.client.$queryRaw`SELECT event_id FROM processed_event`).toEqual([
       { event_id: eventId },

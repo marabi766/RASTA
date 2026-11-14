@@ -87,6 +87,8 @@ recomputes the same set; it does not add deltas again. Existing LEDGER assets
 are never demoted by refusal. APPLIED is reported only after confirmed commit;
 APPLY_UNCONFIRMED means a lost transaction result may have committed: inspect
 and rerun verification, never assume LEGACY or an untouched counter.
+Unknown pool/statement failures before the callback returns are definite
+`APPLY_PRECOMMIT_FAILED` refusals; known refusals retain their named code.
 announceForAsset runs in tenant context after commit. ANNOUNCEMENT_UNCONFIRMED
 preserves the confirmed meter and can be retried by apply or the normal scan;
 previous announcements are not retracted. Review L < M with maintenance staff.
@@ -253,7 +255,8 @@ up to `lock_timeout = '5s'` for the gate; timeout still aborts atomically. Use t
 same drain procedure for that migration: INSERTs and UPDATEs on all seven source
 tables (`asset_ref`, `usage_record`, `assignment`, `availability_window`,
 `asset_transfer_fence`, `asset_transfer_release`, `insurance_pending_verification`) queue
-for up to 5s, including the parked sweep and consumers. Allow for request timeouts
+for up to 5s, including the parked sweep and consumers. Seal/replay/status
+operators and seal-membership writers also queue. Allow for request timeouts
 and consumer retries if accepting that pause instead of draining.
 
 Malformed source rows refuse `SOURCE_INVENTORY_MALFORMED`; malformed stored inventory
@@ -296,7 +299,12 @@ unresolved until the separate operator reconciliation slice exists.
 Atomicity uses a savepoint: fleet takes the seal's share lock before the event's
 savepoint, rolls back every refused effect (including marker/outbox) to that
 savepoint, then commits only quarantine evidence. The lock survives that rollback.
-The terminal error is raised only after confirmed commit. A failed or ambiguous
+The sweep also takes its asset lock before the savepoint, so competing sweeps
+remain serialized through refusal cleanup. For sweep APPLY refusals, quarantine
+evidence and parked-row removal commit
+together; the named outcome is `QUARANTINED`. The original processed marker stays,
+and later sweeps do not ask the source again for that row. Failed removal rolls
+back the evidence too. The terminal error is raised only after confirmed commit. A failed or ambiguous
 quarantine write raises `EventHandlingUnconfirmedError`; Kafka leaves the delivery
 unacknowledged without retry exhaustion or DLQ acknowledgement. Unrecognized
 source-write failures also stay unacknowledged as `SOURCE_WRITE_UNCONFIRMED`,

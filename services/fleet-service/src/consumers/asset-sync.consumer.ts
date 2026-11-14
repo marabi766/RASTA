@@ -471,7 +471,7 @@ type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER';
  * as it was, due, for the next run anywhere (#270 r1).
  */
 export type ParkedOutcome =
-  'GONE' | 'NOT_DUE' | 'APPLIED' | 'DROPPED' | 'KEPT' | 'DEAD_LETTERED' | 'STOPPED';
+  'GONE' | 'NOT_DUE' | 'APPLIED' | 'DROPPED' | 'KEPT' | 'DEAD_LETTERED' | 'QUARANTINED' | 'STOPPED';
 
 /** Where INSURANCE_RECORDED is published (ASSET_SYNC_TOPICS); a parked event without a delivery is dead-lettered as from here. */
 const INSURANCE_TOPIC = 'rasta.insurance.v1';
@@ -970,7 +970,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
    * the configured age ago, oldest first. Each is re-verified at the source; one
    * still unverified after the maximum attempts is dead-lettered as
    * `PARKED_VERIFICATION_EXHAUSTED`. Exposed so a test can run it without the
-   * timer.
+   * timer. Fence refusals commit quarantine evidence and removal together,
+   * return `QUARANTINED`, and retain the original processed marker.
    */
   async sweepParked(): Promise<Record<ParkedOutcome, number>> {
     const counts: Record<ParkedOutcome, number> = {
@@ -980,6 +981,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       DROPPED: 0,
       KEPT: 0,
       DEAD_LETTERED: 0,
+      QUARANTINED: 0,
       STOPPED: 0,
     };
     const due = await this.repository.listDueParkedInsurance(
@@ -1032,10 +1034,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       do {
         this.sweepAgain = false;
         const counts = await this.sweepParked();
-        if (counts.APPLIED + counts.DROPPED + counts.DEAD_LETTERED > 0) {
+        if (counts.APPLIED + counts.DROPPED + counts.DEAD_LETTERED + counts.QUARANTINED > 0) {
           this.logger.log(
             `Parked insurance sweep: ${counts.APPLIED} applied, ${counts.DROPPED} dropped, ` +
-              `${counts.KEPT} still parked, ${counts.DEAD_LETTERED} dead-lettered`,
+              `${counts.KEPT} still parked, ${counts.DEAD_LETTERED} dead-lettered, ` +
+              `${counts.QUARANTINED} quarantined`,
           );
         }
       } while (this.sweepAgain && !this.sweepStopped);
@@ -1157,7 +1160,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
     }
 
     let lettered: { sourceTopic: string; attempts: number; last: ParkReason } | undefined;
-    const outcome = await this.repository.transaction(
+    const decision = this.repository.transaction(
       async (tx: ExtendedPrismaClient): Promise<ParkedOutcome> => {
         await this.repository.lockAssetRef(tx, assetId);
         const row = await this.repository.findParkedInsurance(
@@ -1237,7 +1240,23 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       },
       { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs },
       eventId,
+      {
+        lock: (tx) => this.repository.lockAssetRef(tx, assetId),
+        discard: async (tx) => {
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          // Retain the processed marker: this terminal outcome cannot be replayed.
+        },
+      },
     );
+    const outcome = await decision.catch((error: unknown): ParkedOutcome => {
+      if (
+        error instanceof UnprocessableEventError &&
+        (error.reason === DLQ_REASONS.SOURCE_OWNER_DRIFT ||
+          error.reason === DLQ_REASONS.SOURCE_INVENTORY_SEALED)
+      )
+        return 'QUARANTINED'; // Raised only after evidence + removal committed.
+      throw error;
+    });
 
     if (lettered) {
       // Counted once committed: the relay publishes what the outbox holds.

@@ -12,7 +12,13 @@ export class SourceDriftRefusal extends EventHandlingUnconfirmedError {
   }
 }
 
-/** Seal lock precedes savepoint: refused effects roll back, quarantine alone commits.
+export interface SourceDriftCleanup {
+  lock(tx: ExtendedPrismaClient): Promise<void>;
+  discard(tx: ExtendedPrismaClient): Promise<void>;
+}
+
+/** Seal and cleanup locks precede savepoint: refused effects roll back.
+ * Quarantine and terminal cleanup commit together.
  * The authority's exclusive seal lock excludes this entire decision, including rollback.
  */
 export async function quarantineTransaction<T>(
@@ -21,6 +27,7 @@ export async function quarantineTransaction<T>(
   ) => Promise<T | SourceDriftRefusal>,
   eventId: string,
   fn: (tx: ExtendedPrismaClient) => Promise<T>,
+  cleanup?: SourceDriftCleanup,
 ): Promise<T> {
   let refused = false;
   let result: T | SourceDriftRefusal;
@@ -29,6 +36,8 @@ export async function quarantineTransaction<T>(
       const [gate] = await tx.$queryRaw<{ run_id: string | null }[]>`
         SELECT run_id FROM meter_inventory_seal WHERE id = true FOR SHARE`;
       if (!gate) throw new EventHandlingUnconfirmedError('SOURCE_FENCE_MISSING');
+      // Sweep ownership must survive rollback, including before evidence capacity is locked.
+      await cleanup?.lock(tx);
       await tx.$executeRaw`SAVEPOINT source_event_effects`;
       try {
         return await fn(tx);
@@ -37,6 +46,8 @@ export async function quarantineTransaction<T>(
         refused = true;
         await tx.$executeRaw`ROLLBACK TO SAVEPOINT source_event_effects`;
         if (!gate.run_id) throw new EventHandlingUnconfirmedError('SOURCE_FENCE_MISSING');
+        // Terminal sweep cleanup shares the evidence commit; failure preserves the parked row.
+        await cleanup?.discard(tx);
         await tx.$executeRaw`INSERT INTO meter_drift_quarantine
           (event_id, asset_id, sealed_owner, named_owner, reason, run_id)
           VALUES (${eventId}, ${error.assetId},

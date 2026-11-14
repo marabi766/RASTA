@@ -346,11 +346,7 @@ export class MeterReconcile {
       );
     } catch (error) {
       if (!callbackReturned && error instanceof PreviewComplete) return error.report;
-      const unconfirmed =
-        apply &&
-        (callbackReturned ||
-          (!(error instanceof UsageMeterRefusal) &&
-            !(error instanceof Error && error.message === 'SOURCE_LEDGER_MISMATCH')));
+      const unconfirmed = apply && callbackReturned;
       return {
         ...report,
         L: null,
@@ -364,7 +360,9 @@ export class MeterReconcile {
             ? error.code
             : error instanceof Error && error.message === 'SOURCE_LEDGER_MISMATCH'
               ? 'SOURCE_LEDGER_MISMATCH'
-              : 'PREVIEW_FAILED',
+              : apply
+                ? 'APPLY_PRECOMMIT_FAILED'
+                : 'PREVIEW_FAILED',
       };
     }
     report.sourceComplete = true;

@@ -365,28 +365,35 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     await expect(releaseLost.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
     expect(await eventRows()).toHaveLength(1);
   });
-  it.each(['write', 'replay'])(
-    'keeps post-callback %s errors unconfirmed, including known refusal shapes',
-    async (phase) => {
-      if (phase === 'replay') await command().activate(runId, actor, []);
-      const transaction = prisma.transaction.bind(prisma);
-      for (const error of [
+  it.each(
+    ['write', 'replay'].flatMap((phase) =>
+      [
         new MeterFullRunRefusal('FULL_RUN_CONFLICT'),
         new Prisma.PrismaClientKnownRequestError('lost response', {
           code: 'P2034',
           clientVersion: 'test',
         }),
-      ]) {
-        jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
-          await transaction(fn, options);
-          throw error;
-        });
-        await expect(command().activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
-      }
-      expect(await eventRows()).toHaveLength(1);
-      expect(await command().activate(runId, actor, [])).toBe(runId);
-    },
-  );
+      ].map((error) => ({ phase, error })),
+    ),
+  )('keeps post-callback $phase $error unconfirmed', async ({ phase, error }) => {
+    if (phase === 'replay') await command().activate(runId, actor, []);
+    expect(await command().status(runId, actor)).toEqual(
+      phase === 'write' ? null : expect.anything(),
+    );
+    const transaction = prisma.transaction.bind(prisma);
+    const spy = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
+      await transaction(fn, options);
+      throw error;
+    });
+    try {
+      await expect(command().activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await eventRows()).toHaveLength(1);
+    expect(await command().activate(runId, actor, [])).toBe(runId);
+  });
   it.each([null, { ...inventory([]), extra: true }])(
     'names malformed source inventory before any transaction: %j',
     async (value) => {
