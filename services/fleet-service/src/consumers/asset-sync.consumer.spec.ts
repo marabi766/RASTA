@@ -1067,10 +1067,14 @@ describe('AssetSyncConsumer', () => {
 
           await consumer.handle(created('ORG-DEH-0003'));
 
-          expect(built.repository.transaction).toHaveBeenCalledWith(expect.any(Function), {
-            timeoutMs: 9_000,
-            maxWaitMs: 400,
-          });
+          expect(built.repository.transaction).toHaveBeenCalledWith(
+            expect.any(Function),
+            {
+              timeoutMs: 9_000,
+              maxWaitMs: 400,
+            },
+            'EVT-CREATED-LATE',
+          );
         });
       });
 

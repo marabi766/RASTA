@@ -32,6 +32,8 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
   });
   const command = (value: unknown = inventory([])) =>
     new MeterFullRun(prisma, {
+      withQuarantineClear: async (runId, boundary, fn) =>
+        fn({ runId, boundary, clear: true, assertHeld: async () => undefined }),
       withSealedInventory: async (_runId, fn) => fn(value),
     });
   function latch() {
@@ -211,6 +213,100 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     });
     expect(rows[0].organizationId).toBeNull();
   });
+  it.each([
+    undefined,
+    {},
+    { runId, boundary: 'STALE', clear: true, assertHeld: async () => undefined },
+    { runId, boundary: 'TEST_OWNER_SEAL', clear: false, assertHeld: async () => undefined },
+    { runId, boundary: 'TEST_OWNER_SEAL', clear: true },
+    {
+      runId,
+      boundary: 'TEST_OWNER_SEAL',
+      clear: true,
+      assertHeld: async () => {
+        throw new Error('expired source lock');
+      },
+    },
+  ])('refuses missing, stale or unresolved quarantine proof: %j', async (proof) => {
+    const c = new MeterFullRun(prisma, {
+      withSealedInventory: async (_runId, fn) => fn(inventory([])),
+      withQuarantineClear: async (_runId, _boundary, fn) => fn(proof),
+    });
+    await expect(c.activate(runId, actor, [])).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+    expect(await c.status(runId, actor)).toBeNull();
+    expect(await eventRows()).toHaveLength(0);
+  });
+  it.each(['lock wait', 'pool', 'connection', 'lost tx1 response'])(
+    'classifies pre-callback %s without claiming quarantine',
+    async (failure) => {
+      const authority = {
+        withSealedInventory: async <T>(_runId: string, fn: (value: unknown) => Promise<T>) =>
+          fn(inventory([])),
+      };
+      // Deliberately model an older deployed adapter at the runtime boundary.
+      const old = new MeterFullRun(
+        prisma,
+        authority as import('../src/maintenance/meter-full-run').MeterInventoryAuthority,
+      );
+      await expect(old.activate(runId, actor, [])).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+      const unreadable = new MeterFullRun(prisma, {
+        ...authority,
+        withQuarantineClear: async () => {
+          throw new Error(failure);
+        },
+      });
+      await expect(unreadable.activate(runId, actor, [])).rejects.toThrow(
+        'SOURCE_CLEARANCE_UNCONFIRMED',
+      );
+      expect(await eventRows()).toHaveLength(0);
+    },
+  );
+  it.each(['inventory', 'quarantine'])(
+    'keeps %s authority abandonment unconfirmed while maintenance is still running',
+    async (layer) => {
+      const entered = latch(),
+        finish = latch();
+      const enqueue = MaintenanceRepository.prototype.enqueueEvent;
+      const pause = jest
+        .spyOn(MaintenanceRepository.prototype, 'enqueueEvent')
+        .mockImplementationOnce(async function (this: MaintenanceRepository, tx, input) {
+          const result = await enqueue.call(this, tx, input);
+          entered.release();
+          await finish.ready;
+          return result;
+        });
+      let pending: Promise<unknown> | undefined;
+      const abandon = async (action: Promise<unknown>): Promise<never> => {
+        pending = action;
+        await Promise.race([entered.ready, action]);
+        throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+      };
+      const c = new MeterFullRun(prisma, {
+        withSealedInventory: (_runId, fn) => {
+          const action = fn(inventory([]));
+          return layer === 'inventory' ? abandon(action) : action;
+        },
+        withQuarantineClear: (key, boundary, fn) => {
+          const action = fn({
+            runId: key,
+            boundary,
+            clear: true,
+            assertHeld: async () => undefined,
+          });
+          return layer === 'quarantine' ? abandon(action) : action;
+        },
+      });
+      try {
+        await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
+      } finally {
+        finish.release();
+        await Promise.allSettled(pending ? [pending] : []);
+        pause.mockRestore();
+      }
+      expect(await c.status(runId, actor)).toMatchObject({ runId });
+      expect(await eventRows()).toHaveLength(1);
+    },
+  );
   it('requires authority even at gauge zero; refuses partial, duplicate and omitted local/orphan inventory', async () => {
     await expect(new MeterFullRun(prisma).activate(runId, actor, [])).rejects.toThrow(
       'AUTHORITATIVE_INVENTORY_REQUIRED',
@@ -222,6 +318,8 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       asActor({ organizationId: org.a }, () => command().activate(runId, actor, [])),
     ).rejects.toThrow('OPERATOR_CONTEXT_REQUIRED');
     const falseSuccess = new MeterFullRun(prisma, {
+      withQuarantineClear: async (runId, boundary, fn) =>
+        fn({ runId, boundary, clear: true, assertHeld: async () => undefined }),
       withSealedInventory: async <T>() => runId as unknown as T,
     });
     await expect(falseSuccess.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
@@ -262,6 +360,8 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       c.activate(runId, actor, [{ assetId, reason: 'HISTORY_UNKNOWN' }]),
     ).rejects.toThrow('ALREADY_ACTIVE_INVENTORY_DRIFT');
     const releaseLost = new MeterFullRun(prisma, {
+      withQuarantineClear: async (runId, boundary, fn) =>
+        fn({ runId, boundary, clear: true, assertHeld: async () => undefined }),
       withSealedInventory: async (_runId, fn) => {
         await fn(inventory([{ assetId, organizationId: org.a }]));
         throw new Error('owner release lost');
@@ -375,6 +475,11 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     let source = inventory([]);
     const requestedRuns: string[] = [];
     const authority = {
+      withQuarantineClear: async <T>(
+        runId: string,
+        boundary: string,
+        fn: (proof: unknown) => Promise<T>,
+      ): Promise<T> => fn({ runId, boundary, clear: true, assertHeld: async () => undefined }),
       withSealedInventory: async <T>(
         key: string,
         fn: (value: unknown) => Promise<T>,
