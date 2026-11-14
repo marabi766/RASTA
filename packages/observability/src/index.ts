@@ -35,6 +35,7 @@ export {
   eventProcessingDuration,
   dlqMessagesTotal,
   consumerCrashesTotal,
+  consumerHandlingFailuresTotal,
   consumerExpected,
   eventValidationFailuresTotal,
   duplicateEventsTotal,
