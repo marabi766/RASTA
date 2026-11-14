@@ -1,5 +1,6 @@
 import { EventHandlingUnconfirmedError, UnprocessableEventError } from '@rasta/nest-common';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import { driftEvidenceOwnerChangesTotal } from '@rasta/observability';
 import { createHash } from 'node:crypto';
 
 const ACTIVATION_RETRY_ATTEMPTS = 8;
@@ -32,6 +33,7 @@ export async function quarantineTransaction<T>(
   fn: (tx: ExtendedPrismaClient) => Promise<T>,
   cleanup?: SourceDriftCleanup,
 ): Promise<T> {
+  let ownerChanged = false;
   let refused = false;
   let callbackReturned = false;
   let entered = false;
@@ -63,8 +65,11 @@ export async function quarantineTransaction<T>(
           VALUES (${eventId}, ${error.assetId},
             (SELECT organization_id FROM meter_inventory_seal_asset WHERE asset_id = ${error.assetId}),
             ${error.namedOwner}, ${error.reason}, ${gate.run_id}) ON CONFLICT (event_id) DO NOTHING`;
-        const [overflow] = await tx.$queryRaw<{ present: boolean }[]>`
-          SELECT EXISTS(SELECT 1 FROM meter_drift_overflow WHERE event_id = ${eventId}) AS present`;
+        const [overflow] = await tx.$queryRaw<{ present: boolean; owner_changed: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM meter_drift_overflow WHERE event_id = ${eventId}) AS present,
+            EXISTS(SELECT 1 FROM (SELECT * FROM meter_drift_quarantine UNION ALL SELECT * FROM meter_drift_overflow) q
+              WHERE event_id = ${eventId} AND named_owner IS DISTINCT FROM ${error.namedOwner}) AS owner_changed`;
+        ownerChanged = overflow.owner_changed;
         return overflow.present
           ? new SourceDriftRefusal('SOURCE_DRIFT_QUARANTINE_FULL', error.assetId, error.namedOwner)
           : error;
@@ -93,6 +98,7 @@ export async function quarantineTransaction<T>(
       throw new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED', error);
     throw error;
   }
+  if (ownerChanged) driftEvidenceOwnerChangesTotal.inc();
   if (result instanceof SourceDriftRefusal)
     throw new UnprocessableEventError(result.reason, result.reason);
   return result;
