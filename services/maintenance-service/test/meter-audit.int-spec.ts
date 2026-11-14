@@ -157,6 +157,32 @@ describe('meter transition audit boundary', () => {
     expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
     expect((await repository.findMeter(f.assetId))!.hourMeter.toString()).toBe('100');
   });
+  it.each(['statement', 'pool'])('refuses pre-callback %s failure', async (failure) => {
+    const f = await fixture();
+    const enqueue = MaintenanceRepository.prototype.enqueueEvent;
+    const fault =
+      failure === 'pool'
+        ? jest.spyOn(prisma, 'transaction').mockRejectedValueOnce(new Error('pool wait'))
+        : jest
+            .spyOn(MaintenanceRepository.prototype, 'enqueueEvent')
+            .mockImplementationOnce(async function (this: MaintenanceRepository, tx, input) {
+              await enqueue.call(this, tx, input);
+              await tx.$executeRaw`SELECT 1 / 0`;
+              throw new Error('unreachable');
+            });
+    try {
+      expect(await f.command.reportAsset(org.a, f.assetId, new Date(), true)).toMatchObject({
+        outcome: 'REFUSED',
+        refusal: 'APPLY_PRECOMMIT_FAILED',
+        sourceComplete: false,
+      });
+    } finally {
+      fault.mockRestore();
+    }
+    expect(await f.rows()).toHaveLength(0);
+    expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
+    expect((await repository.findMeter(f.assetId))!.hourMeter.toString()).toBe('100');
+  });
   it('missing operator refuses direct and inventory apply; another tenant cannot create audit evidence', async () => {
     const f = await fixture();
     const missing = new MeterReconcile(prisma, f.source);
