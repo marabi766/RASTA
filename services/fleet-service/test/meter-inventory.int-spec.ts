@@ -1,7 +1,8 @@
+import { Prisma } from '../src/generated/prisma';
 import { eligibilityClockWrite } from '@rasta/testing';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { EventEnvelope } from '@rasta/contracts';
-import { FleetMeterInventorySeal } from '../src/fleet/meter-inventory';
+import { FleetMeterInventoryRefusal, FleetMeterInventorySeal } from '../src/fleet/meter-inventory';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
@@ -199,6 +200,67 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_SEAL_INVALID');
     expect(await events()).toHaveLength(0);
   });
+  it.each(['assetId', 'organizationId'])(
+    'refuses malformed source %s without a seal or event',
+    async (field) => {
+      await prisma.client
+        .$executeRaw`INSERT INTO asset_ref(id, organization_id, status, synced_at, source_event)
+      VALUES (${field === 'assetId' ? 'BAD.ID' : id('AST')}, ${field === 'organizationId' ? 'BAD.ORG' : org.a},
+      'ACTIVE', ${new Date()}, 'TEST')`;
+      await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_INVENTORY_MALFORMED');
+      expect(await events()).toHaveLength(0);
+      const [gate] = await prisma.client.$queryRaw<{ run_id: string | null }[]>`
+      SELECT run_id FROM meter_inventory_seal WHERE id = true`;
+      expect(gate.run_id).toBeNull();
+    },
+  );
+  it.each([
+    { inventory: [{ assetId: 'AST', organizationId: 'ORG', extra: 'invalid' }] },
+    { inventory: [{ assetId: 'BAD.ID', organizationId: 'ORG' }] },
+  ])('refuses malformed stored inventory $inventory', async ({ inventory }) => {
+    const boundary = `fleet:${runId}:${createHash('sha256').update(JSON.stringify(inventory)).digest('hex')}`;
+    await prisma.client.$executeRaw`UPDATE meter_inventory_seal SET run_id = ${runId},
+      operator_id = ${actor}, inventory = ${JSON.stringify(inventory)}::jsonb, boundary = ${boundary}
+      WHERE id = true`;
+    await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_SEAL_INVALID');
+    expect(await events()).toHaveLength(0);
+  });
+  it.each(['pool', 'statement', 'expiration'])(
+    'reports definite %s failure as a precommit refusal',
+    async (failure) => {
+      const transaction = prisma.transaction.bind(prisma);
+      let expired: unknown;
+      if (failure === 'pool')
+        jest.spyOn(prisma, 'transaction').mockRejectedValueOnce(new Error('pool wait'));
+      else {
+        if (failure === 'expiration')
+          jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn) => {
+            try {
+              return await transaction(fn, { timeoutMs: 100 });
+            } catch (error) {
+              expired = error;
+              throw error;
+            }
+          });
+        jest.spyOn(FleetRepository.prototype, 'enqueueEvent').mockImplementationOnce(async (tx) => {
+          if (failure === 'statement') await tx.$executeRaw`SELECT 1/0`;
+          else {
+            await tx.$executeRaw`SELECT pg_sleep(0.4)`;
+            await tx.$executeRaw`SELECT 1`;
+          }
+          throw new Error('unreachable');
+        });
+      }
+      await expect(command.seal(runId, actor)).rejects.toEqual(
+        new FleetMeterInventoryRefusal('SOURCE_SEAL_PRECOMMIT_FAILED'),
+      );
+      if (failure === 'expiration') expect(expired).toMatchObject({ code: 'P2028' });
+      expect(await events()).toHaveLength(0);
+      const [gate] = await prisma.client.$queryRaw<{ run_id: string | null }[]>`
+      SELECT run_id FROM meter_inventory_seal WHERE id = true`;
+      expect(gate.run_id).toBeNull();
+    },
+  );
   it('refuses a stale-snapshot seal transaction before publishing inventory', async () => {
     jest.spyOn(prisma, 'transaction').mockImplementationOnce((fn) =>
       prisma.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), {
@@ -366,6 +428,28 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     expect(gate.run_id).toBeNull();
     await asset(id('AST'));
   });
+  it.each(['write', 'replay'])(
+    'keeps post-callback %s errors unconfirmed, including known refusal shapes',
+    async (phase) => {
+      if (phase === 'replay') await command.seal(runId, actor);
+      const transaction = prisma.transaction.bind(prisma);
+      for (const error of [
+        new FleetMeterInventoryRefusal('SOURCE_SEAL_CONFLICT'),
+        new Prisma.PrismaClientKnownRequestError('lost response', {
+          code: 'P2034',
+          clientVersion: 'test',
+        }),
+      ]) {
+        jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
+          await transaction(fn, options);
+          throw error;
+        });
+        await expect(command.seal(runId, actor)).rejects.toThrow('SOURCE_SEAL_UNCONFIRMED');
+      }
+      expect(await events()).toHaveLength(1);
+      expect((await command.seal(runId, actor)).complete).toBe(true);
+    },
+  );
   it('never unseals: lost commit replays once; temp shadows, snapshot writes and gate mutation refuse', async () => {
     const transaction = prisma.transaction.bind(prisma);
     const lost = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
