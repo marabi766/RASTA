@@ -1,12 +1,23 @@
 import { Prisma } from '../src/generated/prisma';
 import { eligibilityClockWrite } from '@rasta/testing';
 import { createHash, randomUUID } from 'node:crypto';
-import type { EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { EventConsumer, UnprocessableEventError } from '@rasta/nest-common';
+import type { ProducerRecord } from 'kafkajs';
+import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
 import { FleetMeterInventoryRefusal, FleetMeterInventorySeal } from '../src/fleet/meter-inventory';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
-import { asActor, databaseUrl, id, ownerDatabaseUrl, tenants, waitFor } from './helpers';
+import {
+  asActor,
+  databaseUrl,
+  id,
+  ownerDatabaseUrl,
+  tenants,
+  waitFor,
+  producerShaped,
+} from './helpers';
 
 describe('fleet durable source seal and future-creation fence (real PostgreSQL)', () => {
   const owner = new PrismaService(ownerDatabaseUrl());
@@ -41,6 +52,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       ...sources,
       'meter_inventory_seal',
       'meter_inventory_seal_asset',
+      'processed_event',
       'outbox_message',
       'outbox_stream_sequence',
     ])
@@ -203,6 +215,161 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       correlationId: runId,
       payload: { runId, operatorId: actor, assetCount: 7, sourceBoundary: sealed.boundary },
     });
+  });
+  describe('terminal consumer refusals', () => {
+    it.each(
+      ['transfer', 'creation', 'creation-refresh', 'refresh'].flatMap((path) =>
+        [false, true].map((known) => ({ path, known })),
+      ),
+    )(
+      '$path known=$known refuses once per delivery with its exact DLQ reason',
+      async ({ path, known }) => {
+        const assetId = id('AST');
+        const orphan = path === 'creation';
+        if (known) {
+          if (orphan)
+            await prisma.client.$executeRaw`INSERT INTO usage_record(id, asset_id,
+          organization_id, period_start, period_end, hours, recorded_by)
+          VALUES (${id('USG')}, ${assetId}, ${org.a}, '2026-01-01', '2026-01-02', 1, 'TEST')`;
+          else await asset(assetId);
+        }
+        await command.seal(runId, actor);
+        const repository = new FleetRepository(prisma);
+        const consumer = new AssetSyncConsumer(null, repository, {
+          snapshot: async () => ({
+            assetId,
+            organizationId: org.b,
+            status: 'ACTIVE',
+            name: 'TEST',
+            type: 'GRADER',
+            assetTag: null,
+            transferGeneration: 1,
+            viaTransfer: true,
+          }),
+        });
+        const eventName =
+          path === 'transfer'
+            ? 'ASSET_TRANSFERRED'
+            : path === 'refresh'
+              ? 'ASSET_UPDATED'
+              : 'ASSET_CREATED';
+        // Refresh always uses .retry; creation-refresh also refreshes an existing row on the original.
+        const topic = path === 'refresh' ? 'rasta.asset.v1.retry' : 'rasta.asset.v1';
+        const envelope: EventEnvelope = {
+          eventId: id('EVT'),
+          eventName,
+          eventVersion: 1,
+          occurredAt: new Date().toISOString(),
+          producer: 'asset-service',
+          producerVersion: '0.1.0',
+          aggregateType: 'Asset',
+          aggregateId: assetId,
+          tenantId: org.b,
+          correlationId: id('COR'),
+          payload: producerShaped(eventName, {
+            assetId,
+            organizationId: org.b,
+            ...(eventName === 'ASSET_UPDATED' ? { updatedFields: ['status'] } : {}),
+            ...(eventName === 'ASSET_CREATED' ? { status: 'REGISTERED' } : {}),
+            ...(eventName === 'ASSET_TRANSFERRED'
+              ? {
+                  fromOrganizationId: org.a,
+                  toOrganizationId: org.b,
+                  reason: 'TEST',
+                  referenceNo: null,
+                  transferredAt: new Date().toISOString(),
+                  ownershipGeneration: 1,
+                }
+              : {}),
+          }),
+        };
+        const reason = known ? DLQ_REASONS.SOURCE_OWNER_DRIFT : DLQ_REASONS.SOURCE_INVENTORY_SEALED;
+        const sent: ProducerRecord[] = [],
+          refused: unknown[] = [];
+        const transaction = jest.spyOn(repository, 'transaction');
+        // Real transport dispatch/retry/DLQ logic; only the broker send is captured locally.
+        const transport = new EventConsumer(
+          {
+            brokers: ['localhost:9092'],
+            clientId: 'fleet-drift-test',
+            groupId: 'fleet-drift-test',
+            topics: ['rasta.asset.v1'],
+            deadLetterTopic: 'rasta.fleet.v1.dlq',
+            maxRetries: 3,
+            retryBackoffMs: 0,
+          },
+          async (event, delivery) => {
+            try {
+              await consumer.handle(event, delivery);
+            } catch (error) {
+              refused.push(error);
+              throw error;
+            }
+          },
+          { log: () => undefined, warn: () => undefined, error: () => undefined },
+        );
+        const dispatch = transport as unknown as {
+          dlqProducer: { send(record: ProducerRecord): Promise<void> };
+          handleMessage(
+            topic: string,
+            partition: number,
+            value: Buffer,
+            headers: undefined,
+          ): Promise<void>;
+        };
+        dispatch.dlqProducer = {
+          send: async (record) => {
+            sent.push(record);
+          },
+        };
+        const snapshot = () =>
+          Promise.all(
+            sources.map((table) =>
+              prisma.client.$queryRawUnsafe(
+                `SELECT to_jsonb(t) AS row FROM ${table} t ORDER BY to_jsonb(t)::text`,
+              ),
+            ),
+          );
+        const before = await snapshot();
+        await dispatch.handleMessage(topic, 0, Buffer.from(JSON.stringify(envelope)), undefined);
+        expect(transaction).toHaveBeenCalledTimes(1);
+        expect(refused).toEqual([new UnprocessableEventError(reason, reason)]);
+        expect(refused[0]).toBeInstanceOf(UnprocessableEventError);
+        expect(sent).toHaveLength(1);
+        expect(sent[0].topic).toBe('rasta.fleet.v1.dlq');
+        expect(sent[0].messages[0].headers).toMatchObject({
+          'x-dlq-reason': reason,
+          'x-dlq-attempts': '1',
+        });
+        expect(sent[0].messages[0].value).toEqual(Buffer.from(JSON.stringify(envelope)));
+        expect(String(sent[0].messages[0].headers?.['x-dlq-error'])).not.toContain(org.a);
+        // Concurrent redelivery and explicit .retry refresh both meet the immutable fence again.
+        await Promise.all(
+          [topic, 'rasta.asset.v1.retry'].map((replayTopic) =>
+            dispatch.handleMessage(
+              replayTopic,
+              0,
+              Buffer.from(JSON.stringify(envelope)),
+              undefined,
+            ),
+          ),
+        );
+        expect(transaction).toHaveBeenCalledTimes(3);
+        expect(refused).toHaveLength(3);
+        expect(sent).toHaveLength(3);
+        for (const record of sent)
+          expect(record.messages[0].headers).toMatchObject({
+            'x-dlq-reason': reason,
+            'x-dlq-attempts': '1',
+          });
+        expect(await snapshot()).toEqual(before);
+        expect(await prisma.client.$queryRaw`SELECT * FROM processed_event`).toEqual([]);
+        expect(await prisma.client.outboxMessage.count()).toBe(1); // only the pre-existing seal audit
+        expect(
+          await asActor({ organizationId: org.b }, () => repository.findAssetRef(org.b, assetId)),
+        ).toBeNull();
+      },
+    );
   });
   it('allows parked retries and due marking under a historical foreign owner after sealing', async () => {
     const currentId = id('AST'),
