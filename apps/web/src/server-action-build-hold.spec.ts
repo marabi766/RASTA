@@ -37,6 +37,21 @@ import { ownedProcesses } from './test/owned-processes';
 jest.setTimeout(60_000);
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const REMOVE_ATTEMPTS = 10;
+const REMOVE_RETRY_DELAY_MS = 20;
+/** A live writer can add an entry after rmSync walked the directory: retry the whole walk. */
+const removeLiveFixture = async (dir: string): Promise<void> => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY' || attempt >= REMOVE_ATTEMPTS)
+        throw error;
+      await sleep(REMOVE_RETRY_DELAY_MS);
+    }
+  }
+};
 const waitFor = async (test: () => boolean, ms = 30_000): Promise<void> => {
   const deadline = Date.now() + ms;
   while (!test() && Date.now() < deadline) await sleep(25);
@@ -219,7 +234,9 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
     const dir = app({ holdUntilRelease: true });
     const writer = startWriter(dir);
     await waitFor(() => hasRun(dir, writer));
-    rmSync(dir, { recursive: true, force: true }); // its owner is alive and never released it
+    expect(heldWriters()).toEqual([dir]); // its owner is alive and never released it
+    await removeLiveFixture(dir);
+    expect(existsSync(dir)).toBe(false);
     expect(await endsWithin(writer.exited, 5_000)).toBe(72);
   });
 
