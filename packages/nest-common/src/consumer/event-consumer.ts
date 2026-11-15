@@ -120,6 +120,8 @@ export interface EventConsumerOptions extends KafkaConnectionOptions {
   deadLetterTopic?: string;
   /** In-process attempts before dead-lettering. */
   maxRetries?: number;
+  /** Durable service evidence before ordinary exhaustion; failure leaves the offset uncommitted. */
+  beforeExhaustion?: (envelope: EventEnvelope) => Promise<void>;
   retryBackoffMs?: number;
   /** Group-wide rebalance wait; opt in only for bounded long handlers. */
   rebalanceTimeoutMs?: number;
@@ -808,6 +810,8 @@ export class EventConsumer {
         }
 
         if (attempt === maxRetries) {
+          await this.options.beforeExhaustion?.(envelope);
+          this.abandonIfPastDeadline(run, { topic, partition, offset });
           const reason = exhaustedReason(error);
           this.logger.error(`Handler failed ${maxRetries}x for ${event} (${reason}): ${message}`);
           await this.deadLetter(

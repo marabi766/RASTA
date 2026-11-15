@@ -395,23 +395,23 @@ A missing seal row sends **every event**, including `INSPECTION_FAILED`, through
 at least 70 seconds, a HOLD and the DLQ. Worst-case partition pause is
 **70 seconds × backlog**, plus transaction and DLQ time.
 
-A refusal policy is retained within one live delivery. Parked rows try to latch
-`reason = SOURCE_REFUSAL_SEEN`; this survives restarts only if that write commits.
-Known gaps: redelivery loses the live policy, a held seal can block the parked
-latch, and a concurrent attempt-version mismatch can discard the observed refusal.
-Later ordinary exhaustion on these paths can publish to DLQ without a HOLD.
+Refusals also commit hash-only `meter_refusal_history` independently of the seal
+and parked-row fences (500 ms transaction, 50 ms pool wait). Live and both parked
+exhaustion boundaries check this history plus quarantine/overflow evidence before
+publishing to DLQ. Read or HOLD failures leave the delivery/parked row unresolved.
+Redelivery, a held-seal latch failure and an attempt-version mismatch cannot erase
+committed history. History is retained; reconciliation/clearing is a later slice.
 HOLD `run_id` currently stores a cause code (`SOURCE_REFUSAL_UNCONFIRMED` or
 `SOURCE_INFRASTRUCTURE_DURING_REFUSAL`), which can collide with operator run IDs;
-only the first cause for an event is retained. Durable history and cause separation
-remain follow-ups.
+only the first cause for an event is retained. Cause separation remains a follow-up.
 
 Only fleet asset-sync opts into an extended KafkaJS `rebalanceTimeout`, computed
 from its startup-checked transaction budget, seven extra attempts, a HOLD and
-seven 10-second pauses, rounded up to a minute (300 seconds at defaults).
+eleven 550 ms history-write bounds and seven 10-second pauses, rounded up to a minute (300 seconds at defaults).
 Other EventConsumer groups use the KafkaJS default 60 seconds. A rebalance during
 asset-sync's window can stall **all partitions in that group**, including unrelated
 inspection events. The 60-second session timeout is unchanged; heartbeats bracket
-attempts, pauses and upstream calls. The below-279-second handler budget excludes
+attempts, pauses and upstream calls. The below-286-second handler budget excludes
 DLQ publication: producer retries (eight) and the default 30-second request timeout
 can exceed the remaining margin. Completion within the rebalance timeout is not
 guaranteed; outages, deploys and crashes can redeliver.

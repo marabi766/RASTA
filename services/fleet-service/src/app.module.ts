@@ -232,6 +232,7 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
                 // would see half the stream (docs/07 § 7.10).
                 groupId: ASSET_SYNC_GROUP,
                 rebalanceTimeoutMs: assetSyncRebalanceTimeoutMs(env),
+                beforeExhaustion: (event) => repository.holdRefusedExhaustion(event.eventId),
                 topics: CONSUMED_TOPICS,
                 deadLetterTopic: ASSET_SYNC_DEAD_LETTER_TOPIC,
                 // The replica reads from the start. A fleet that only knows

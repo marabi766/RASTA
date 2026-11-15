@@ -131,6 +131,26 @@ describe('EventConsumer delivery metadata', () => {
     await deliver(consumer, labels.topic, 0, envelopeBytes({ eventId: 'NEXT_EVENT' }));
     expect(handler).toHaveBeenCalledTimes(4);
   });
+  it.each([false, true])('awaits durable exhaustion evidence, fail-closed=%s', async (fail) => {
+    const beforeExhaustion = jest.fn(async () => {
+      if (fail) throw new Error('history unreadable');
+    });
+    const consumer = new EventConsumer(
+      { ...options, maxRetries: 1, deadLetterTopic: 'test.dlq', beforeExhaustion },
+      async () => {
+        throw new Error('ordinary failure');
+      },
+      silentLogger,
+    );
+    const send = jest.fn(async () => {
+      expect(beforeExhaustion).toHaveBeenCalledTimes(1);
+    });
+    (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
+    const delivery = deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes());
+    if (fail) await expect(delivery).rejects.toThrow('history unreadable');
+    else await delivery;
+    expect(send).toHaveBeenCalledTimes(fail ? 0 : 1);
+  });
   it.each(['test.dlq', undefined])(
     'keeps a seen refusal through a different final error before DLQ %s',
     async (deadLetterTopic) => {

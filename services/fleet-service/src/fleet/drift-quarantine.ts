@@ -1,4 +1,5 @@
 import { EventHandlingUnconfirmedError, UnprocessableEventError } from '@rasta/nest-common';
+import { SOURCE_REFUSAL_HISTORY_TRANSACTION } from '../config/env';
 import { Prisma } from '../generated/prisma';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { driftEvidenceOwnerChangesTotal } from '@rasta/observability';
@@ -29,6 +30,7 @@ export interface SourceDriftCleanup {
 export async function quarantineTransaction<T>(
   transaction: (
     fn: (tx: ExtendedPrismaClient) => Promise<T | SourceDriftRefusal>,
+    options?: { timeoutMs: number; maxWaitMs: number },
   ) => Promise<T | SourceDriftRefusal>,
   eventId: string,
   fn: (tx: ExtendedPrismaClient) => Promise<T>,
@@ -89,9 +91,19 @@ export async function quarantineTransaction<T>(
     });
   } catch (error) {
     if (refused || evidenceCause) {
+      // Commit independently: neither a held seal nor a stale parked version can erase this.
+      // A failed/lost marker response keeps the existing evidence window fail-closed.
+      let cause = error;
+      await transaction(async (tx) => {
+        await tx.$executeRaw`INSERT INTO meter_refusal_history(event_hash)
+          VALUES (${sourceEventHash(eventId)}) ON CONFLICT DO NOTHING`;
+        return undefined as T;
+      }, SOURCE_REFUSAL_HISTORY_TRANSACTION).catch((failure: unknown) => {
+        cause = failure;
+      });
       // Seven pauses of at least 10s exceed tx2 (30s), tx1/pool and token release.
       // No seal dependency: missing gates and expired activation tokens need evidence too.
-      throw new EventHandlingUnconfirmedError('SOURCE_DRIFT_QUARANTINE_UNCONFIRMED', error, {
+      throw new EventHandlingUnconfirmedError('SOURCE_DRIFT_QUARANTINE_UNCONFIRMED', cause, {
         attempts: ACTIVATION_RETRY_ATTEMPTS,
         backoffMs: ACTIVATION_RETRY_BACKOFF_MS,
         persist: (lastError) =>
@@ -114,6 +126,9 @@ export async function quarantineTransaction<T>(
     throw new UnprocessableEventError(result.reason, result.reason);
   return result;
 }
+
+export const sourceEventHash = (value: string): string =>
+  createHash('sha256').update(value).digest('hex');
 
 /** Closed operator cause, stored in the HOLD's run_id slot (no sealed run is claimed). */
 export type SourceHoldCause = 'SOURCE_REFUSAL_UNCONFIRMED' | 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL';

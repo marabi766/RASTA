@@ -64,6 +64,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       'meter_drift_overflow',
       'meter_drift_quarantine',
       'meter_drift_capacity',
+      'meter_refusal_history',
       'processed_event',
       'outbox_message',
       'outbox_stream_sequence',
@@ -108,6 +109,12 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_activation_holder_guard
       BEFORE UPDATE ON "${schema}".meter_drift_capacity
       FOR EACH ROW EXECUTE FUNCTION public.meter_activation_holder_guard()`);
+    await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_refusal_history_fixed
+      BEFORE UPDATE OR DELETE ON "${schema}".meter_refusal_history
+      FOR EACH ROW EXECUTE FUNCTION public.meter_refusal_history_fixed()`);
+    await owner.client.$executeRawUnsafe(`CREATE TRIGGER meter_refusal_history_no_truncate
+      BEFORE TRUNCATE ON "${schema}".meter_refusal_history
+      FOR EACH STATEMENT EXECUTE FUNCTION public.meter_refusal_history_fixed()`);
     const role = decodeURIComponent(runtime.username).replaceAll('"', '""');
     await owner.client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`);
     await owner.client.$executeRawUnsafe(
@@ -224,6 +231,33 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       }),
     ).rejects.toThrow('ACTIVE_DRIFT_EVIDENCE_ROLLBACK_REFUSED');
   });
+  it('refusal history rollback refuses active rows; unreadable history prevents DLQ', async () => {
+    await prisma.client.$executeRaw`INSERT INTO meter_refusal_history VALUES (${'a'.repeat(64)})`;
+    for (const statement of ['DELETE FROM', 'UPDATE', 'TRUNCATE'])
+      await expect(
+        prisma.client.$executeRawUnsafe(
+          statement === 'UPDATE'
+            ? "UPDATE meter_refusal_history SET event_hash = repeat('b',64)"
+            : `${statement} meter_refusal_history`,
+        ),
+      ).rejects.toThrow('SOURCE_REFUSAL_HISTORY_FIXED');
+    const down = readFileSync(
+      join(__dirname, '../prisma/migrations/20261115100000_meter_refusal_history/down.sql'),
+      'utf8',
+    );
+    const guard = down.match(/DO \$\$ BEGIN[\s\S]*?END \$\$;/)?.[0];
+    if (!guard) throw new Error('history rollback guard missing');
+    await expect(
+      owner.transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+        await tx.$executeRawUnsafe(guard);
+      }),
+    ).rejects.toThrow('ACTIVE_REFUSAL_HISTORY_ROLLBACK_REFUSED');
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_refusal_history RENAME TO unavailable_history`,
+    );
+    await expect(new FleetRepository(prisma).holdRefusedExhaustion(id('EVT'))).rejects.toThrow();
+  });
   const events = () => prisma.client.outboxMessage.findMany({ where: { aggregateId: runId } });
   it.each([
     'token',
@@ -233,6 +267,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     'oversized',
     'missing-gate',
     'evidence-failed',
+    'redelivery',
   ])('transport keeps fleet evidence before DLQ after activation backoff: %s', async (mode) => {
     const sealed = await command.seal(runId, actor),
       repository = new FleetRepository(prisma);
@@ -261,7 +296,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       });
       await entered.ready;
     }
-    if (['token', 'spent-budget', 'token-clears', 'evidence-failed'].includes(mode))
+    if (['token', 'spent-budget', 'token-clears', 'evidence-failed', 'redelivery'].includes(mode))
       await setToken(randomUUID());
     if (mode === 'missing-gate') {
       await owner.client.$executeRawUnsafe(
@@ -274,6 +309,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         `ALTER TABLE "${schema}".meter_drift_overflow ADD CHECK(reason <> 'SOURCE_DRIFT_HOLD')`,
       );
     let calls = 0;
+    let redelivered = false;
     const transport = new EventConsumer(
       {
         brokers: ['localhost:9092'],
@@ -298,8 +334,10 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         deadLetterTopic: 'rasta.fleet.v1.dlq',
         maxRetries: 3,
         retryBackoffMs: 0,
+        beforeExhaustion: (event) => repository.holdRefusedExhaustion(event.eventId),
       },
       () => {
+        if (redelivered) throw new Error('ordinary infrastructure');
         if (mode === 'spent-budget' && ++calls <= 2) throw new Error('TEST_PRE_GATE');
         return repository.transaction(
           async (tx) => {
@@ -333,6 +371,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     const send = jest.fn().mockResolvedValue(undefined);
     dispatch.dlqProducer = { send };
     const pause = jest.spyOn(dispatch, 'pause').mockImplementation(async () => {
+      if (mode === 'redelivery' && !redelivered) throw new Error('rebalance');
       if (mode === 'token-clears' && pause.mock.calls.length === 7) await setToken(null);
       if (activation) {
         finish.release();
@@ -342,6 +381,15 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     const deliver = () =>
       dispatch.handleMessage('rasta.asset.v1', 0, Buffer.from(JSON.stringify(event)), undefined);
     try {
+      if (mode === 'redelivery') {
+        await expect(deliver()).rejects.toThrow('rebalance');
+        expect(send).not.toHaveBeenCalled();
+        expect(
+          await prisma.client.$queryRaw`SELECT count(*)::int AS n FROM meter_refusal_history`,
+        ).toEqual([{ n: 1 }]);
+        await setToken(null);
+        redelivered = true; // handleMessage starts with a fresh in-memory policy.
+      }
       if (mode === 'evidence-failed') {
         await expect(deliver()).rejects.toThrow();
         expect(send).not.toHaveBeenCalled();
@@ -367,7 +415,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       expect(await prisma.client.$queryRaw`SELECT * FROM processed_event`).toEqual([]);
       expect(await prisma.client.$queryRaw`SELECT * FROM asset_ref`).toEqual([]);
       if (mode === 'seal-lock') expect(pause.mock.calls[0][1]).toBeGreaterThanOrEqual(10_000);
-      else
+      else if (mode !== 'redelivery')
         expect(
           pause.mock.calls.slice(0, 7).reduce((sum, call) => sum + call[1], 0),
         ).toBeGreaterThan(35_000);
@@ -1598,6 +1646,8 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     'oversized-exhausted',
     'refused-then-ambiguous-exhausted',
     'refused-then-park-exhausted',
+    'refused-then-held-seal-exhausted',
+    'refused-then-version-exhausted',
   ];
   it.each(sweepFailures)('sweep drift %s', async (mode) => {
     const assetId = id('AST'),
@@ -1682,6 +1732,58 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     );
 
     const transaction = prisma.transaction.bind(prisma);
+    const held = latch(),
+      release = latch();
+    let holder: Promise<unknown> | undefined;
+    if (mode === 'refused-then-held-seal-exhausted') {
+      // Retained-image fence: current main exempts metadata-only updates. Prove history
+      // survives even when the legacy fenced latch still waits on the held seal.
+      await owner.client
+        .$executeRawUnsafe(`CREATE FUNCTION "${schema}".legacy_latch() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN PERFORM 1 FROM "${schema}".meter_inventory_seal FOR SHARE;
+        RETURN NEW; END $$`);
+      await owner.client.$executeRawUnsafe(`CREATE TRIGGER legacy_latch BEFORE UPDATE ON
+        "${schema}".insurance_pending_verification FOR EACH ROW EXECUTE FUNCTION "${schema}".legacy_latch()`);
+      const record = repository.recordParkedAttempt.bind(repository);
+      jest.spyOn(repository, 'recordParkedAttempt').mockImplementationOnce(async (tx, ...args) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '100ms'`;
+        return record(tx, ...args);
+      });
+      const answer = await verify();
+      verify.mockClear();
+      verify.mockImplementationOnce(async () => {
+        holder = prisma.transaction(
+          async (tx) => {
+            await tx.$queryRaw`SELECT id FROM meter_inventory_seal FOR UPDATE`;
+            held.release();
+            await release.ready;
+          },
+          { timeoutMs: 30_000 },
+        );
+        await held.ready;
+        return answer;
+      });
+    }
+    if (mode === 'refused-then-version-exhausted') {
+      const answer = await verify(),
+        decision = repository.transaction.bind(repository);
+      verify.mockClear();
+      verify.mockImplementationOnce(async () => {
+        jest.spyOn(repository, 'transaction').mockImplementationOnce(async (...args) => {
+          try {
+            return await decision(...args);
+          } catch (error) {
+            // Another worker commits after decision rollback, before the fallback gets its lock.
+            await new FleetRepository(prisma).transaction(async (tx) => {
+              await repository.lockAssetRef(tx, assetId);
+              await repository.recordParkedAttempt(tx, eventId, 'NO_ANSWER');
+            });
+            throw error;
+          }
+        });
+        return answer;
+      });
+    }
     if (mode === 'cleanup-failed')
       jest
         .spyOn(repository, 'deleteParkedInsurance')
@@ -1707,15 +1809,33 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       );
     try {
       if (mode.startsWith('refused-then-')) {
-        expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1 });
+        const first = await consumer.sweepParked();
+        release.release();
+        await holder;
+        expect(first.DEAD_LETTERED).toBe(0);
+        if (['refused-then-held-seal-exhausted', 'refused-then-version-exhausted'].includes(mode))
+          expect(
+            await prisma.client
+              .$queryRaw`SELECT reason, attempts FROM insurance_pending_verification`,
+          ).toEqual([
+            {
+              reason: mode.includes('version') ? 'NO_ANSWER' : 'TEST',
+              attempts: mode.includes('version') ? 1 : 0,
+            },
+          ]);
         expect(
-          await prisma.client
-            .$queryRaw`SELECT reason = 'SOURCE_REFUSAL_SEEN' AS refusal_seen FROM insurance_pending_verification`,
-        ).toEqual([{ refusal_seen: true }]);
-        await assertHoldDownRefuses();
+          await prisma.client.$queryRaw`SELECT count(*)::int AS n FROM meter_refusal_history`,
+        ).toEqual([{ n: 1 }]);
+        if (!['refused-then-held-seal-exhausted', 'refused-then-version-exhausted'].includes(mode))
+          expect(
+            await prisma.client
+              .$queryRaw`SELECT reason = 'SOURCE_REFUSAL_SEEN' AS refusal_seen FROM insurance_pending_verification`,
+          ).toEqual([{ refusal_seen: true }]);
+        if (!['refused-then-held-seal-exhausted', 'refused-then-version-exhausted'].includes(mode))
+          await assertHoldDownRefuses();
         await setToken(null);
         await prisma.transaction((tx) => repository.markParkedInsuranceDue(tx, assetId));
-        if (mode === 'refused-then-ambiguous-exhausted')
+        if (['refused-then-ambiguous-exhausted', 'refused-then-version-exhausted'].includes(mode))
           verify.mockImplementationOnce(async () => {
             jest.spyOn(prisma, 'transaction').mockImplementationOnce((fn, options) =>
               transaction(async (tx) => {
@@ -1725,7 +1845,11 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
             );
             throw new Error('upstream unavailable');
           });
-        else verify.mockRejectedValueOnce(new Error('upstream unavailable'));
+        else verify.mockRejectedValue(new Error('upstream unavailable'));
+        if (mode === 'refused-then-held-seal-exhausted') {
+          expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1 });
+          await prisma.transaction((tx) => repository.markParkedInsuranceDue(tx, assetId));
+        }
       }
       expect(await consumer.sweepParked()).toMatchObject({
         QUARANTINED: ['confirmed', 'inventory-sealed'].includes(mode) ? 1 : 0,
