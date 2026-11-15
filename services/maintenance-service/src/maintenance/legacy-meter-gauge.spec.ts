@@ -29,16 +29,25 @@ describe('legacy meter gauge lifecycle', () => {
     jest.useRealTimers();
   });
 
-  it('returns /metrics including other metrics within 100ms while the DB read stalls', async () => {
+  it('returns /metrics including other metrics while the DB read is still pending', async () => {
     const d = deferred();
-    gauge = makeGauge(() => d.promise);
+    const read = jest.fn(() => d.promise);
+    const readSettled = jest.fn();
+    void d.promise.then(readSettled);
+    gauge = makeGauge(read);
     const sampling = gauge.sample();
     const module = await Test.createTestingModule({ controllers: [MetricsController] }).compile();
     const app: INestApplication = module.createNestApplication();
     await app.init();
     usageReadingsAppliedTotal.inc({ service: 'maintenance-service' });
     try {
-      const response = await request(app.getHttpServer()).get('/metrics').timeout(100).expect(200);
+      // FU-360: the pending read proves independence; the timeout only bounds a hung response.
+      const response = await request(app.getHttpServer())
+        .get('/metrics')
+        .timeout(2_000)
+        .expect(200);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(readSettled).not.toHaveBeenCalled();
       expect(response.text).toMatch(/^rasta_maintenance_usage_readings_applied_total\{/m);
       expect(response.text).not.toMatch(/^maintenance_meter_legacy_assets /m);
     } finally {
