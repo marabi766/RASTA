@@ -1257,6 +1257,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       },
     );
     const outcome = await decision.catch(async (error: unknown): Promise<ParkedOutcome> => {
+      lettered = undefined; // This instance has no confirmed exhaustion commit yet.
       if (
         error instanceof UnprocessableEventError &&
         (error.reason === DLQ_REASONS.SOURCE_OWNER_DRIFT ||
@@ -1324,7 +1325,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
     });
 
     if (this.sweepStopped) return 'STOPPED';
-    if (lettered) {
+    if (outcome === 'DEAD_LETTERED' && lettered) {
       // Counted once committed: the relay publishes what the outbox holds.
       dlqMessagesTotal.inc({
         service: this.dlqMetricService,

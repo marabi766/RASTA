@@ -39,6 +39,7 @@ export {
   consumerExpected,
   eventValidationFailuresTotal,
   duplicateEventsTotal,
+  driftEvidenceOwnerChangesTotal,
   authorizationDenialsTotal,
   authenticationFailuresTotal,
   Counter,

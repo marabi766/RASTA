@@ -3326,10 +3326,10 @@
   },
   {
     "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
-    "line": 59,
-    "hash": "fe62bd4b4c035e2e62232d1e903cbc73eb56246e83d0eb1288c0144f90a631db",
+    "line": 68,
+    "hash": "0ef395e3a9273ec9560cd1d4e8340816db297902eb986edf6fb20a7ea2715cf6",
     "occurrence": 0,
-    "decision": "platform-wide: detects bounded durable overflow or its permanent activation hold under source/capacity locks; no tenant-facing evidence"
+    "decision": "platform-wide: checks bounded overflow and whether replay changed the first owner, under source/capacity locks; only a boolean reaches the owner-free metric, no tenant-facing evidence"
   },
   {
     "file": "services/fleet-service/src/fleet/meter-inventory.ts",
