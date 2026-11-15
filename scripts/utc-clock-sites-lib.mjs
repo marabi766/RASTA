@@ -1656,6 +1656,12 @@ export const REVIEWED_LITERALS = [
 export const REVIEWED_FUNCTIONS = [
   {
     service: 'fleet-service',
+    name: 'meter_drift_evidence_guard',
+    sha256: '9506b9030af2324f03ee0cb46fe07d0fc80aafcd0930eac00964a8f516bddefe',
+    why: 'Clock-free monotonic capacity guard and locked first-owner replay canonicalization; trusted TG_TABLE_SCHEMA is identifier-quoted, no EXECUTE or timestamp conversion.',
+  },
+  {
+    service: 'fleet-service',
     name: 'meter_drift_quarantine_guard',
     sha256: '517100e61d8b67db49d492541accbc2a6d1c93caf994388b03d705216c7b0975',
     why: 'Clock-free bounded append-only quarantine and durable activation barrier; trusted TG_TABLE_SCHEMA is identifier-quoted in schema-local set_config; no EXECUTE, expiry or timestamp conversion.',

@@ -226,6 +226,12 @@ export const eventValidationFailuresTotal = new Counter({
   registers: [registry],
 });
 
+export const driftEvidenceOwnerChangesTotal = new Counter({
+  name: 'rasta_drift_evidence_owner_changes_total',
+  help: 'Committed drift evidence duplicates with a changed live owner',
+  registers: [registry],
+});
+
 export const duplicateEventsTotal = new Counter({
   name: 'rasta_duplicate_events_total',
   help: 'Events skipped because they were already processed',

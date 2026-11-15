@@ -293,7 +293,8 @@ transfer, refresh, `.retry`, insurance parking and the parked sweep. It stores t
 event ID, asset, sealed owner (null for an unknown asset), named owner, reason,
 sealed run and database first-seen time. Identifier evidence is bounded to 256
 UTF-8 bytes per field; oversized evidence refuses persistence and enters bounded retry/DLQ handling. Entries are immutable and idempotent per
-event ID; conflicting reuse refuses `SOURCE_DRIFT_EVENT_CONFLICT`. All entries are
+event ID, asset, reason and run; conflicting reuse refuses `SOURCE_DRIFT_EVENT_CONFLICT`.
+The first named owner stays fixed; changed-owner redelivery increments `rasta_drift_evidence_owner_changes_total` only after confirmed commit, without owner labels. All entries are
 unresolved until the separate operator reconciliation slice exists.
 
 Atomicity uses a savepoint: fleet takes the seal's share lock before the event's
