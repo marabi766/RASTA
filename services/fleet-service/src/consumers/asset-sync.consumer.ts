@@ -1226,7 +1226,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
 
         const attempts = await this.repository.recordParkedAttempt(tx, eventId, decided.reason);
         if (attempts >= this.parking.maxAttempts) {
-          await this.repository.holdRefusedExhaustion(eventId, tx);
           if (row.refusalSeen)
             await this.repository.persistDriftHold(
               eventId,
@@ -1234,6 +1233,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
               'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
               tx,
             );
+          else await this.repository.holdRefusedExhaustion(eventId, assetId, tx);
           // One transaction: the dead letter is published exactly when the row
           // and the marker are gone (r9).
           await this.repository.enqueueDeadLetter(
@@ -1310,7 +1310,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
           this.parking.minAgeSeconds,
         );
         if (!row || row.attempts !== failed.attempts) return 'GONE';
-        await this.repository.holdRefusedExhaustion(eventId, tx);
+        await this.repository.holdRefusedExhaustion(eventId, assetId, tx);
         await this.repository.enqueueDeadLetter(
           tx,
           this.parkedDeadLetter(row, row.attempts, 'DECISION_FAILED'),

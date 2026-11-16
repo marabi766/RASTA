@@ -41,6 +41,7 @@ import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { DISPATCH_POLICY, type DispatchPolicy } from './fleet/dispatch-blocks';
 import { FleetRepository } from './fleet/fleet.repository';
+import { assetSourceSchema } from './fleet/events';
 import { DriverService } from './fleet/driver.service';
 import { LiveMembershipClient, MEMBERSHIP_SOURCE, type MembershipSource } from './fleet/membership';
 import { AssignmentService } from './fleet/assignment.service';
@@ -232,7 +233,13 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
                 // would see half the stream (docs/07 § 7.10).
                 groupId: ASSET_SYNC_GROUP,
                 rebalanceTimeoutMs: assetSyncRebalanceTimeoutMs(env),
-                beforeExhaustion: (event) => repository.holdRefusedExhaustion(event.eventId),
+                beforeExhaustion: (event) => {
+                  const asset = assetSourceSchema.safeParse(event.payload);
+                  return repository.holdRefusedExhaustion(
+                    event.eventId,
+                    asset.success ? asset.data.assetId : undefined,
+                  );
+                },
                 topics: CONSUMED_TOPICS,
                 deadLetterTopic: ASSET_SYNC_DEAD_LETTER_TOPIC,
                 // The replica reads from the start. A fleet that only knows
