@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import {
   executionChain,
@@ -13,8 +14,11 @@ import {
  * repository's copy asks here what a step may have put there since:
  *  - the SQL guard (utc-clock-sites-lib.mjs) for the file of a `psql -f`: a write of its own or
  *    an earlier step of the job that may reach the file (`stale`) leaves the site unresolved;
- *  - the shell reader (prisma-lifecycle-suppression-lib.mjs) is the next to ask (the second
- *    half of FU-340 part B): it shares the tokenizer's findings it reads past (`READ_PAST`).
+ *  - the shell reader (prisma-lifecycle-suppression-lib.mjs) for everything a step runs, uses,
+ *    builds or mounts, named or not (`pnpm` reads `.npmrc` and `package.json`, a build its whole
+ *    context): a step writes nothing into the checkout that this model reads but a reviewed
+ *    output (`writeProblems`). A command the model has no contract for (`command`) is the
+ *    reader's own to judge, by its policy; what such a program writes is not proven there.
  *
  * A target is `{ path }` (a path of the checkout, '' its root: a write to a directory is a write
  * to everything below it) or `{ unknown }`: it cannot be placed (computed, a pattern, absolute
@@ -41,6 +45,7 @@ import {
  * leaves that site unresolved), a path that reaches a file
  * through a link the repository holds, a service container given the workspace as a volume.
  */
+const sha256 = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const list = (text) => new Set(text.split(' ').filter(Boolean));
 const unknown = (text) => ({ unknown: text });
@@ -63,7 +68,9 @@ export const READ_PAST = new Set([
 const ELSEWHERE = /^\/(?:dev\/(?:null|stdout|stderr)|tmp\/[\w./-]+)$/;
 const RUNNER_WORD =
   /^"?\$\{?(?:GITHUB_(?:ENV|PATH|OUTPUT|STATE|STEP_SUMMARY)\}?|RUNNER_TEMP\}?(?:\/[\w.-]+)+)"?$/;
-const RUNNER_INPUT = /^(?:\$\{\{ runner\.temp \}\}(?:\/[\w.-]+)*|~\/\.[\w-][\w./-]*)$/;
+// under the home directory only its cache: `~/.npmrc`, `~/.config`, `~/.local/bin` are where a
+// program a step starts finds its startup file or another program
+const RUNNER_INPUT = /^(?:\$\{\{ runner\.temp \}\}(?:\/[\w.-]+)*|~\/\.cache\/[\w./-]+)$/;
 const climbs = (text) => text.split('/').includes('..');
 /** Where a written-out path lies, read from `cwd` (null: a directory this does not know). */
 function place(text, cwd) {
@@ -280,9 +287,14 @@ export function shellWrites(text, cwd = null, depth = 0) {
     else if (SHELL_WORD.test(name)) {
       const run = shellInvocation(rest, name);
       if (run.body) inner([run.body]);
-      else if (run.file) targets.push(unknown(`the script ${run.file.source}, which is not read`));
+      else if (run.file)
+        targets.push({
+          ...unknown(`the script ${run.file.source}, which is not read`),
+          command: name,
+        });
       else targets.push(unknown(run.problem ?? `what ${name} reads as commands`));
-    } else if (!quiet(name, rest)) targets.push(unknown(`what \`${name}\` writes`));
+    } else if (!quiet(name, rest))
+      targets.push({ ...unknown(`what \`${name}\` writes`), command: name });
   }
   return targets.filter(Boolean);
 }
@@ -415,4 +427,90 @@ export function stale(targets, path) {
   return hit.unknown !== undefined
     ? `a write to ${hit.unknown}, which this check cannot place, may have replaced it`
     : `a write to ${hit.path || 'the checkout'} may have replaced it`;
+}
+
+/**
+ * The run texts reviewed by hand, by sha256: every computed target of each lies outside the
+ * checkout. An edit to the text ends the review.
+ *  1. ci.yml "Secret scan": `tee "$SCAN_LOG"`, the `mktemp` file under `$RUNNER_TEMP`.
+ *  2. backup-drill-monthly.yml "Run the full drill": `"${dir}/…"`, `dir` being
+ *     `"${RUNNER_TEMP}/backup-drill"`, assigned once in the same text.
+ */
+export const REVIEWED_TEXTS = new Set([
+  'sha256:7d74b40b62548c6ae58e97165b4ebd77bc6792ad4a7d8c85ec296ef373c1e48a',
+  'sha256:5564580934f1389438d3f794a35676840ae13fedb65aaee631d8ce15ebb3e923',
+]);
+/**
+ * The computed inputs reviewed by hand, as `<file>: <action> <input>=<text>`: each names an
+ * output a step of the same file sets to a path under `$RUNNER_TEMP` (`ci-tool-download.mjs
+ * key`; the reviewed lines of the step `where`, which the caller hands on as `trivy-db`). The
+ * review is of that step too, by the sha256 of it as parsed: it stands once among the steps
+ * before the one that uses it (renamed, removed or moved after it, the expression is empty and
+ * the action writes its default place).
+ */
+export const REVIEWED_INPUTS = new Map([
+  [
+    '.github/actions/install-ci-tool/action.yml: actions/cache path=${{ steps.pin.outputs.archive }}',
+    'sha256:5e087b3d5f6d05f40cb8a7d1c94edfc70d6b65959417e779a7c3c921c8818188',
+  ],
+  [
+    '.github/actions/restore-trivy-db/action.yml: actions/download-artifact path=${{ steps.where.outputs.archive }}',
+    'sha256:a47b481968bc472fae1d8eecafe4c5e83f8c14bb4b831a7b6c8d998581bb855c',
+  ],
+  [
+    '.github/workflows/ci.yml: aquasecurity/trivy-action cache-dir=${{ steps.trivy-db.outputs.dir }}',
+    'sha256:95bcb70fbd9689c9e9de1f4d1649e9629f187828b2449161e6a0116887351454',
+  ],
+]);
+/**
+ * All a step may write inside the checkout: these paths and what lies below them. None is a
+ * file of the repository or holds one (the test holds the inventory to that), and no program a
+ * step starts reads one as its configuration.
+ *  - `.economic-coverage`: the coverage shards the merge job downloads and reports on.
+ */
+export const OUTPUTS = new Set(['.economic-coverage']);
+
+/**
+ * The shell reader's rule: why a step of `file` may not write what it writes. A target this
+ * cannot place is refused unless its text or its input is reviewed; a path of the checkout is
+ * refused unless it is a reviewed output. So nothing a later step of the job runs, uses,
+ * builds, mounts or reads as configuration, named or not, was put there by a step. `before`:
+ * the steps of the same list before this one.
+ */
+export function writeProblems(given, file, local, before = []) {
+  // the shell reader still reads `${{ env.NAME }}` as one computed word here, as its own rules
+  // do (`scriptProblems`): the model refuses every expression, and proving the value from the
+  // YAML for both readers is the next change (PM decision 2, its own PR)
+  const step =
+    record(given) && typeof given.run === 'string'
+      ? { ...given, run: given.run.replace(/\$\{\{ env\.\w+ \}\}/g, '$__workflow_env_expression') }
+      : given;
+  const producer = (value) => {
+    const id = /^\$\{\{ steps\.([\w-]+)\.outputs\.[\w-]+ \}\}$/.exec(value)?.[1];
+    const named = before.filter((earlier) => record(earlier) && earlier.id === id);
+    return named.length === 1 ? sha256(JSON.stringify(named[0])) : null;
+  };
+  const reviewed = new Set(
+    record(step) && REVIEWED_TEXTS.has(sha256(String(step.run)))
+      ? stepWrites(step, local).map((target) => target.unknown)
+      : Object.entries(record(step?.with) ? step.with : {})
+          .filter(([key, value]) => {
+            const input = `${file}: ${String(step.uses).split('@')[0]} ${key}=${value}`;
+            return REVIEWED_INPUTS.has(input) && REVIEWED_INPUTS.get(input) === producer(value);
+          })
+          .map(([, value]) => String(value)),
+  );
+  const problems = new Set();
+  for (const { unknown: text, path, command } of stepWrites(step, local))
+    // a command the model has no contract for (`command`) is the reader's own to judge: there it
+    // is a program of its policy, a reviewed line or a file of the inventory, or it is refused
+    if (command !== undefined) continue;
+    else if (text !== undefined) {
+      if (!reviewed.has(text))
+        problems.add(`may write ${text}, which this check cannot tell from the checkout`);
+    } else if (![...OUTPUTS].some((output) => path === output || path.startsWith(`${output}/`)))
+      problems.add(
+        `writes ${path || 'the checkout'}: a step writes into the checkout only the outputs reviewed in OUTPUTS`,
+      );
+  return [...problems];
 }

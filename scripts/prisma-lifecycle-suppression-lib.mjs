@@ -10,7 +10,7 @@ import {
   readShell,
 } from './ci-shell-policy-lib.mjs';
 import { parseCommands, SHELL_WORD } from './ci-shell-text-lib.mjs';
-import { READ_PAST } from './ci-write-targets-lib.mjs';
+import { READ_PAST, writeProblems } from './ci-write-targets-lib.mjs';
 
 /**
  * No dependency lifecycle hook generates the Prisma client (FU-329).
@@ -47,8 +47,10 @@ import { READ_PAST } from './ci-write-targets-lib.mjs';
  * reader's own limits): what a listed program (`node x.mjs`, `curl`, `mc`, a repository script,
  * a reviewed action, an image's own entry point, a `package.json` script) does with the
  * environment and the operands it was given; what a variable holds where a reviewed line uses
- * it; what a program reads from a variable outside `PROTECTED`; a file a step wrote before it
- * is run or read as configuration. PR #1100 r1 (F1 containers and services, F2 directories, F3
+ * it; what a program reads from a variable outside `PROTECTED`; what a listed program itself
+ * writes into the checkout. FU-340 part B: a step writes nothing into the checkout that the
+ * shared model (ci-write-targets-lib.mjs) can see but a reviewed output, so a file a later step
+ * runs or reads as configuration is still the repository's. PR #1100 r1 (F1 containers and services, F2 directories, F3
  * the computed matrix) and FU-340 part A (a `cd` that may not have run, one record per write to
  * an environment file, protected names in an `env`) are closed by refusal at the places marked.
  *
@@ -84,26 +86,57 @@ const REPO_FILE = /^(?:scripts|infrastructure)\/(?!.*\.\.)[\w./-]+$/;
  * The names no text binds but a reviewed line (r1 F3): a package manager option as a variable
  * (`pnpm_config_<setting>`), the search path, a shell's startup file, everything the runner
  * itself sets (`GITHUB_*`), and what the reviewed environment-file lines are written from.
- * FU-340 (PM): an `env` mapping or an ENV/ARG sets none of them, nor the two names that tell
- * `node` which code to load, but as a pair reviewed in `ENV_PAIRS`.
+ * FU-340 (PM): shell text, an `env` mapping and an ENV/ARG set none of them but as a pair
+ * reviewed in `ENV_PAIRS` or `DOCKER_ENV`. #1118 F4, by family and not by name: what makes a
+ * program a step starts load code or a startup file that is not the repository's: the dynamic
+ * loader (`LD_*`), bash (`BASH*`, `SHELLOPTS`, `PS4`, `IFS`), git (`GIT_*`: its ssh command, its
+ * configuration, its helpers), `node` (every `NODE_*`), `go` (`GO…`, `CGO_*`: flags, toolchain,
+ * compiler, `CC`, `CXX`), `openssl` (`OPENSSL_*`: its configuration loads modules), `docker`
+ * (`DOCKER_*`: its plugins and helpers), `gitleaks` (`GITLEAKS_CONFIG*`: its rules), what `pnpm`
+ * starts (`TURBO_*`, `PRISMA_*` but the one this check is about, `COREPACK_*`, `PLAYWRIGHT_*`,
+ * any `*_BINARY_PATH`), the startup files of `psql` and `curl`, and where every one of them
+ * looks for its own (`HOME`, `XDG_*`) or `mktemp` puts a file (`TMPDIR`); and `INPUT_*`, the
+ * form an action reads its inputs in (they are given in `with`, where they are read). A list of
+ * families is not closed: a name outside it that a program reads is not refused.
  */
 const PROTECTED = /^(?:p?npm_config_\w*|PATH|CDPATH|BASH_ENV|ENV|GITHUB_\w*|RUNNER_TEMP)$/i;
-const loads = (name) => `sets ${name}: what node loads is not text's to set`;
+const LOADED =
+  /^(?:LD_\w+|BASH\w*|SHELLOPTS|PS\d|IFS|HOME|XDG_\w+|TMPDIR|GIT_\w+|GO[A-Z\d]+|CGO_\w+|CC|CXX|OPENSSL_\w+|DOCKER_\w+|GITLEAKS_CONFIG\w*|TURBO_\w+|PRISMA_(?!SKIP_POSTINSTALL_GENERATE$)\w+|COREPACK_\w+|PLAYWRIGHT_\w+|\w+_BINARY_PATH|PSQLRC|CURL_HOME|INPUT_\w+)$/i;
 const unassignable = (name) =>
   PROTECTED.test(name)
     ? `sets ${name}: a package manager option, the search path or an environment file is not text's to set`
-    : /^NODE_(?:OPTIONS|PATH)$/i.test(name)
-      ? loads(name)
+    : LOADED.test(name) || /^NODE_/i.test(name)
+      ? `sets ${name}: what ${/^NODE_/i.test(name) ? 'node' : 'a program'} loads is not text's to set`
       : null;
-/** Shell text binds none of those, nor any other `NODE_*` name (PM, `node FILE`). */
-const unbindable = (name) => unassignable(name) ?? (/^NODE_/i.test(name) ? loads(name) : null);
 /**
- * FU-340: the only settings of a protected name in a YAML `env`, each as `<path>: NAME=value`
- * with the value as written. The repository holds none today, so none is listed.
+ * FU-340: the only settings of a protected name in a YAML `env`, each with the value as written.
+ * #1118 F3: a pair is reviewed for one level of one file, `<path>: <level>: NAME=value`, the
+ * level being `workflow`, `job`, `step` or `service`: what a service container may be given is
+ * not thereby given to every step. None names code to load: the major version
+ * `actions/setup-node` installs, the mode the services and their tests start in, and `go`
+ * refusing to change go.mod or to fetch another toolchain (trivy-db-check).
  */
-export const ENV_PAIRS = new Set();
-/** The one instruction that sets a protected name: every image puts pnpm's home on the path. */
-const DOCKER_PATH = 'ENV PATH="$PNPM_HOME:$PATH"';
+export const ENV_PAIRS = new Set([
+  '.github/workflows/ci.yml: workflow: NODE_VERSION=22',
+  '.github/workflows/backup-drill-monthly.yml: workflow: NODE_VERSION=22',
+  '.github/workflows/ci.yml: step: NODE_ENV=test',
+  '.github/workflows/ci.yml: step: GOFLAGS=-mod=readonly',
+  '.github/workflows/ci.yml: step: GOTOOLCHAIN=local',
+]);
+/** The instructions that set a protected name: every image puts pnpm's home on the path and runs in production mode. */
+const DOCKER_ENV = new Set(['ENV PATH="$PNPM_HOME:$PATH"', 'ENV NODE_ENV=production']);
+/**
+ * #1118 F2: the runner's own files are named in a reviewed line of shell text (`ENV_FILE`),
+ * never handed on as a value: `OUT: ${{ github.env }}` then `>> "$OUT"` wrote records no line
+ * here had read. In an expression `github` is followed by a written-out member that is none of
+ * the four; an index, a call on the whole context or one of them may be such a file. Where an
+ * expression ends is not read (`}}` may stand in a string of it): the value from the first on.
+ */
+const RUNNER_FILE = /\bgithub\b(?!\s*\.\s*(?!(?:env|path|output|state)\b)[a-z_])/i;
+const handsOnRunnerFile = (value) =>
+  typeof value === 'string' &&
+  value.includes('${{') &&
+  RUNNER_FILE.test(value.slice(value.indexOf('${{')));
 const sha256 = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
 /**
  * A program that runs what it is given is read only as the lines reviewed here (D-173, in place
@@ -331,7 +364,7 @@ function hostPolicy(files, cwd) {
     REPO_FILE.test(path) && !state.moved && files.has(`${state.cwd && `${state.cwd}/`}${path}`)
       ? null
       : 'is not a file of the inventory, run from the directory the text starts in';
-  const policy = { tolerated: READ_PAST, unlisted: UNLISTED, name: unbindable, cwd, file };
+  const policy = { tolerated: READ_PAST, unlisted: UNLISTED, name: unassignable, cwd, file };
   policy.programs = {
     ...verbs(
       'if then elif else fi for while until do done break ! [ { } true test exit echo cat tail tee ' +
@@ -480,7 +513,7 @@ export function dockerfileLifecycle(name, text) {
       // One written-out name per instruction, and a protected one only by the reviewed text.
       if (!/^[A-Za-z_]\w*(?:=\S*)?$/.test(rest))
         refuse(`${keyword} ${clip(rest)} is not a form this check reads`);
-      else if (unassignable(rest.split('=')[0]) && `${keyword} ${rest}` !== DOCKER_PATH)
+      else if (unassignable(rest.split('=')[0]) && !DOCKER_ENV.has(`${keyword} ${rest}`))
         refuse(`${keyword} ${clip(rest)} ${unassignable(rest.split('=')[0])}`);
       if (/PATH/.test(rest)) replaced = true;
     } else if (keyword === 'RUN') {
@@ -533,14 +566,23 @@ function readYaml(name, text) {
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const CALL_KEYS = new Set('name uses permissions needs if strategy with concurrency'.split(' '));
 
+/** #1118 F2: no value of an `env` or a `with` mapping hands on a file the runner reads. */
+const handsOn = (where, kind, mapping, errors) => {
+  for (const [name, value] of Object.entries(record(mapping) ? mapping : {}))
+    if (handsOnRunnerFile(value))
+      errors.push(
+        `${where}: ${kind} ${clip(name)} hands on github.env, github.path, github.output or github.state: a write to it is not one of the reviewed lines`,
+      );
+};
 /**
  * `env` is a mapping written in the file, or it can hold anything (`env: ${{ fromJSON(…) }}`);
- * and it sets no protected name but as a pair reviewed for the file `path` (`ENV_PAIRS`), at
- * every level: workflow, job, step, service, a composite action's step.
+ * and it sets no protected name but as a pair reviewed for this `level` of the file `path`
+ * (`ENV_PAIRS`), at every level: workflow, job, step, service, a composite action's step.
  */
-const readsEnv = (where, owner, errors, path) => {
+const readsEnv = (where, owner, errors, path, level) => {
   if (owner.env === undefined) return true;
   if (!record(owner.env)) return !errors.push(`${where}: env is not a mapping this check reads`);
+  handsOn(where, 'env', owner.env, errors);
   for (const [name, value] of Object.entries(owner.env))
     if (!/^[A-Za-z_]\w*$/.test(name) || (value !== null && typeof value === 'object'))
       errors.push(
@@ -548,7 +590,7 @@ const readsEnv = (where, owner, errors, path) => {
       );
     else if (
       unassignable(name) &&
-      !(typeof value === 'string' && ENV_PAIRS.has(`${path}: ${name}=${value}`))
+      !(typeof value === 'string' && ENV_PAIRS.has(`${path}: ${level}: ${name}=${value}`))
     )
       errors.push(`${where}: env ${unassignable(name)}`);
   return true;
@@ -681,21 +723,25 @@ function outsideSteps(where, job, errors, path) {
       !(command === undefined || command === SERVICE_COMMAND)
     )
       errors.push(`${where}: service ${clip(id)} has a key, options or a command not reviewed`);
-    else readsEnv(`${where}: service ${id}`, service, errors, path);
+    else readsEnv(`${where}: service ${id}`, service, errors, path, 'service');
   }
 }
 
 /**
  * Problems of the steps themselves: an unknown shell, an opaque `env`, a script that is not
  * proven, an action nobody reviewed, a build of a file outside the inventory `files`
- * (`file: Containerfile`, `/tmp/Dockerfile`, `${{ env.ROOT }}/Dockerfile`). `matrix` is the job's.
+ * (`file: Containerfile`, `/tmp/Dockerfile`, `${{ env.ROOT }}/Dockerfile`). `matrix` is the job's;
+ * `before`, the steps of the same list before this one.
  */
-function stepProblems(path, where, step, errors, commands, files, matrix, composite = false) {
+function stepProblems(path, where, step, errors, commands, files, matrix, before, composite) {
   if (!record(step)) return void errors.push(`${where} is not a mapping`);
   const refuse = (problem) => errors.push(`${where}: ${problem}`);
-  readsEnv(where, step, errors, path);
+  readsEnv(where, step, errors, path, 'step');
+  handsOn(where, 'with', step.with, errors);
   const { problem } = effectiveShell({ step, composite: composite && step.run !== undefined });
   if (problem) refuse(problem);
+  // FU-340 part B: a local action's own steps are read, each as a step, where its file is read
+  writeProblems(step, path, () => [], before).forEach(refuse);
   if (step.uses !== undefined) usesProblems(step, matrix, files).forEach(refuse);
   else if (step.with !== undefined) refuse('with is given to no action');
   if (step.run === undefined) return;
@@ -723,8 +769,8 @@ export function workflowLifecycle(name, text, workflows = {}, files = new Set(),
   const workflow = read.value;
   let settings = 0;
   // Set at this level, or not; a value other than the string 'true' is refused, never read past.
-  const sets = (where, owner, isStep) => {
-    if (!isStep && !readsEnv(where, owner, errors, name)) return false;
+  const sets = (where, owner, level) => {
+    if (level && !readsEnv(where, owner, errors, name, level)) return false;
     if (!record(owner.env) || !Object.hasOwn(owner.env, VARIABLE)) return false;
     settings += 1;
     if (owner.env[VARIABLE] === 'true') return true;
@@ -733,12 +779,13 @@ export function workflowLifecycle(name, text, workflows = {}, files = new Set(),
   };
   if (!record(workflow) || !record(workflow.jobs) || Object.keys(workflow.jobs).length === 0)
     return { errors: [`${name}: no jobs were read`], commands };
-  const everywhere = sets(name, workflow);
+  const everywhere = sets(name, workflow, 'workflow');
   const unread = effectiveShell({ workflow }).problem ?? effectiveDirectory({ workflow }).problem;
   if (unread) errors.push(`${name}: ${unread}`);
   for (const [id, job] of Object.entries(workflow.jobs)) {
     const where = `${name}: job ${id}`;
     if (record(job) && Object.hasOwn(job, 'uses')) {
+      handsOn(where, 'with', job.with, errors);
       const target =
         typeof job.uses === 'string' && /^\.\/\.github\/workflows\/[\w-]+\.ya?ml$/.test(job.uses)
           ? job.uses.slice(2)
@@ -774,11 +821,12 @@ export function workflowLifecycle(name, text, workflows = {}, files = new Set(),
       producerOf(workflow.jobs) !== MATRIX.producer
     )
       errors.push(`${where}: the matrix is not computed by the producer reviewed in MATRIX`);
-    const inJob = sets(where, job);
+    const inJob = sets(where, job, 'job');
     for (const [index, step] of job.steps.entries()) {
       const at = `${where} step ${index + 1}`;
-      stepProblems(name, at, step, errors, commands, files, job.strategy?.matrix);
-      const inStep = record(step) && sets(at, step, true);
+      const before = job.steps.slice(0, index);
+      stepProblems(name, at, step, errors, commands, files, job.strategy?.matrix, before);
+      const inStep = record(step) && sets(at, step);
       if (!everywhere && !inJob && !inStep)
         errors.push(
           `${at} runs without ${VARIABLE}: 'true' in its workflow, job or step env: ` +
@@ -804,8 +852,20 @@ export function actionLifecycle(name, text, _workflows, files = new Set()) {
   const runs = record(read.value) ? read.value.runs : undefined;
   if (!record(runs) || runs.using !== 'composite' || !Array.isArray(runs.steps))
     return { errors: [`${name}: not a composite action this check reads`], commands };
-  for (const [index, step] of runs.steps.entries())
-    stepProblems(name, `${name}: step ${index + 1}`, step, errors, commands, files, null, true);
+  for (const [index, step] of runs.steps.entries()) {
+    const before = runs.steps.slice(0, index);
+    stepProblems(
+      name,
+      `${name}: step ${index + 1}`,
+      step,
+      errors,
+      commands,
+      files,
+      null,
+      before,
+      true,
+    );
+  }
   if (read.named !== 0)
     errors.push(`${name}: an action inherits ${VARIABLE} from its caller and may not name it`);
   return { errors, commands };

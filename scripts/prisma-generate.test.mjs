@@ -6,10 +6,20 @@ import { fileURLToPath } from 'node:url';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { generate, schemaArgs } from './prisma-generate.mjs';
 import { createHash } from 'node:crypto';
+import { parseDocument } from 'yaml';
 import { dockerRun, effectiveShell, readOptions, readShell } from './ci-shell-policy-lib.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
 import * as lifecycleLib from './prisma-lifecycle-suppression-lib.mjs';
-import { jobWrites, shellWrites, stale, stepWrites } from './ci-write-targets-lib.mjs';
+import {
+  jobWrites,
+  OUTPUTS,
+  REVIEWED_INPUTS,
+  REVIEWED_TEXTS,
+  shellWrites,
+  stale,
+  stepWrites,
+  writeProblems,
+} from './ci-write-targets-lib.mjs';
 
 const { CONTAINER_SCRIPTS, ENV_PAIRS, MATRIX, MOUNTS, lifecycleFileKind } = lifecycleLib;
 // FU-334: every file a step runs, uses or builds is a member of this inventory, read once.
@@ -543,7 +553,7 @@ test('shell text that could drop the suppression is refused wherever it runs', (
     'export PGHOST=localhost PGPORT="$port"\nunset KAFKA_SECRETS_DIR',
     'x_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"\neval "${x_credentials}"',
     'echo "dir=$RUNNER_TEMP/trivy-db" >> "$GITHUB_OUTPUT"',
-    'if ! command -v gitleaks >/dev/null 2>&1; then pnpm exec turbo run build | tee out.log; fi',
+    'if ! command -v gitleaks >/dev/null 2>&1; then pnpm exec turbo run build | tee /tmp/out.log; fi',
     "docker run --rm --entrypoint sh image@sha256:0 -c 'clamd --version; ls -l /var/lib/clamav/'",
   ])
     everywhere(script, null, true);
@@ -872,7 +882,7 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
   ])
     for (const errors of steps(script))
       assert.match(errors, /a line continuation inside an operator is not read/, script);
-  for (const script of ['echo ok &&\\\necho ok', 'echo ok \\\n&& echo ok', 'echo ok >\\\nlog'])
+  for (const script of ['echo ok &&\\\necho ok', 'echo ok \\\n&& echo ok', 'echo ok >\\\n/tmp/log'])
     assert.deepEqual(steps(script), ['', ''], script);
   const unreviewed = /writes the environment of later steps in a line this check has not reviewed/;
   for (const script of [
@@ -913,9 +923,45 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
   ];
   const errors = (text, path = 'new.yml') => workflowLifecycle(path, text).errors.join('\n');
   const sets = (name) => new RegExp(`env sets ${name}: `);
-  for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV', 'PATH', 'GITHUB_TOKEN'])
+  // #1118 F4: by family, what makes a program a step starts load code that is not the repository's
+  const LOADED =
+    'NODE_OPTIONS NODE_PATH NODE_ENV NODE_EXTRA_CA_CERTS BASH_ENV ENV PATH GITHUB_TOKEN LD_PRELOAD ' +
+    'LD_LIBRARY_PATH LD_AUDIT SHELLOPTS BASHOPTS PS4 IFS GIT_SSH_COMMAND GIT_SSH GIT_CONFIG_COUNT ' +
+    'GIT_CONFIG_GLOBAL GIT_CONFIG GIT_EXEC_PATH PSQLRC CURL_HOME GOFLAGS GOTOOLCHAIN GOPATH ' +
+    'CGO_CFLAGS OPENSSL_CONF OPENSSL_MODULES DOCKER_CONFIG DOCKER_HOST HOME XDG_CONFIG_HOME TMPDIR ' +
+    'CC CXX GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML TURBO_TEAM TURBO_BINARY_PATH PRISMA_QUERY_ENGINE_LIBRARY ' +
+    'COREPACK_HOME PLAYWRIGHT_BROWSERS_PATH ESBUILD_BINARY_PATH INPUT_PATH INPUT_REF';
+  for (const name of LOADED.split(' ')) {
     for (const text of levels(`${name}: x`)) assert.match(errors(text), sets(name), text);
-  for (const text of levels('NODE_ENV: test')) assert.equal(errors(text), '', text);
+    everywhere(`${name}=x echo ok`, new RegExp(`sets ${name}: `));
+  }
+  // after a control word or a wrapper that no command follows, an assignment is the shell's own
+  for (const script of [
+    '{ PATH=/tmp/bin:$PATH; }',
+    'if true; then HOME=/tmp/h; fi',
+    'if true; then echo ok; else HOME=/tmp/h; fi',
+    'while PATH=x; do break; done',
+    'for a in 1; do PATH=x; done',
+    '! IFS=x',
+    'time PATH=x',
+    '{ A=1 PATH=x; }',
+  ])
+    everywhere(script, /sets (?:PATH|HOME|IFS): /);
+  for (const script of ['{ dir=/tmp/x; }', 'if true; then status=1; fi', 'echo PATH=x'])
+    everywhere(script, null, true);
+  for (const entry of [
+    'NODEX: x',
+    'GITLAB_TOKEN: x',
+    'LD: x',
+    'PS: x',
+    'GO_LIVE: x',
+    'HOMEPAGE: x',
+    'ACC: x',
+    'GITLEAKS_TEST_BINARY: x',
+    'BINARY_PATH: x',
+    'INPUT: x',
+  ])
+    for (const text of levels(entry)) assert.equal(errors(text), '', text);
   for (const entry of ['<<: { NODE_OPTIONS: x }', 'A: [NODE_OPTIONS]', 'A-B: x'])
     for (const text of levels(entry)) assert.match(errors(text), /is not a name with one value/);
   const composite = `${repoText(ENTRY.action)}    - shell: bash\n      env:\n        NODE_OPTIONS: x\n      run: echo ok\n`;
@@ -924,6 +970,11 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
     'ENV NODE_OPTIONS=-r/tmp/x.js',
     'ARG NODE_PATH=/tmp',
     'ENV GITHUB_X=1',
+    'ENV LD_PRELOAD=/tmp/x.so',
+    'ARG GIT_SSH_COMMAND=x',
+    'ENV NODE_ENV=development',
+    'ARG NODE_ENV=production',
+    'ENV BASHOPTS=x',
   ])
     refused(
       dockerfileLifecycle,
@@ -933,24 +984,87 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
         'ENV PNPM_HOME=/pnpm\n',
         `ENV PNPM_HOME=/pnpm\n${instruction}\n`,
       ),
-      /what node loads|an environment file is not text's to set/,
+      /what (?:node|a program) loads|an environment file is not text's to set/,
     );
   everywhere('GITHUB_TOKEN=x echo ok', /sets GITHUB_TOKEN: /);
-  assert.equal(ENV_PAIRS.size, 0, 'the repository sets no protected name in an env today');
+  // #1118 F3: a pair is reviewed for ONE level of one file: at any other level it is refused.
+  // The real pairs each still stand in their file at their level, with a name that loads no code.
+  const real = [...ENV_PAIRS];
+  for (const pair of real) {
+    const [, path, level, name, value] =
+      pair.match(/^(\S+): (workflow|job|step|service): (NODE_VERSION|NODE_ENV|GO[A-Z]+)=(\S+)$/) ??
+      [];
+    const at = { workflow: '^', job: '^    ', step: '^        ', service: '^        ' }[level];
+    assert.match(
+      repoText(path),
+      new RegExp(`${at}env:\\n(?:${at} .*\\n)*?${at}  ${name}: '?${value}'?$`, 'm'),
+      pair,
+    );
+  }
   const memory = 'NODE_OPTIONS: --max-old-space-size=4096';
-  ENV_PAIRS.add('new.yml: NODE_OPTIONS=--max-old-space-size=4096').add('new.yml: NODE_PATH=1');
   try {
-    for (const text of levels(memory)) assert.equal(errors(text), '', text);
-    for (const text of levels(memory))
-      assert.match(errors(text, 'other.yml'), sets('NODE_OPTIONS'));
-    for (const text of levels(`${memory} -r /tmp/x.js`))
-      assert.match(errors(text), sets('NODE_OPTIONS'));
-    for (const text of levels('NODE_PATH: 1')) assert.match(errors(text), sets('NODE_PATH'));
-    for (const text of levels(memory.replace('OPTIONS', 'PATH')))
-      assert.match(errors(text), sets('NODE_PATH'));
+    for (const [reviewed, level] of ['workflow', 'job', 'step', 'service'].entries()) {
+      ENV_PAIRS.clear();
+      ENV_PAIRS.add(`new.yml: ${level}: NODE_OPTIONS=--max-old-space-size=4096`);
+      ENV_PAIRS.add(`new.yml: ${level}: NODE_PATH=1`);
+      for (const [at, text] of levels(memory).entries()) {
+        if (at === reviewed) assert.equal(errors(text), '', text);
+        else assert.match(errors(text), sets('NODE_OPTIONS'), `${level}: ${text}`);
+        assert.match(errors(text, 'other.yml'), sets('NODE_OPTIONS'));
+      }
+      for (const text of levels(`${memory} -r /tmp/x.js`))
+        assert.match(errors(text), sets('NODE_OPTIONS'));
+      for (const text of levels('NODE_PATH: 1')) assert.match(errors(text), sets('NODE_PATH'));
+      for (const text of levels(memory.replace('OPTIONS', 'PATH')))
+        assert.match(errors(text), sets('NODE_PATH'));
+    }
+    // a pair without its level (the form before #1118 F3) admits nothing
+    ENV_PAIRS.clear();
+    ENV_PAIRS.add('new.yml: NODE_OPTIONS=--max-old-space-size=4096');
+    for (const text of levels(memory)) assert.match(errors(text), sets('NODE_OPTIONS'), text);
   } finally {
     ENV_PAIRS.clear();
+    for (const pair of real) ENV_PAIRS.add(pair);
   }
+
+  // #1118 F2: a value of an `env` or a `with` hands on no file the runner reads, at every level.
+  const handsOn = /hands on github\.env, github\.path, github\.output or github\.state/;
+  const context = (member) => `OUT: \${{ ${member} }}`;
+  for (const member of [
+    'github.env',
+    'github.path',
+    'github.output',
+    'github.state',
+    'GITHUB.ENV',
+    'github . env',
+    "github['env']",
+    "github[format('{0}', 'env')]",
+    'toJSON(github)',
+    "format('{0}', github.env)",
+    "format('}}', github.env)",
+    "'a' }}/x${{ github.env",
+    'github.sha || github.env',
+  ]) {
+    for (const text of levels(context(member))) assert.match(errors(text), handsOn, text);
+    const used = workflow(
+      '',
+      '',
+      `      - uses: actions/cache@v4\n        with:\n          key: \${{ ${member} }}\n          path: /tmp/x\n`,
+    );
+    assert.match(errors(used), handsOn, used);
+    const called = `on: push\njobs:\n  call:\n    uses: ./.github/workflows/ci.yml\n    with:\n      out: \${{ ${member} }}\n`;
+    assert.match(errors(called), handsOn, called);
+  }
+  for (const member of [
+    'github.sha',
+    'github.event.before',
+    'github.event.path',
+    'github.environment',
+    'github.path_x',
+    'runner.temp',
+  ])
+    for (const text of levels(context(member))) assert.equal(errors(text), '', text);
+  for (const text of levels('OUT: github.env')) assert.equal(errors(text), '', text);
 
   // After a `cd`, only what `&&` joins to it is read as run there: the `cd` ran, and succeeded.
   const [cd, node] = ['cd services/api-gateway', 'node dist/main.js'];
@@ -1003,7 +1117,7 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
   for (const errors of steps(`true || # c\n\n${cd} && ${node}`)) assert.match(errors, line);
   for (const script of [
     `${cd} && ${node}`,
-    `${cd} 2>/dev/null && echo "$(true; true)" && { ${node} | tee log; }`,
+    `${cd} 2>/dev/null && echo "$(true; true)" && { ${node} | tee /tmp/log; }`,
     // under a condition too: what `&&` joins to the `cd` runs there whenever it runs
     `if true\nthen\n${cd} && ${node}\nfi`,
     `for i in 1 2; do echo ok; done\n${cd} &&\n${node}`,
@@ -1274,6 +1388,8 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['actions/download-artifact', { path: ' \n' }, ['?  \n']],
     ['aquasecurity/trivy-action', { 'cache-dir': '' }, ['? an empty path']],
     ['actions/cache', { key: 'k', path: '~/.cache/.. ' }, ['? ~/.cache/..']],
+    ['actions/cache', { key: 'k', path: '~/.npmrc' }, ['? ~/.npmrc']],
+    ['actions/cache', { key: 'k', path: '~/.cache' }, ['? ~/.cache']],
     ['actions/cache', { key: 'k', path: '${{ runner.temp }}/..\t' }, ['? ${{ runner.temp }}/..']],
     ['actions/cache', { key: 'k', path: '~/.cache/x\nnode_modules\n' }, ['node_modules']],
     ['actions/cache', { key: 'k', path: 7 }, ['? 7']],
@@ -1391,6 +1507,172 @@ test('the write-target model places every write of a step, or it is unknown (FU-
   assert.deepEqual(jobWrites({ run: 'echo a > x' }).map(show), ['? steps that are not a list']);
 });
 
+// FU-340 part B, the shell reader: before it a step could write a script or a configuration
+// file and a later command ran or read it as the repository's.
+test('a step writes into the checkout only a reviewed output (FU-340 part B)', () => {
+  // the shell reader: a workflow step and an action step write nothing a later command runs or reads
+  const reviewedOnly = /a step writes into the checkout only the outputs reviewed in OUTPUTS/;
+  const unplaced = /which this check cannot tell from the checkout/;
+  for (const [script, pattern] of [
+    // the script a step then runs; the configuration a program reads, named by no later word
+    [
+      'echo ok > scripts/ci-pull-image.sh\nscripts/ci-pull-image.sh x',
+      /writes scripts\/ci-pull-image\.sh: /,
+    ],
+    ['echo "script-shell=/tmp/x" >> .npmrc\npnpm install --frozen-lockfile', /writes \.npmrc: /],
+    ['echo ok | tee infrastructure/docker/clamav/clamd.conf', reviewedOnly],
+    ['curl -fsSo scripts/ci-pull-image.sh https://example.org/x', reviewedOnly],
+    ['curl -fsSO https://example.org/x', /writes the checkout: /],
+    ["bash -c 'echo ok > package.json'", /writes package\.json: /],
+    ['echo ok > new-file', /writes new-file: /],
+    ['echo ok > .economic-coverage2/x.json', /writes \.economic-coverage2\/x\.json: /],
+    ['echo ok > .economic-coverage/../package.json', unplaced],
+    // only `${{ env.NAME }}` is read as one computed word: any other expression may be a write
+    ['echo ${{ github.sha }} > /tmp/x', /may write what an expression pastes in, which/],
+    ['echo ok > "$OUT"', unplaced],
+    ['echo ok > "${dir}/x"', unplaced],
+    ['echo ok > /home/runner/work/x', unplaced],
+    ['cd services/api-gateway && node dist/main.js > log', unplaced],
+    // PR #1130 r1 F1: a second destination is no command of the reader's policy to judge
+    [
+      'tee --suffix=.bak /tmp/x; cp -b /tmp/a /tmp/b',
+      /may write a second destination no word names, which/,
+    ],
+  ])
+    for (const run of [runs.workflow, runs.action])
+      assert.match(run(script).errors.join('\n'), pattern, script);
+  for (const script of [
+    'echo ok > /tmp/x.log',
+    'echo ok > "$RUNNER_TEMP/a/b.txt"',
+    `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/x`,
+    'echo ok > .economic-coverage/x.json',
+    // PR #1130 r1 F2: a command the model has no contract for is the reader's own to judge, by
+    // its policy: a listed program, a reviewed line, a file of the inventory
+    'mkdir -p "$RUNNER_TEMP/x"\nchmod 0700 "$RUNNER_TEMP/x"\npnpm install --frozen-lockfile',
+  ])
+    for (const run of [runs.workflow, runs.action])
+      assert.deepEqual(run(script).errors, [], script);
+  const judged = 'node gen.mjs f; bash scripts/x.sh; sort -o f /tmp/x; pnpm install';
+  assert.deepEqual(writeProblems({ run: judged }, 'new.yml'), []);
+  assert.equal(stepWrites({ run: judged }).filter((target) => target.command).length, 4);
+  assert.match(runs.workflow('sort -o package.json /tmp/x').errors.join('\n'), /runs `sort`, /);
+  const used = (text) =>
+    workflowLifecycle(
+      'new.yml',
+      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: ${text}\n`,
+    ).errors.join('\n');
+  const SHA = '0'.repeat(40);
+  assert.match(used(`actions/download-artifact@${SHA}`), /writes the checkout: /);
+  assert.match(
+    used(`actions/download-artifact@${SHA}\n        with:\n          path: scripts`),
+    /writes scripts: /,
+  );
+  assert.match(
+    used(`actions/cache@${SHA}\n        with:\n          key: k\n          path: node_modules`),
+    /writes node_modules: /,
+  );
+  assert.match(
+    used(`aquasecurity/trivy-action@${SHA}\n        with:\n          image-ref: x`),
+    /writes \.cache\/trivy: /,
+  );
+  assert.equal(
+    used(
+      `actions/download-artifact@${SHA}\n        with:\n          path: .economic-coverage/shards`,
+    ),
+    '',
+  );
+
+  // a review ends with an edit of the text or of the input; and none is left over
+  const [ci, drill] = ['ci', 'backup-drill-monthly'].map((name) => `.github/workflows/${name}.yml`);
+  const texts = { [drill]: repoText(drill) };
+  const edited = (path, from, to) => {
+    assert.ok(repoText(path).includes(from), from);
+    const text = repoText(path).replaceAll(from, to);
+    return LIFECYCLE_CHECKS[lifecycleFileKind(path)](path, text, texts).errors.join('\n');
+  };
+  assert.match(
+    edited(ci, 'SCAN_STATUS=0\n', 'SCAN_STATUS=0\n          echo ok\n'),
+    /may write "\$SCAN_LOG", which/,
+  );
+  assert.match(
+    edited(drill, 'echo "The drill command exited', 'echo "the drill command exited'),
+    /may write "\$\{dir\}\/stdout\.json", which/,
+  );
+  for (const reviewed of REVIEWED_INPUTS.keys()) {
+    const [, path, expression] = reviewed
+      .replace('=', ': ')
+      .match(/^(\S+): \S+ ([\w-]+: \$\{\{ \S+) \}\}$/);
+    assert.match(edited(path, expression, `${expression}2`), unplaced, reviewed);
+  }
+  // a reviewed input is one input of one action in one file, and reviews nothing else of its step
+  const archive = 'path: ${{ steps.pin.outputs.archive }}';
+  const cache = `actions/cache@${SHA}\n        with:\n          key: k\n          ${archive}`;
+  assert.match(used(cache), /may write \$\{\{ steps\.pin\.outputs\.archive \}\}, which/);
+  // in another file also after the very steps of the reviewed one
+  const copied = indent(repoText(ENTRY.action).split('  steps:\n')[1], '  ');
+  assert.match(
+    workflowLifecycle('new.yml', `jobs:\n  a:\n    runs-on: x\n    steps:\n${copied}`).errors.join(
+      '\n',
+    ),
+    /may write \$\{\{ steps\.pin\.outputs\.archive \}\}, which/,
+  );
+  assert.match(
+    edited(ENTRY.action, archive, `${archive}\n        lookup-only: true`),
+    /may write what actions\/cache does with its input lookup-only, which/,
+  );
+  assert.match(
+    edited(ENTRY.action, 'uses: actions/cache@', 'uses: actions/download-artifact@'),
+    /may write \$\{\{ steps\.pin\.outputs\.archive \}\}, which/,
+  );
+  // nor without the step that sets its value, as it was read: renamed, removed, edited or
+  // after it, the expression is empty and the action writes its default place
+  const [trivy, pin] = ['.github/actions/restore-trivy-db/action.yml', '    - id: pin\n'];
+  const [cacheStep] = repoText(ENTRY.action).match(/ {4}- uses: actions\/cache@.*\n(?: {6}.*\n)*/);
+  for (const [path, from, to] of [
+    [ENTRY.action, pin, '    - id: pinned\n'],
+    [ENTRY.action, `${pin}      shell`, '    - shell'],
+    [ENTRY.action, 'ci-tool-download.mjs key', 'ci-tool-download.mjs  key'],
+    [ENTRY.action, pin, `${cacheStep}${pin}`],
+    [ENTRY.action, pin, `${pin}      shell: bash\n      run: echo ok\n${pin}`],
+    [ENTRY.action, cacheStep, `${pin}      shell: bash\n      run: echo ok\n${cacheStep}`],
+    [trivy, 'id: where', 'id: place'],
+    [ci, 'id: trivy-db\n', 'id: trivy-db2\n'],
+    [ci, 'key: ${{ needs.trivy-db.outputs.key }}', 'key: other'],
+  ])
+    assert.match(edited(path, from, to), unplaced, `${path}: ${to}`);
+  // the caller's reviewed step is a local action: what it hands on is what its step `where` set
+  const outputs = parseDocument(repoText(trivy)).toJS().outputs;
+  assert.deepEqual(Object.keys(outputs), ['dir']);
+  assert.equal(outputs.dir.value, '${{ steps.where.outputs.dir }}');
+  // under the home directory an action restores only the cache
+  for (const path of ['~/.npmrc', '~/.config/pnpm', '~/.local/bin', '~/.bashrc', '~/.cache', '~'])
+    assert.match(
+      used(`actions/cache@${SHA}\n        with:\n          key: k\n          path: ${path}`),
+      unplaced,
+      path,
+    );
+  assert.equal(
+    used(`actions/cache@${SHA}\n        with:\n          key: k\n          path: ~/.cache/x`),
+    '',
+  );
+  const real = [ci, drill].flatMap((path) =>
+    Object.values(parseDocument(repoText(path)).toJS().jobs).flatMap((job) => job.steps ?? []),
+  );
+  const sha256 = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+  assert.deepEqual(
+    [...REVIEWED_TEXTS].filter(
+      (digest) => !real.some((step) => sha256(String(step.run)) === digest),
+    ),
+    [],
+  );
+  for (const output of OUTPUTS)
+    assert.deepEqual(
+      [...FILES].filter((file) => file === output || file.startsWith(`${output}/`)),
+      [],
+      output,
+    );
+});
+
 test('the shell that reads a step and the variables it is given are read at every level (FU-334)', () => {
   const env = "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n";
   const job = (steps) => `on: push\n${env}jobs:\n  a:\n    runs-on: x\n    steps:\n${steps}`;
@@ -1487,6 +1769,7 @@ test('a container runs only a reviewed program, body or script (FU-334)', () => 
     ['docker run --rm --mount type=bind,src=/tmp,dst=/usr/bin image', form('docker')],
     [`cd services/api-gateway\n${semgrep}`, changed],
     [`PWD=/tmp ${semgrep}`, changed],
+    [`{ PWD=/tmp; }\n${semgrep}`, changed],
     // PR #1100 r1 F2, closed by the reader of #1099 (every binding form marks the name): `unset`.
     [`unset PWD\n${semgrep}`, changed],
   ])

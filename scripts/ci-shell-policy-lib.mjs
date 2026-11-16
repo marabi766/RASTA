@@ -166,8 +166,12 @@ export function readShell(
         refuse(`runs \`${value}\`, ${policy.unlisted ?? 'a program this check does not list'}`);
     }
     const last = chain.at(-1) ?? words.length;
-    for (const [at, word] of words.slice(0, last).entries()) {
-      if (chain.includes(at)) continue;
+    // FU-340 part B: a control word or a wrapper that no command follows leaves the assignments
+    // after it to the shell itself (`{ PATH=x; }`, `then HOME=x`, `! IFS=x`): they are asked too
+    const open = executionChain([...words, { value: 'true', source: 'true' }]).chain.length;
+    const after = open > chain.length ? words.length : last;
+    for (const [at, word] of words.slice(0, after).entries()) {
+      if (chain.includes(at) || (at > last && !ASSIGN_LIKE.test(written(word)))) continue;
       const name = ASSIGN_LIKE.test(written(word)) && /^\w+/.exec(written(word))?.[0];
       if (!name || /^\w+\[/.test(written(word)))
         refuse('has a word before its command that is not an assignment to a written-out name');
