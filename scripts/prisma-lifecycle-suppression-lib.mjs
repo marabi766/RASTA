@@ -10,6 +10,7 @@ import {
   readShell,
 } from './ci-shell-policy-lib.mjs';
 import { parseCommands, SHELL_WORD } from './ci-shell-text-lib.mjs';
+import { READ_PAST } from './ci-write-targets-lib.mjs';
 
 /**
  * No dependency lifecycle hook generates the Prisma client (FU-329).
@@ -76,20 +77,6 @@ const STARTS = new Set([
   `node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||PORT)+'/health/ready',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"`,
 ]);
 const list = (text) => new Set(text.split(' '));
-/**
- * What the tokenizer does not model but still reads as commands: nothing hides behind these.
- * A backslash inside `$( )` is read as bash reads it; inside backticks it is not (bash removes it
- * first, so an escaped backtick starts a command the tokenizer sees as text): no backticks at all.
- */
-const READ_PAST = new Set([
-  'redirection',
-  'a pipeline, an || list or a background command',
-  'a subshell or an arithmetic command',
-  'an unbalanced closing parenthesis',
-  'a non-ASCII character',
-  'a backslash inside a command substitution',
-  'a parameter expansion with an operator, subscript or nested text',
-]);
 const UNLISTED = 'a command this check cannot prove hands on the environment';
 /** A file of this repository run by its path: a listed program in the sense of the header. */
 const REPO_FILE = /^(?:scripts|infrastructure)\/(?!.*\.\.)[\w./-]+$/;
