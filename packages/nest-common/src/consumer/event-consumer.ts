@@ -782,8 +782,10 @@ export class EventConsumer {
           !(error instanceof UnprocessableEventError)
         ) {
           // A failed evidence commit propagates, leaving the offset uncommitted.
+          beat?.();
           await evidencePolicy.persist(error);
           this.abandonIfPastDeadline(run, { topic, partition, offset });
+          beat?.();
           if (!this.options.deadLetterTopic) throw error;
         }
         if (error instanceof EventHandlingUnconfirmedError) {
@@ -810,8 +812,10 @@ export class EventConsumer {
         }
 
         if (attempt === maxRetries) {
+          if (this.options.beforeExhaustion) beat?.();
           await this.options.beforeExhaustion?.(envelope);
           this.abandonIfPastDeadline(run, { topic, partition, offset });
+          if (this.options.beforeExhaustion) beat?.();
           const reason = exhaustedReason(error);
           this.logger.error(`Handler failed ${maxRetries}x for ${event} (${reason}): ${message}`);
           await this.deadLetter(

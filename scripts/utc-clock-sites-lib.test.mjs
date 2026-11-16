@@ -860,7 +860,9 @@ test('a DO block exemption holds in its own migration only', () => {
   const migrations = migrationsOf(entry.service);
   assert.deepEqual(scanOf(entry.service, migrations), []);
   const [, text] = migrations.find(([name]) => name === entry.migration);
-  const copy = /DO \$canonicalise\$[\s\S]*?\$canonicalise\$;/.exec(text)[0];
+  const block = replayMigrations([text]).doBlocks.find(({ body }) => contentHash(body) === entry.sha256);
+  assert.ok(block, 'the reviewed DO body must exist regardless of its dollar tag');
+  const copy = `DO ${block.body};`;
   assert.match(
     scanOf(entry.service, [...migrations, ['99999999999999_copy', copy]]).join(),
     /DDL or SQL in a DO block/,

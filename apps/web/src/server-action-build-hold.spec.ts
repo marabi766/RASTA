@@ -18,6 +18,7 @@ import {
   plantFakeNext,
   releaseAll,
   releaseHold,
+  waitHeld,
   type Plan,
 } from './test/build-scripts';
 import { ownedProcesses } from './test/owned-processes';
@@ -37,21 +38,6 @@ import { ownedProcesses } from './test/owned-processes';
 jest.setTimeout(60_000);
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const REMOVE_ATTEMPTS = 10;
-const REMOVE_RETRY_DELAY_MS = 20;
-/** A live writer can add an entry after rmSync walked the directory: retry the whole walk. */
-const removeLiveFixture = async (dir: string): Promise<void> => {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY' || attempt >= REMOVE_ATTEMPTS)
-        throw error;
-      await sleep(REMOVE_RETRY_DELAY_MS);
-    }
-  }
-};
 const waitFor = async (test: () => boolean, ms = 30_000): Promise<void> => {
   const deadline = Date.now() + ms;
   while (!test() && Date.now() < deadline) await sleep(25);
@@ -181,9 +167,10 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
     how: 'zombie' | 'gone',
   ): Promise<{ ownerPid: number; writer: ReturnType<typeof startWriter> }> => {
     const { ownerPid, parent } = await startOwner(dir);
-    plantFakeApp(dir, { holdUntilRelease: true }, 'external');
+    plantFakeApp(dir, { holdUntilRelease: true, slowReportsMs: 250 }, 'external');
     const writer = startWriter(dir);
-    await waitFor(() => hasRun(dir, writer));
+    await waitHeld(dir);
+    expect(readFileSync(join(dir, 'held.pid'), 'utf8')).toBe(String(writer.child.pid));
     expect(alive(ownerPid)).toBe(true);
     // The owner ends while its writer is held.
     writeFileSync(join(dir, 'owner-exit'), '');
@@ -231,11 +218,12 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
   });
 
   it('a writer whose fixture directory was removed ends: nothing is left to hold it for', async () => {
-    const dir = app({ holdUntilRelease: true });
+    const dir = app({ holdUntilRelease: true, slowReportsMs: 250 });
     const writer = startWriter(dir);
-    await waitFor(() => hasRun(dir, writer));
+    await waitHeld(dir);
+    expect(readFileSync(join(dir, 'held.pid'), 'utf8')).toBe(String(writer.child.pid));
     expect(heldWriters()).toEqual([dir]); // its owner is alive and never released it
-    await removeLiveFixture(dir);
+    rmSync(dir, { recursive: true, force: true });
     expect(existsSync(dir)).toBe(false);
     expect(await endsWithin(writer.exited, 5_000)).toBe(72);
   });

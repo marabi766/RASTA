@@ -57,6 +57,27 @@ describe('legacy meter gauge lifecycle', () => {
     }
   });
 
+  it('scrapes settle without advancing time while the source read is pending', async () => {
+    jest.useFakeTimers();
+    const d = deferred();
+    gauge = makeGauge(() => d.promise);
+    const sampling = gauge.sample();
+    const scrape = registry.metrics();
+    let returned = false;
+    void scrape.then(() => {
+      returned = true;
+    });
+    try {
+      await jest.advanceTimersByTimeAsync(0);
+      expect(returned).toBe(true);
+    } finally {
+      d.resolve(3);
+      await sampling;
+      await jest.advanceTimersByTimeAsync(100);
+      await scrape;
+    }
+  });
+
   it('overlapping full-registry scrapes never start additional DB reads', async () => {
     const d = deferred();
     const read = jest.fn(() => d.promise);

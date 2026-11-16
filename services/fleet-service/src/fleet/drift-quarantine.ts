@@ -1,4 +1,8 @@
-import { EventHandlingUnconfirmedError, UnprocessableEventError } from '@rasta/nest-common';
+import {
+  EventHandlingUnconfirmedError,
+  UnprocessableEventError,
+  handlingFailureCause,
+} from '@rasta/nest-common';
 import { SOURCE_REFUSAL_HISTORY_TRANSACTION } from '../config/source-evidence-policy';
 import { Prisma } from '../generated/prisma';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -20,6 +24,10 @@ export class SourceDriftRefusal extends EventHandlingUnconfirmedError {
   }
 }
 
+export class SourceEvidenceUnconfirmedError extends EventHandlingUnconfirmedError {
+  historyWriteFailure?: Error;
+}
+
 export interface SourceDriftCleanup {
   lock(tx: ExtendedPrismaClient): Promise<void>;
   discard(tx: ExtendedPrismaClient): Promise<void>;
@@ -37,6 +45,7 @@ export async function quarantineTransaction<T>(
   eventId: string,
   fn: (tx: ExtendedPrismaClient) => Promise<T>,
   cleanup?: SourceDriftCleanup,
+  sourceAssetId?: string,
 ): Promise<T> {
   let ownerChanged = false;
   let refused = false;
@@ -98,29 +107,35 @@ export async function quarantineTransaction<T>(
     if (refused || evidenceCause) {
       // Commit independently: neither a held seal nor a stale parked version can erase this.
       // A failed/lost marker response keeps the existing evidence window fail-closed.
-      let cause = error;
+      let historyWriteFailure: Error | undefined;
       await transaction(async (tx) => {
         await tx.$executeRaw`INSERT INTO meter_refusal_history(event_hash)
           VALUES (${sourceEventHash(eventId)}) ON CONFLICT DO NOTHING`;
         return undefined as T;
       }, SOURCE_REFUSAL_HISTORY_TRANSACTION).catch((failure: unknown) => {
-        cause = failure;
+        historyWriteFailure = handlingFailureCause(failure);
       });
       // Seven pauses of at least 10s exceed tx2 (30s), tx1/pool and token release.
       // No seal dependency: missing gates and expired activation tokens need evidence too.
-      throw new EventHandlingUnconfirmedError('SOURCE_DRIFT_QUARANTINE_UNCONFIRMED', cause, {
-        attempts: ACTIVATION_RETRY_ATTEMPTS,
-        backoffMs: ACTIVATION_RETRY_BACKOFF_MS,
-        persist: (lastError) =>
-          persistSourceDriftHold(
-            transaction,
-            eventId,
-            refusal?.assetId,
-            lastError instanceof EventHandlingUnconfirmedError && lastError.evidencePolicy
-              ? 'SOURCE_REFUSAL_UNCONFIRMED'
-              : 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
-          ),
-      });
+      const unconfirmed = new SourceEvidenceUnconfirmedError(
+        'SOURCE_DRIFT_QUARANTINE_UNCONFIRMED',
+        error,
+        {
+          attempts: ACTIVATION_RETRY_ATTEMPTS,
+          backoffMs: ACTIVATION_RETRY_BACKOFF_MS,
+          persist: (lastError) =>
+            persistSourceDriftHold<T>(
+              (work) => transaction(work, SOURCE_REFUSAL_HISTORY_TRANSACTION),
+              eventId,
+              refusal?.assetId ?? sourceAssetId,
+              lastError instanceof EventHandlingUnconfirmedError && lastError.evidencePolicy
+                ? 'SOURCE_REFUSAL_UNCONFIRMED'
+                : 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
+            ),
+        },
+      );
+      unconfirmed.historyWriteFailure = historyWriteFailure;
+      throw unconfirmed;
     }
     if (callbackReturned)
       throw new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED', error);
@@ -135,7 +150,7 @@ export async function quarantineTransaction<T>(
 export const sourceEventHash = (value: string): string =>
   createHash('sha256').update(value).digest('hex');
 
-/** Closed operator cause, stored in the HOLD's run_id slot (no sealed run is claimed). */
+/** Reserved HOLD namespace cannot equal a seal run ID; PostgreSQL counts later writes. */
 export type SourceHoldCause = 'SOURCE_REFUSAL_UNCONFIRMED' | 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL';
 
 export async function persistSourceDriftHold<T>(
@@ -150,7 +165,7 @@ export async function persistSourceDriftHold<T>(
     await tx.$executeRaw`INSERT INTO meter_drift_overflow
       (event_id, asset_id, named_owner, reason, run_id)
       VALUES (${`HOLD:${sourceEventHash(eventId)}`}, ${sourceEventHash(assetId ?? eventId)},
-        'PLATFORM', 'SOURCE_DRIFT_HOLD', ${cause}) ON CONFLICT (event_id) DO NOTHING`;
+        'PLATFORM', 'SOURCE_DRIFT_HOLD', ${`HOLD:${cause}:0`}) ON CONFLICT (event_id) DO NOTHING`;
     return undefined as T;
   });
 }
