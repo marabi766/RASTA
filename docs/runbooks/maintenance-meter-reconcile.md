@@ -402,9 +402,13 @@ exhaustion boundaries check this retained history plus quarantine before
 publishing to DLQ. Read or HOLD failures leave the delivery/parked row unresolved.
 Redelivery, a held-seal latch failure and an attempt-version mismatch cannot erase
 committed history. History is retained; reconciliation/clearing is a later slice.
-HOLD `run_id` currently stores a cause code (`SOURCE_REFUSAL_UNCONFIRMED` or
-`SOURCE_INFRASTRUCTURE_DURING_REFUSAL`), which can collide with operator run IDs;
-only the first cause for an event is retained. Cause separation remains a follow-up.
+HOLD `run_id` uses `HOLD:<first-cause>:<later-count>`, outside the seal run-ID
+alphabet. The first cause is retained and each later HOLD write (including replay)
+increments a bigint count under the capacity lock; overflow refuses. Migration
+backfills retained first causes with count zero; already-lost causes are unknown.
+These are bounded recent rows, subject to the existing overflow eviction policy;
+the permanent activation latch survives eviction. Apply the migration before the
+namespaced writer; old plain-cause writers refuse after migration.
 
 Only fleet asset-sync opts into an extended KafkaJS `rebalanceTimeout`, computed
 from its startup-checked transaction budget, seven extra attempts, a HOLD and
