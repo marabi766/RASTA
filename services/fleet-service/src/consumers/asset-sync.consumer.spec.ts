@@ -131,6 +131,7 @@ function buildConsumer(options: {
       recorded.unmarked.push(eventId);
       recorded.removedIn.unmarked.push(txOf(tx));
     }),
+    holdRefusedExhaustion: jest.fn(async () => undefined),
     enqueueDeadLetter: jest.fn(async (tx: unknown, letter: DeadLetterOutboxInput) => {
       recorded.deadLetters.push({ ...letter, tx: txOf(tx) });
       return 'OUTBOX-DLQ-1';

@@ -289,12 +289,26 @@ export function assetSyncDeliveryWorstCaseMs(env: AssetSyncTimeouts): number {
   return DEFAULT_MAX_RETRIES * attempt + pauses;
 }
 
-/** Ordinary attempts + seven extra attempts + HOLD + 70s pauses, rounded up.
+/** Short independent refusal-history write; no seal or parked-row lock. */
+export const SOURCE_REFUSAL_HISTORY_TRANSACTION = Object.freeze({ timeoutMs: 500, maxWaitMs: 50 });
+
+/** Ordinary attempts + seven extra attempts + HOLD + history writes + 70s pauses, rounded up.
  * DLQ broker retries are additional; this is not an end-to-end deadline. */
 export function assetSyncRebalanceTimeoutMs(env: AssetSyncTimeouts): number {
   const ordinary = assetSyncDeliveryWorstCaseMs(env);
   const attempt = (ordinary - 3 * DEFAULT_BACKOFF_MS) / DEFAULT_MAX_RETRIES;
-  return Math.ceil((ordinary + 8 * attempt + 70_000 + 3_000) / 60_000) * 60_000;
+  return (
+    Math.ceil(
+      (ordinary +
+        8 * attempt +
+        11 *
+          (SOURCE_REFUSAL_HISTORY_TRANSACTION.timeoutMs +
+            SOURCE_REFUSAL_HISTORY_TRANSACTION.maxWaitMs) +
+        70_000 +
+        3_000) /
+        60_000,
+    ) * 60_000
+  );
 }
 
 /**

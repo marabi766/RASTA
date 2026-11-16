@@ -4495,6 +4495,7 @@ export const EXPECTED = {
     // or database; the migrator owns rasta_fleet.
     connectAs: 'migrator',
     tables: [
+      'meter_refusal_history',
       'meter_drift_overflow',
       'meter_drift_quarantine',
       'meter_drift_capacity',
@@ -4510,6 +4511,8 @@ export const EXPECTED = {
       'usage_record',
     ],
     triggers: [
+      'meter_refusal_history_fixed',
+      'meter_refusal_history_no_truncate',
       'meter_activation_holder_guard',
       'meter_drift_evidence_identity',
       'meter_drift_capacity_guard',
@@ -4525,6 +4528,7 @@ export const EXPECTED = {
       'meter_inventory_seal_no_truncate',
     ],
     functions: [
+      'meter_refusal_history_fixed',
       'meter_activation_holder_guard',
       'meter_drift_quarantine_guard',
       'meter_drift_evidence_guard',
