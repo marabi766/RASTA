@@ -326,37 +326,138 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       { run_id: 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:9223372036854775807' },
     ]);
   });
-  it('HOLD namespace migration deterministically backfills retained legacy causes', async () => {
-    const migration = readFileSync(
-      join(
-        __dirname,
-        '../prisma/migrations/20261116100000_meter_hold_cause_namespace/migration.sql',
-      ),
-      'utf8',
-    );
+  const namespaceMigration = readFileSync(
+    join(__dirname, '../prisma/migrations/20261116100000_meter_hold_cause_namespace/migration.sql'),
+    'utf8',
+  );
+  const namespacePrefix = namespaceMigration.slice(
+    0,
+    namespaceMigration.indexOf('CREATE OR REPLACE'),
+  );
+  // Execute the shipped preflight/backfill/constraints, retaining the DO block as one statement.
+  type MigrationTx = Pick<ExtendedPrismaClient, '$executeRaw' | '$executeRawUnsafe'>;
+  const applyNamespacePrefix = async (tx: MigrationTx) => {
+    for (const sql of namespacePrefix.match(
+      /DO \$\$[\s\S]*?END \$\$;|ALTER TABLE[\s\S]*?;|UPDATE meter_drift_overflow[\s\S]*?;/g,
+    ) ?? [])
+      await tx.$executeRawUnsafe(sql);
+  };
+  const beforeNamespace = async (seed: (tx: MigrationTx) => Promise<void>) => {
     await owner.transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE meter_inventory_seal DROP CONSTRAINT meter_seal_run_namespace',
+      );
       await tx.$executeRawUnsafe(
         'ALTER TABLE meter_drift_overflow DROP CONSTRAINT meter_hold_cause_namespace',
       );
       await tx.$executeRawUnsafe(
         'ALTER TABLE meter_drift_overflow DISABLE TRIGGER meter_drift_overflow_guard',
       );
-      await tx.$executeRaw`INSERT INTO meter_drift_overflow (event_id,asset_id,named_owner,reason,run_id)
-        SELECT 'HOLD:' || cause, 'hash', 'PLATFORM', 'SOURCE_DRIFT_HOLD', cause
-        FROM unnest(ARRAY['SOURCE_REFUSAL_UNCONFIRMED','SOURCE_INFRASTRUCTURE_DURING_REFUSAL']) cause`;
-      for (const sql of migration
-        .slice(migration.indexOf('-- Preserve'), migration.indexOf('CREATE OR REPLACE'))
-        .split(/;\s*\n/))
-        if (sql.trim()) await tx.$executeRawUnsafe(sql);
+      await seed(tx);
     });
+    return owner.transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+      await applyNamespacePrefix(tx);
+    });
+  };
+  it('HOLD namespace migration backfills legacy causes and preserves rolling-deploy rows on repeat', async () => {
+    await beforeNamespace(async (tx) => {
+      await tx.$executeRaw`INSERT INTO meter_drift_overflow (event_id,asset_id,named_owner,reason,run_id)
+        SELECT cause, 'hash', 'PLATFORM', 'SOURCE_DRIFT_HOLD', cause
+        FROM unnest(ARRAY['SOURCE_REFUSAL_UNCONFIRMED','SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
+          'HOLD:SOURCE_REFUSAL_UNCONFIRMED:7']) cause`;
+    });
+    await beforeNamespace(async () => {});
     expect(
       await prisma.client.$queryRaw`SELECT run_id FROM meter_drift_overflow ORDER BY run_id`,
     ).toEqual([
       { run_id: 'HOLD:SOURCE_INFRASTRUCTURE_DURING_REFUSAL:0' },
       { run_id: 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:0' },
+      { run_id: 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:7' },
     ]);
   });
+  it.each([
+    'UNCONFIRMED',
+    'HOLD:SOURCE_REFUSAL_UNCONFIRMED:bad',
+    'HOLD:SOURCE_REFUSAL_UNCONFIRMED:9223372036854775808',
+  ])('HOLD namespace preflight diagnoses incompatible retained evidence: %s', async (run) => {
+    await expect(
+      beforeNamespace(async (tx) => {
+        await tx.$executeRaw`INSERT INTO meter_drift_overflow (event_id,asset_id,named_owner,reason,run_id)
+          VALUES ('HOLD:OFFENDING', 'hash', 'PLATFORM', 'SOURCE_DRIFT_HOLD', ${run}),
+            ('HOLD:OFFENDING2', 'hash', 'PLATFORM', 'SOURCE_DRIFT_HOLD', ${run})`;
+      }),
+    ).rejects.toThrow(
+      /METER_HOLD_NAMESPACE_PREFLIGHT_REFUSED[\s\S]*HOLD:OFFENDING, HOLD:OFFENDING2[\s\S]*reconcile against audited source evidence/,
+    );
+    expect(
+      await prisma.client
+        .$queryRaw`SELECT event_id, run_id FROM meter_drift_overflow ORDER BY event_id`,
+    ).toEqual([
+      { event_id: 'HOLD:OFFENDING', run_id: run },
+      { event_id: 'HOLD:OFFENDING2', run_id: run },
+    ]);
+  });
+  it('HOLD namespace preflight names the incompatible immutable seal and operator action', async () => {
+    await expect(
+      beforeNamespace(async (tx) => {
+        await tx.$executeRaw`UPDATE meter_inventory_seal SET run_id = 'outside:grammar',
+        operator_id = 'USR', inventory = '[]'::jsonb, boundary = 'invalid'`;
+      }),
+    ).rejects.toThrow(
+      /METER_SEAL_NAMESPACE_PREFLIGHT_REFUSED[\s\S]*id=true[\s\S]*reconcile against audited source evidence/,
+    );
+    expect(await prisma.client.$queryRaw`SELECT run_id FROM meter_inventory_seal`).toEqual([
+      { run_id: 'outside:grammar' },
+    ]);
+  });
+  it.each([
+    'garbage',
+    'HOLD:SOURCE_REFUSAL_UNCONFIRMED:bad',
+    'HOLD:SOURCE_REFUSAL_UNCONFIRMED:9223372036854775808',
+  ])(
+    'HOLD namespace malformed casts use the constraint and runtime guard errors: %s',
+    async (run) => {
+      await owner.client.$executeRawUnsafe(
+        `ALTER TABLE "${schema}".meter_drift_overflow DISABLE TRIGGER meter_drift_overflow_guard`,
+      );
+      await expect(prisma.client.$executeRaw`INSERT INTO meter_drift_overflow
+        (event_id,asset_id,named_owner,reason,run_id) VALUES ('BAD', 'hash', 'PLATFORM', 'SOURCE_DRIFT_HOLD', ${run})`).rejects.toThrow(
+        'meter_hold_cause_namespace',
+      );
+      await owner.client.$executeRawUnsafe(
+        `ALTER TABLE "${schema}".meter_drift_overflow ENABLE TRIGGER meter_drift_overflow_guard`,
+      );
+      await persistSourceDriftHold(
+        prisma.transaction.bind(prisma),
+        'EVT:CAST',
+        undefined,
+        'SOURCE_REFUSAL_UNCONFIRMED',
+      );
+      await expect(
+        prisma.client.$executeRaw`UPDATE meter_drift_overflow SET run_id = ${run}`,
+      ).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_FIXED');
+      // Force the depth-2 path with otherwise-identical row identity and cause.
+      await owner.client.$executeRawUnsafe(`CREATE TABLE "${schema}".hold_cast_probe(run_id text)`);
+      await owner.client
+        .$executeRawUnsafe(`CREATE FUNCTION "${schema}".hold_cast_probe() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN
+          UPDATE "${schema}".meter_drift_overflow SET run_id = NEW.run_id;
+          RETURN NEW;
+        END $$`);
+      await owner.client
+        .$executeRawUnsafe(`CREATE TRIGGER hold_cast_probe AFTER INSERT ON "${schema}".hold_cast_probe
+        FOR EACH ROW EXECUTE FUNCTION "${schema}".hold_cast_probe()`);
+      await expect(
+        owner.client.$executeRawUnsafe(`INSERT INTO "${schema}".hold_cast_probe VALUES ($1)`, run),
+      ).rejects.toThrow('SOURCE_DRIFT_QUARANTINE_FIXED');
+      await expect(prisma.client.$executeRaw`INSERT INTO meter_drift_overflow
+        (event_id,asset_id,named_owner,reason,run_id) VALUES ('BAD', 'hash', 'PLATFORM', 'SOURCE_DRIFT_HOLD', ${run})`).rejects.toThrow(
+        'SOURCE_HOLD_CAUSE_INVALID',
+      );
+    },
+  );
   it.each(['seal-lock', 'missing-gate', 'malformed', 'history-failed'])(
     'evidence HOLD preserves envelope identity and original cause: %s',
     async (mode) => {

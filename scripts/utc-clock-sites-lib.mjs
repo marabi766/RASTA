@@ -1664,7 +1664,7 @@ export const REVIEWED_FUNCTIONS = [
   {
     service: 'fleet-service',
     name: 'meter_drift_quarantine_guard',
-    sha256: '3fbbd583629a16efde9bae9f02225a339dcc53592ca772456ebc2f9b9225848e',
+    sha256: 'da28f847e6e25a552b825f36856ca0876641ba8a49778a6aed3312d029bf92fe',
     why: 'Clock-free bounded append-only quarantine and durable activation barrier; trusted TG_TABLE_SCHEMA is identifier-quoted in schema-local set_config; no EXECUTE, expiry or timestamp conversion.',
   },
   {
@@ -1752,6 +1752,12 @@ export const REVIEWED_FUNCTIONS = [
 
 /** One-shot DO blocks with DDL or EXECUTE that define nothing live: bound to body and migration. */
 export const REVIEWED_DO_BLOCKS = [
+  {
+    service: 'fleet-service',
+    migration: '20261116100000_meter_hold_cause_namespace',
+    sha256: 'bb26ea6a003002f46ea5e16807397ad74c313279b5278762390902c5bba1054f',
+    why: 'Clock-free read-only preflight: closed cause/run grammar and numeric range checks; named RAISE diagnostics with operator reconciliation hints, no dynamic SQL.',
+  },
   {
     service: 'asset-service',
     migration: '20260925110000_asset_legacy_dossier_and_identifiers',

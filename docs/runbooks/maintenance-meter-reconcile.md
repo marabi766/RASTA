@@ -407,12 +407,19 @@ publishing to DLQ. Read or HOLD failures leave the delivery/parked row unresolve
 Redelivery, a held-seal latch failure and an attempt-version mismatch cannot erase
 committed history. History is retained; reconciliation/clearing is a later slice.
 HOLD `run_id` uses `HOLD:<first-cause>:<later-count>`, outside the seal run-ID
-alphabet. The first cause is retained and each later HOLD write (including replay)
+alphabet. Later causes are counted, not stored: the count mixes duplicate writes,
+replays and different causes, without cause attribution. Each later HOLD write
 increments a bigint count under the capacity lock; overflow refuses. Migration
 backfills retained first causes with count zero; already-lost causes are unknown.
 These are bounded recent rows, subject to the existing overflow eviction policy;
-the permanent activation latch survives eviction. Apply the migration before the
-namespaced writer; old plain-cause writers refuse after migration.
+eviction resets the count and the next write becomes the first cause, which can
+differ from the evicted cause. The permanent activation latch survives eviction.
+Apply the migration before the namespaced writer; valid already-namespaced rows
+are preserved. Preflight names incompatible HOLD event rows or the singleton seal
+and refuses before rewriting anything. Inspect those rows and reconcile against
+audited source evidence before retrying; never guess a cause or rename an
+immutable seal blindly. Operator reconciliation/clearing remains a later slice.
+Old plain-cause writers refuse after migration.
 
 Only fleet asset-sync opts into an extended KafkaJS `rebalanceTimeout`, computed
 from its startup-checked transaction budget, seven extra attempts, a HOLD and

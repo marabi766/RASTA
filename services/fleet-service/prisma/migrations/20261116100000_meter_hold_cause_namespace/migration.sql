@@ -1,16 +1,40 @@
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 LOCK TABLE meter_inventory_seal, meter_drift_capacity, meter_drift_overflow IN ACCESS EXCLUSIVE MODE;
+-- Diagnose incompatible retained evidence before changing either table.
+DO $$
+DECLARE offending_rows TEXT;
+BEGIN
+  SELECT string_agg(event_id, ', ' ORDER BY event_id) INTO offending_rows
+  FROM meter_drift_overflow
+  WHERE reason = 'SOURCE_DRIFT_HOLD'
+    AND run_id NOT IN ('SOURCE_REFUSAL_UNCONFIRMED','SOURCE_INFRASTRUCTURE_DURING_REFUSAL')
+    AND NOT CASE
+      WHEN run_id ~ '^HOLD:(SOURCE_REFUSAL_UNCONFIRMED|SOURCE_INFRASTRUCTURE_DURING_REFUSAL):(0|[1-9][0-9]{0,18})$'
+      THEN split_part(run_id, ':', 3)::numeric <= 9223372036854775807 ELSE false END;
+  IF offending_rows IS NOT NULL THEN
+    RAISE EXCEPTION 'METER_HOLD_NAMESPACE_PREFLIGHT_REFUSED'
+      USING DETAIL = 'meter_drift_overflow event_id rows: ' || offending_rows,
+        HINT = 'Inspect named rows and reconcile against audited source evidence before retrying; never guess or discard a cause.';
+  END IF;
+  IF EXISTS (SELECT 1 FROM meter_inventory_seal WHERE run_id IS NOT NULL
+    AND run_id !~ '^[A-Za-z0-9_-]{1,64}$') THEN
+    RAISE EXCEPTION 'METER_SEAL_NAMESPACE_PREFLIGHT_REFUSED'
+      USING DETAIL = 'meter_inventory_seal row id=true has an invalid run_id.',
+        HINT = 'Investigate the sealed inventory and reconcile against audited source evidence before retrying; do not rename an immutable seal blindly.';
+  END IF;
+END $$;
 ALTER TABLE meter_inventory_seal ADD CONSTRAINT meter_seal_run_namespace
   CHECK (run_id IS NULL OR run_id ~ '^[A-Za-z0-9_-]{1,64}$');
 -- Preserve the known first cause; pre-migration later causes cannot be reconstructed.
 ALTER TABLE meter_drift_overflow DISABLE TRIGGER meter_drift_overflow_guard;
-UPDATE meter_drift_overflow SET run_id = 'HOLD:' || run_id || ':0' WHERE reason = 'SOURCE_DRIFT_HOLD';
+UPDATE meter_drift_overflow SET run_id = 'HOLD:' || run_id || ':0' WHERE reason = 'SOURCE_DRIFT_HOLD'
+  AND run_id IN ('SOURCE_REFUSAL_UNCONFIRMED','SOURCE_INFRASTRUCTURE_DURING_REFUSAL');
 ALTER TABLE meter_drift_overflow ENABLE TRIGGER meter_drift_overflow_guard;
 ALTER TABLE meter_drift_overflow ADD CONSTRAINT meter_hold_cause_namespace CHECK (
   reason <> 'SOURCE_DRIFT_HOLD' OR
-  (run_id ~ '^HOLD:(SOURCE_REFUSAL_UNCONFIRMED|SOURCE_INFRASTRUCTURE_DURING_REFUSAL):(0|[1-9][0-9]{0,18})$'
-    AND split_part(run_id, ':', 3)::numeric <= 9223372036854775807));
+  (CASE WHEN run_id ~ '^HOLD:(SOURCE_REFUSAL_UNCONFIRMED|SOURCE_INFRASTRUCTURE_DURING_REFUSAL):(0|[1-9][0-9]{0,18})$'
+    THEN split_part(run_id, ':', 3)::numeric <= 9223372036854775807 ELSE false END));
 CREATE OR REPLACE FUNCTION meter_drift_quarantine_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 DECLARE sealed_run TEXT; activation_hold UUID; previous_hold TEXT;
@@ -23,7 +47,11 @@ BEGIN
     IF TG_OP = 'UPDATE' AND pg_trigger_depth() = 2 AND OLD.reason = 'SOURCE_DRIFT_HOLD'
       AND (to_jsonb(NEW) - 'run_id') = (to_jsonb(OLD) - 'run_id')
       AND split_part(NEW.run_id, ':', 2) = split_part(OLD.run_id, ':', 2)
-      AND split_part(NEW.run_id, ':', 3)::bigint = split_part(OLD.run_id, ':', 3)::bigint + 1 THEN
+      AND (CASE WHEN NEW.run_id ~ '^HOLD:(SOURCE_REFUSAL_UNCONFIRMED|SOURCE_INFRASTRUCTURE_DURING_REFUSAL):(0|[1-9][0-9]{0,18})$'
+        AND OLD.run_id ~ '^HOLD:(SOURCE_REFUSAL_UNCONFIRMED|SOURCE_INFRASTRUCTURE_DURING_REFUSAL):(0|[1-9][0-9]{0,18})$'
+        THEN split_part(NEW.run_id, ':', 3)::numeric <= 9223372036854775807
+          AND split_part(NEW.run_id, ':', 3)::numeric = split_part(OLD.run_id, ':', 3)::numeric + 1
+        ELSE false END) THEN
       RETURN NEW;
     END IF;
     IF TG_OP = 'INSERT' AND pg_trigger_depth() = 1 AND NEW.reason = 'SOURCE_DRIFT_HOLD' THEN
