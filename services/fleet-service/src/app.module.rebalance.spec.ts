@@ -4,7 +4,7 @@ import { AppModule } from './app.module';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
 import { assetSyncRebalanceTimeoutMs, loadFleetEnv } from './config/env';
 
-it('only asset-sync opts into its startup-computed rebalance budget', () => {
+it('only asset-sync opts into its startup-computed rebalance budget', async () => {
   const env = loadFleetEnv({
     NODE_ENV: 'test',
     DATABASE_URL: 'postgresql://test:test@localhost:5432/test',
@@ -25,12 +25,18 @@ it('only asset-sync opts into its startup-computed rebalance budget', () => {
   }[];
   const factory = providers.find((p) => p.provide === AssetSyncConsumer)?.useFactory;
   if (!factory) throw new Error('asset-sync factory missing');
-  const sync = factory(env, {}, {}, {}) as {
+  const holdRefusedExhaustion = jest.fn().mockResolvedValue(undefined);
+  const sync = factory(env, {}, { holdRefusedExhaustion }, {}) as {
     consumerFactory: (handler: () => Promise<void>) => EventConsumer;
   };
   const consumer = sync.consumerFactory(async () => undefined) as unknown as {
-    options: { rebalanceTimeoutMs?: number };
+    options: {
+      rebalanceTimeoutMs?: number;
+      beforeExhaustion: (event: { eventId: string }) => Promise<void>;
+    };
   };
   expect(consumer.options.rebalanceTimeoutMs).toBe(assetSyncRebalanceTimeoutMs(env));
   expect(consumer.options.rebalanceTimeoutMs).toBe(300_000);
+  await consumer.options.beforeExhaustion({ eventId: 'EVT' });
+  expect(holdRefusedExhaustion).toHaveBeenCalledWith('EVT');
 });

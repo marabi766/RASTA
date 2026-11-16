@@ -1226,6 +1226,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
 
         const attempts = await this.repository.recordParkedAttempt(tx, eventId, decided.reason);
         if (attempts >= this.parking.maxAttempts) {
+          await this.repository.holdRefusedExhaustion(eventId, tx);
           if (row.refusalSeen)
             await this.repository.persistDriftHold(
               eventId,
@@ -1309,6 +1310,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
           this.parking.minAgeSeconds,
         );
         if (!row || row.attempts !== failed.attempts) return 'GONE';
+        await this.repository.holdRefusedExhaustion(eventId, tx);
         await this.repository.enqueueDeadLetter(
           tx,
           this.parkedDeadLetter(row, row.attempts, 'DECISION_FAILED'),

@@ -21,6 +21,7 @@ import type { InsuranceCover } from './dispatch-blocks';
 import { sourceFenceRefusal } from './source-fence-refusal';
 import {
   quarantineTransaction,
+  sourceEventHash,
   persistSourceDriftHold,
   type SourceHoldCause,
   SourceDriftRefusal,
@@ -64,7 +65,7 @@ export class FleetRepository {
   ): Promise<T> {
     if (sourceEventId)
       return quarantineTransaction(
-        (work) => this.prisma.transaction(work, options),
+        (work, bounds) => this.prisma.transaction(work, bounds ?? options),
         sourceEventId,
         fn,
         sourceDriftCleanup,
@@ -84,6 +85,25 @@ export class FleetRepository {
       assetId,
       cause,
     );
+  }
+
+  async holdRefusedExhaustion(eventId: string, tx?: ExtendedPrismaClient): Promise<void> {
+    const work = async (client: ExtendedPrismaClient): Promise<void> => {
+      const [history] = await client.$queryRaw<{ seen: boolean }[]>`
+        SELECT EXISTS(SELECT 1 FROM meter_refusal_history WHERE event_hash = ${sourceEventHash(eventId)})
+          OR EXISTS(SELECT 1 FROM meter_drift_quarantine WHERE event_id = ${eventId})
+          OR EXISTS(SELECT 1 FROM meter_drift_overflow WHERE event_id = ${eventId}) AS seen`;
+      if (!history) throw new Error('SOURCE_REFUSAL_HISTORY_UNCONFIRMED');
+      if (history.seen)
+        await this.persistDriftHold(
+          eventId,
+          eventId,
+          'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
+          client,
+        );
+    };
+    if (tx) await work(tx);
+    else await this.prisma.transaction(work);
   }
 
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {

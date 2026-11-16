@@ -3379,5 +3379,19 @@
     "hash": "3c82e0806a896b55c01b043d4fe8c3eb2874520cf7d63d6a5ffa972dcb0efdc5",
     "occurrence": 0,
     "decision": "platform-wide: parked-event attempt metadata and durable refusal history under the asset lock; original event identity/tenant/envelope preserved"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 98,
+    "hash": "f677b469e24151253c64c3eeb84c1c2d3aeb30554efc605887c806aa8188f72e",
+    "occurrence": 0,
+    "decision": "platform-wide: hash-only append-only refusal history; bound event hash, no tenant payload, no seal/parked-row dependency"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 92,
+    "hash": "d54411274c17c1cb656c32d6cafdc1a69142fd0050e1a1f09de4e530ff281bba",
+    "occurrence": 0,
+    "decision": "platform-wide: durable refusal/evidence existence for exact event hash/id before DLQ; no tenant-facing contents, read failure refuses exhaustion"
   }
 ]
