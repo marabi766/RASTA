@@ -169,13 +169,26 @@ describe('EventConsumer delivery metadata', () => {
     },
   );
 
-  it('sets rebalance above the full evidence/transaction budget and heartbeats through all pauses', async () => {
+  it('keeps every non-opted-in consumer at the KafkaJS 60s default', async () => {
+    const kafka = new FakeKafkaConsumer();
+    const factory = jest.fn(() => kafka);
+    const consumer = new EventConsumer(options, async () => undefined, silentLogger);
+    (consumer as unknown as { kafka: unknown }).kafka = { consumer: factory };
+    try {
+      await consumer.start();
+      expect(factory).toHaveBeenCalledWith(expect.objectContaining({ rebalanceTimeout: 60_000 }));
+    } finally {
+      await consumer.stop();
+    }
+  });
+
+  it('sets opt-in rebalance above the full evidence/transaction budget and heartbeats through all pauses', async () => {
     jest.useFakeTimers();
     const kafka = new FakeKafkaConsumer(),
       producer = new FakeDlqProducer();
     const persist = jest.fn().mockResolvedValue(undefined);
     const consumer = new EventConsumer(
-      { ...options, deadLetterTopic: 'test.dlq' },
+      { ...options, deadLetterTopic: 'test.dlq', rebalanceTimeoutMs: 300_000 },
       async () => {
         throw new EventHandlingUnconfirmedError('REFUSAL', undefined, {
           attempts: 8,
@@ -195,10 +208,10 @@ describe('EventConsumer delivery metadata', () => {
       expect(factory).toHaveBeenCalledWith(
         expect.objectContaining({
           sessionTimeout: 60_000,
-          rebalanceTimeout: CONSUMER_REBALANCE_TIMEOUT_MS,
+          rebalanceTimeout: 300_000,
         }),
       );
-      expect(CONSUMER_REBALANCE_TIMEOUT_MS).toBeGreaterThan(70_000 + 11 * (57_000 / 3) + 3000);
+      expect(CONSUMER_REBALANCE_TIMEOUT_MS).toBe(60_000);
       const heartbeat = jest.fn().mockResolvedValue(undefined);
       const dispatch = consumer as unknown as {
         handleMessage(

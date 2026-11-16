@@ -2,6 +2,7 @@ import { envEnumProbes } from '@rasta/config';
 import { CONSUMER_SESSION_TIMEOUT_MS } from '@rasta/nest-common';
 import {
   assetSyncBudgetProblem,
+  assetSyncRebalanceTimeoutMs,
   assetSyncDeliveryWorstCaseMs,
   dispatchPolicyFromEnv,
   fleetEnvSchema,
@@ -35,6 +36,7 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     // Three attempts of (0.5 s reads + 3 s call + 0.5 s start wait + 14.2 s) and
     // pauses of 0.5 s and 1 s: under 60 s less the 3 s margin.
     expect(assetSyncDeliveryWorstCaseMs(env)).toBe(56_100);
+    expect(assetSyncRebalanceTimeoutMs(env)).toBe(300_000);
     expect(CONSUMER_SESSION_TIMEOUT_MS).toBe(60_000);
   });
 

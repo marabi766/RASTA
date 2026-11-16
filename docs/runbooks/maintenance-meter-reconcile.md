@@ -395,17 +395,32 @@ A missing seal row sends **every event**, including `INSPECTION_FAILED`, through
 at least 70 seconds, a HOLD and the DLQ. Worst-case partition pause is
 **70 seconds × backlog**, plus transaction and DLQ time.
 
-A refusal seen on any attempt requires a HOLD at every subsequent non-refusal
-exhaustion boundary. Live deliveries retain that policy; parked rows latch
-`reason = SOURCE_REFUSAL_SEEN`, including across process restarts and five-minute sweep intervals.
-HOLD `run_id` is a closed cause code, not a seal run:
-`SOURCE_REFUSAL_UNCONFIRMED` or `SOURCE_INFRASTRUCTURE_DURING_REFUSAL`.
-The latter distinguishes a final infrastructure failure after an earlier refusal.
+A refusal policy is retained within one live delivery. Parked rows try to latch
+`reason = SOURCE_REFUSAL_SEEN`; this survives restarts only if that write commits.
+Known gaps: redelivery loses the live policy, a held seal can block the parked
+latch, and a concurrent attempt-version mismatch can discard the observed refusal.
+Later ordinary exhaustion on these paths can publish to DLQ without a HOLD.
+HOLD `run_id` currently stores a cause code (`SOURCE_REFUSAL_UNCONFIRMED` or
+`SOURCE_INFRASTRUCTURE_DURING_REFUSAL`), which can collide with operator run IDs;
+only the first cause for an event is retained. Durable history and cause separation
+remain follow-ups.
 
-KafkaJS `rebalanceTimeout` is explicitly 300 seconds. The startup-checked ordinary
-budget is below 57 seconds (session 60 seconds less 3 seconds): ten total attempts,
-a separate HOLD transaction and seven 10-second pauses fit below 279 seconds.
-The 60-second session timeout is unchanged; heartbeats bracket each attempt and
-every 10-second pause, and upstream calls heartbeat too. Thus a healthy member
-can finish its evidence window and rejoin within the rebalance timeout. A broker
-outage or process crash can still redeliver; HOLD and evidence inserts stay idempotent.
+Only fleet asset-sync opts into an extended KafkaJS `rebalanceTimeout`, computed
+from its startup-checked transaction budget, seven extra attempts, a HOLD and
+seven 10-second pauses, rounded up to a minute (300 seconds at defaults).
+Other EventConsumer groups use the KafkaJS default 60 seconds. A rebalance during
+asset-sync's window can stall **all partitions in that group**, including unrelated
+inspection events. The 60-second session timeout is unchanged; heartbeats bracket
+attempts, pauses and upstream calls. The below-279-second handler budget excludes
+DLQ publication: producer retries (eight) and the default 30-second request timeout
+can exceed the remaining margin. Completion within the rebalance timeout is not
+guaranteed; outages, deploys and crashes can redeliver.
+
+The capacity token guard accepts only NULL-to-holder and matching-holder-to-NULL
+transitions with an unchanged overflow count. The authority supplies the exact
+holder UUID through transaction-local `rasta.meter_activation_token`; a bare runtime
+UPDATE, token replacement, mismatched holder or reused pooled transaction refuses.
+This is an internal holder protocol, not a new authorization boundary: arbitrary
+runtime SQL that deliberately supplies the matching token can invoke the protocol.
+Ambiguous activation outcomes retain the token. Operator reconciliation/clearing,
+REST authority wiring, CLI, durable progress and reopening remain future work.
