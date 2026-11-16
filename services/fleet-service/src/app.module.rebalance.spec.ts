@@ -32,11 +32,15 @@ it('only asset-sync opts into its startup-computed rebalance budget', async () =
   const consumer = sync.consumerFactory(async () => undefined) as unknown as {
     options: {
       rebalanceTimeoutMs?: number;
-      beforeExhaustion: (event: { eventId: string }) => Promise<void>;
+      beforeExhaustion: (event: { eventId: string; payload?: unknown }) => Promise<void>;
     };
   };
   expect(consumer.options.rebalanceTimeoutMs).toBe(assetSyncRebalanceTimeoutMs(env));
   expect(consumer.options.rebalanceTimeoutMs).toBe(300_000);
   await consumer.options.beforeExhaustion({ eventId: 'EVT' });
-  expect(holdRefusedExhaustion).toHaveBeenCalledWith('EVT');
+  expect(holdRefusedExhaustion).toHaveBeenLastCalledWith('EVT', undefined);
+  await consumer.options.beforeExhaustion({ eventId: 'EVT', payload: { assetId: 'AST' } });
+  expect(holdRefusedExhaustion).toHaveBeenLastCalledWith('EVT', 'AST');
+  await consumer.options.beforeExhaustion({ eventId: 'EVT', payload: { assetId: 42 } });
+  expect(holdRefusedExhaustion).toHaveBeenLastCalledWith('EVT', undefined);
 });

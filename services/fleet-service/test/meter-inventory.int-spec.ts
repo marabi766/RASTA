@@ -2,6 +2,7 @@ import { dlqMessagesTotal, driftEvidenceOwnerChangesTotal } from '@rasta/observa
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assetSyncRebalanceTimeoutMs, loadFleetEnv } from '../src/config/env';
+import { SOURCE_REFUSAL_HISTORY_TRANSACTION } from '../src/config/source-evidence-policy';
 import { SourceDriftRefusal } from '../src/fleet/drift-quarantine';
 import { Prisma } from '../src/generated/prisma';
 import { eligibilityClockWrite } from '@rasta/testing';
@@ -256,7 +257,9 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await owner.client.$executeRawUnsafe(
       `ALTER TABLE "${schema}".meter_refusal_history RENAME TO unavailable_history`,
     );
-    await expect(new FleetRepository(prisma).holdRefusedExhaustion(id('EVT'))).rejects.toThrow();
+    await expect(
+      new FleetRepository(prisma).holdRefusedExhaustion(id('EVT'), undefined),
+    ).rejects.toThrow();
   });
   const events = () => prisma.client.outboxMessage.findMany({ where: { aggregateId: runId } });
   it.each([
@@ -334,7 +337,11 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         deadLetterTopic: 'rasta.fleet.v1.dlq',
         maxRetries: 3,
         retryBackoffMs: 0,
-        beforeExhaustion: (event) => repository.holdRefusedExhaustion(event.eventId),
+        beforeExhaustion: (event) =>
+          repository.holdRefusedExhaustion(
+            event.eventId,
+            mode === 'redelivery' ? event.aggregateId : undefined,
+          ),
       },
       () => {
         if (redelivered) throw new Error('ordinary infrastructure');
@@ -408,6 +415,15 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
         expect(
           await prisma.client.$queryRaw`SELECT overflow_count FROM meter_drift_capacity`,
         ).toEqual([{ overflow_count: ['seal-lock', 'token-clears'].includes(mode) ? 0n : 1n }]);
+        if (['token', 'redelivery', 'missing-gate'].includes(mode)) {
+          expect(await prisma.client.$queryRaw`SELECT asset_id FROM meter_drift_overflow`).toEqual([
+            {
+              asset_id: createHash('sha256')
+                .update(mode === 'missing-gate' ? eventId : event.aggregateId)
+                .digest('hex'),
+            },
+          ]);
+        }
         if (mode === 'token') {
           await assertHoldDownRefuses();
         }
@@ -1226,6 +1242,132 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       'ACTIVE_DRIFT_EVIDENCE_ROLLBACK_REFUSED',
     );
   });
+  it('committed overflow history survives owner eviction and ordinary redelivery exhaustion', async () => {
+    await command.seal(runId, actor);
+    const eventId = id('EVT'),
+      assetId = id('AST'),
+      repository = new FleetRepository(prisma);
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_quarantine DISABLE TRIGGER meter_drift_quarantine_guard`,
+    );
+    await prisma.client
+      .$executeRaw`INSERT INTO meter_drift_quarantine(event_id, asset_id, named_owner, reason, run_id)
+      SELECT 'FILL_' || n, 'AST_FILL', ${org.a}, 'SOURCE_INVENTORY_SEALED', ${runId} FROM generate_series(1,10000) n`;
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_quarantine ENABLE TRIGGER meter_drift_quarantine_guard`,
+    );
+    await expect(
+      repository.transaction(
+        async () => {
+          throw new SourceDriftRefusal(DLQ_REASONS.SOURCE_INVENTORY_SEALED, assetId, org.b);
+        },
+        undefined,
+        eventId,
+      ),
+    ).rejects.toMatchObject({ reason: 'SOURCE_DRIFT_QUARANTINE_FULL' });
+    expect(await prisma.client.$queryRaw`SELECT event_id FROM meter_drift_overflow`).toEqual([
+      { event_id: eventId },
+    ]);
+    const hash = createHash('sha256').update(eventId).digest('hex');
+    expect(await prisma.client.$queryRaw`SELECT event_hash FROM meter_refusal_history`).toEqual([
+      { event_hash: hash },
+    ]);
+    // Owner simulates bounded retention eviction; runtime cannot delete evidence directly.
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_overflow DISABLE TRIGGER meter_drift_overflow_guard`,
+    );
+    await owner.client.$executeRawUnsafe(`DELETE FROM "${schema}".meter_drift_overflow`);
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_overflow ENABLE TRIGGER meter_drift_overflow_guard`,
+    );
+    const transport = new EventConsumer(
+      {
+        brokers: ['localhost:9092'],
+        clientId: 'evicted-test',
+        groupId: 'evicted-test',
+        topics: ['rasta.asset.v1'],
+        deadLetterTopic: 'rasta.fleet.v1.dlq',
+        maxRetries: 1,
+        beforeExhaustion: (event) => repository.holdRefusedExhaustion(event.eventId, assetId),
+      },
+      async () => {
+        throw new Error('ordinary infrastructure');
+      },
+      { log: () => undefined, warn: () => undefined, error: () => undefined },
+    );
+    const dispatch = transport as unknown as {
+      dlqProducer: { send: jest.Mock };
+      handleMessage(
+        topic: string,
+        partition: number,
+        value: Buffer,
+        headers: undefined,
+      ): Promise<void>;
+    };
+    const send = jest.fn(async () => {
+      expect(
+        await prisma.client.$queryRaw`SELECT event_id, asset_id, reason FROM meter_drift_overflow`,
+      ).toEqual([
+        {
+          event_id: `HOLD:${hash}`,
+          asset_id: createHash('sha256').update(assetId).digest('hex'),
+          reason: 'SOURCE_DRIFT_HOLD',
+        },
+      ]);
+    });
+    dispatch.dlqProducer = { send };
+    await dispatch.handleMessage(
+      'rasta.asset.v1',
+      0,
+      Buffer.from(
+        JSON.stringify({
+          eventId,
+          eventName: 'ASSET_CREATED',
+          eventVersion: 1,
+          tenantId: org.b,
+          producer: 'asset-service',
+          producerVersion: 'test',
+          occurredAt: new Date().toISOString(),
+          aggregateId: assetId,
+          aggregateType: 'Asset',
+          correlationId: id('COR'),
+          payload: { assetId },
+        }),
+      ),
+      undefined,
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('exhaustion callback has explicit transaction bounds while capacity is locked', async () => {
+    const repository = new FleetRepository(prisma),
+      eventId = id('EVT');
+    await prisma.client
+      .$executeRaw`INSERT INTO meter_refusal_history VALUES (${createHash('sha256').update(eventId).digest('hex')})`;
+    const held = latch(),
+      release = latch();
+    const holder = prisma.transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM meter_drift_capacity FOR UPDATE`;
+      held.release();
+      await release.ready;
+    });
+    await held.ready;
+    const transaction = jest.spyOn(prisma, 'transaction');
+    const timer = setTimeout(release.release, SOURCE_REFUSAL_HISTORY_TRANSACTION.timeoutMs + 200);
+    try {
+      await expect(repository.holdRefusedExhaustion(eventId, undefined)).rejects.toThrow();
+      expect(transaction).toHaveBeenCalledWith(
+        expect.any(Function),
+        SOURCE_REFUSAL_HISTORY_TRANSACTION,
+      );
+      expect(await prisma.client.$queryRaw`SELECT * FROM meter_drift_overflow`).toEqual([]);
+    } finally {
+      clearTimeout(timer);
+      release.release();
+      await holder;
+    }
+  });
+
   it.each([false, true])(
     'acknowledges owner-change redelivery after lost DLQ publish, overflow=%s',
     async (overflow) => {
@@ -1856,10 +1998,11 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
       });
       if (holdMode) {
         expect(
-          await prisma.client.$queryRaw`SELECT reason, run_id FROM meter_drift_overflow`,
+          await prisma.client.$queryRaw`SELECT reason, run_id, asset_id FROM meter_drift_overflow`,
         ).toEqual([
           {
             reason: 'SOURCE_DRIFT_HOLD',
+            asset_id: createHash('sha256').update(assetId).digest('hex'),
             run_id: mode.startsWith('refused-then-')
               ? 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL'
               : 'SOURCE_REFUSAL_UNCONFIRMED',

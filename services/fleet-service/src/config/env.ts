@@ -16,6 +16,11 @@ import {
 } from '@rasta/nest-common';
 import { INSURANCE_COVERAGES, type DispatchPolicy } from '../fleet/dispatch-blocks';
 import { fleetOperationBudgets } from './operation-budgets';
+import {
+  ACTIVATION_RETRY_ATTEMPTS,
+  ACTIVATION_RETRY_BACKOFF_MS,
+  SOURCE_REFUSAL_HISTORY_TRANSACTION,
+} from './source-evidence-policy';
 
 /**
  * fleet-service configuration.
@@ -279,32 +284,34 @@ type AssetSyncTimeouts = Pick<
  * on this sum alone; it is still held to it.
  */
 export function assetSyncDeliveryWorstCaseMs(env: AssetSyncTimeouts): number {
-  const attempt =
-    2 * env.FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS +
-    env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS +
-    env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS;
+  const attempt = assetSyncAttemptWorstCaseMs(env);
   let pauses = 0;
   for (let failed = 1; failed < DEFAULT_MAX_RETRIES; failed += 1)
     pauses += DEFAULT_BACKOFF_MS * failed;
   return DEFAULT_MAX_RETRIES * attempt + pauses;
 }
 
-/** Short independent refusal-history write; no seal or parked-row lock. */
-export const SOURCE_REFUSAL_HISTORY_TRANSACTION = Object.freeze({ timeoutMs: 500, maxWaitMs: 50 });
+export function assetSyncAttemptWorstCaseMs(env: AssetSyncTimeouts): number {
+  return (
+    2 * env.FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS +
+    env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS +
+    env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS
+  );
+}
 
-/** Ordinary attempts + seven extra attempts + HOLD + history writes + 70s pauses, rounded up.
+/** Ordinary delivery + evidence attempts, HOLD, history, exhaustion callback and pauses, rounded up.
  * DLQ broker retries are additional; this is not an end-to-end deadline. */
 export function assetSyncRebalanceTimeoutMs(env: AssetSyncTimeouts): number {
   const ordinary = assetSyncDeliveryWorstCaseMs(env);
-  const attempt = (ordinary - 3 * DEFAULT_BACKOFF_MS) / DEFAULT_MAX_RETRIES;
+  const attempt = assetSyncAttemptWorstCaseMs(env);
   return (
     Math.ceil(
       (ordinary +
-        8 * attempt +
-        11 *
+        ACTIVATION_RETRY_ATTEMPTS * attempt +
+        (DEFAULT_MAX_RETRIES + ACTIVATION_RETRY_ATTEMPTS + 1) *
           (SOURCE_REFUSAL_HISTORY_TRANSACTION.timeoutMs +
             SOURCE_REFUSAL_HISTORY_TRANSACTION.maxWaitMs) +
-        70_000 +
+        (ACTIVATION_RETRY_ATTEMPTS - 1) * ACTIVATION_RETRY_BACKOFF_MS +
         3_000) /
         60_000,
     ) * 60_000

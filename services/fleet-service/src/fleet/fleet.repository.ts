@@ -16,6 +16,7 @@ import type { FleetEventName } from './events';
 import type { MeterUsageView } from './meter-usage';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import { SOURCE_REFUSAL_HISTORY_TRANSACTION } from '../config/source-evidence-policy';
 import { Prisma } from '../generated/prisma';
 import type { InsuranceCover } from './dispatch-blocks';
 import { sourceFenceRefusal } from './source-fence-refusal';
@@ -75,7 +76,7 @@ export class FleetRepository {
 
   persistDriftHold(
     eventId: string,
-    assetId: string,
+    assetId: string | undefined,
     cause: SourceHoldCause,
     tx?: ExtendedPrismaClient,
   ): Promise<void> {
@@ -87,23 +88,26 @@ export class FleetRepository {
     );
   }
 
-  async holdRefusedExhaustion(eventId: string, tx?: ExtendedPrismaClient): Promise<void> {
+  async holdRefusedExhaustion(
+    eventId: string,
+    assetId: string | undefined,
+    tx?: ExtendedPrismaClient,
+  ): Promise<void> {
     const work = async (client: ExtendedPrismaClient): Promise<void> => {
       const [history] = await client.$queryRaw<{ seen: boolean }[]>`
         SELECT EXISTS(SELECT 1 FROM meter_refusal_history WHERE event_hash = ${sourceEventHash(eventId)})
-          OR EXISTS(SELECT 1 FROM meter_drift_quarantine WHERE event_id = ${eventId})
-          OR EXISTS(SELECT 1 FROM meter_drift_overflow WHERE event_id = ${eventId}) AS seen`;
+          OR EXISTS(SELECT 1 FROM meter_drift_quarantine WHERE event_id = ${eventId}) AS seen`;
       if (!history) throw new Error('SOURCE_REFUSAL_HISTORY_UNCONFIRMED');
       if (history.seen)
         await this.persistDriftHold(
           eventId,
-          eventId,
+          assetId,
           'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
           client,
         );
     };
     if (tx) await work(tx);
-    else await this.prisma.transaction(work);
+    else await this.prisma.transaction(work, SOURCE_REFUSAL_HISTORY_TRANSACTION);
   }
 
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {

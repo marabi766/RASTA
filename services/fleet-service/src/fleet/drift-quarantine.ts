@@ -1,12 +1,14 @@
 import { EventHandlingUnconfirmedError, UnprocessableEventError } from '@rasta/nest-common';
-import { SOURCE_REFUSAL_HISTORY_TRANSACTION } from '../config/env';
+import { SOURCE_REFUSAL_HISTORY_TRANSACTION } from '../config/source-evidence-policy';
 import { Prisma } from '../generated/prisma';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { driftEvidenceOwnerChangesTotal } from '@rasta/observability';
 import { createHash } from 'node:crypto';
 
-const ACTIVATION_RETRY_ATTEMPTS = 8;
-const ACTIVATION_RETRY_BACKOFF_MS = 10_000;
+import {
+  ACTIVATION_RETRY_ATTEMPTS,
+  ACTIVATION_RETRY_BACKOFF_MS,
+} from '../config/source-evidence-policy';
 
 export class SourceDriftRefusal extends EventHandlingUnconfirmedError {
   constructor(
@@ -79,6 +81,9 @@ export async function quarantineTransaction<T>(
           VALUES (${eventId}, ${error.assetId},
             (SELECT organization_id FROM meter_inventory_seal_asset WHERE asset_id = ${error.assetId}),
             ${error.namedOwner}, ${error.reason}, ${gate.run_id}) ON CONFLICT (event_id) DO NOTHING`;
+        // Commit the permanent marker with either primary or overflow evidence.
+        await tx.$executeRaw`INSERT INTO meter_refusal_history(event_hash)
+          VALUES (${sourceEventHash(eventId)}) ON CONFLICT DO NOTHING`;
         const [overflow] = await tx.$queryRaw<{ present: boolean; owner_changed: boolean }[]>`
           SELECT EXISTS(SELECT 1 FROM meter_drift_overflow WHERE event_id = ${eventId}) AS present,
             EXISTS(SELECT 1 FROM (SELECT * FROM meter_drift_quarantine UNION ALL SELECT * FROM meter_drift_overflow) q
@@ -141,11 +146,10 @@ export async function persistSourceDriftHold<T>(
   assetId: string | undefined,
   cause: SourceHoldCause,
 ): Promise<void> {
-  const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
   await transaction(async (tx) => {
     await tx.$executeRaw`INSERT INTO meter_drift_overflow
       (event_id, asset_id, named_owner, reason, run_id)
-      VALUES (${`HOLD:${hash(eventId)}`}, ${hash(assetId ?? eventId)},
+      VALUES (${`HOLD:${sourceEventHash(eventId)}`}, ${sourceEventHash(assetId ?? eventId)},
         'PLATFORM', 'SOURCE_DRIFT_HOLD', ${cause}) ON CONFLICT (event_id) DO NOTHING`;
     return undefined as T;
   });
