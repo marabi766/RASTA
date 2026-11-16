@@ -6,12 +6,24 @@ import { fileURLToPath } from 'node:url';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { generate, schemaArgs } from './prisma-generate.mjs';
 import { createHash } from 'node:crypto';
+import { parseDocument } from 'yaml';
 import { dockerRun, effectiveShell, readOptions, readShell } from './ci-shell-policy-lib.mjs';
 import { parseCommands } from './ci-shell-text-lib.mjs';
 import * as lifecycleLib from './prisma-lifecycle-suppression-lib.mjs';
-import { jobWrites, shellWrites, stale, stepWrites } from './ci-write-targets-lib.mjs';
+import {
+  CONTRACTS,
+  jobWrites,
+  OUTPUTS,
+  REVIEWED_INPUTS,
+  REVIEWED_TEXTS,
+  shellWrites,
+  stale,
+  stepWrites,
+  writeProblems,
+} from './ci-write-targets-lib.mjs';
 
-const { CONTAINER_SCRIPTS, ENV_PAIRS, MATRIX, MOUNTS, lifecycleFileKind } = lifecycleLib;
+const { CONTAINER_SCRIPTS, ENV_PAIRS, LISTED, MATRIX, MOUNTS, judged, lifecycleFileKind } =
+  lifecycleLib;
 // FU-334: every file a step runs, uses or builds is a member of this inventory, read once.
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const FILES = new Set(
@@ -248,8 +260,10 @@ test('every Dockerfile stage, workflow step and action runs lifecycle hooks supp
   const files = [...authoredFiles(root)];
   const workflows = Object.fromEntries(
     files
-      .filter(
-        (file) => lifecycleFileKind(relative(root, file).replaceAll('\\', '/')) === 'workflow',
+      .filter((file) =>
+        ['workflow', 'action'].includes(
+          lifecycleFileKind(relative(root, file).replaceAll('\\', '/')),
+        ),
       )
       .map((file) => [relative(root, file).replaceAll('\\', '/'), readFileSync(file, 'utf8')]),
   );
@@ -285,7 +299,7 @@ test('local workflow calls prove their own suppression; missing, mixed, remote a
   const call = (uses) =>
     `env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  call:\n    uses: ${uses}\n`;
   const child =
-    "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  run:\n    steps:\n      - run: pnpm install\n";
+    "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  run:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: pnpm install\n";
   const source = call(`./${target}`);
   const check = (text = source, workflows = { [target]: child }) =>
     workflowLifecycle(caller, text, workflows);
@@ -407,8 +421,8 @@ test('a workflow step or an action outside the suppression is refused', () => {
 
   // A new workflow: suppressed at any of the three levels, for every step, or refused.
   const fresh = (top, job, step) =>
-    `on: push\n${top}jobs:\n  a:\n    runs-on: x\n${job}    steps:\n      - run: pnpm deploy /out\n${step}` +
-    '  b:\n    runs-on: x\n    steps:\n      - uses: actions/checkout@v4\n';
+    `on: push\n${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n${job}    steps:\n      - run: pnpm deploy /out\n${step}` +
+    '  b:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n';
   const at = (indent) => `${indent}env:\n${indent}  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n`;
   assert.deepEqual(workflowLifecycle('new.yml', fresh(at(''), '', '')).errors, []);
   refused(workflowLifecycle, 'new.yml', fresh('', '', ''), /job a step 1 runs without/);
@@ -469,7 +483,7 @@ const runs = {
   workflow: (script) =>
     workflowLifecycle(
       'new.yml',
-      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: |\n${indent(script, '          ')}\n`,
+      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: |\n${indent(script, '          ')}\n`,
     ),
   action: (script) =>
     actionLifecycle(
@@ -543,7 +557,7 @@ test('shell text that could drop the suppression is refused wherever it runs', (
     'export PGHOST=localhost PGPORT="$port"\nunset KAFKA_SECRETS_DIR',
     'x_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"\neval "${x_credentials}"',
     'echo "dir=$RUNNER_TEMP/trivy-db" >> "$GITHUB_OUTPUT"',
-    'if ! command -v gitleaks >/dev/null 2>&1; then pnpm exec turbo run build | tee out.log; fi',
+    'if ! command -v gitleaks >/dev/null 2>&1; then pnpm exec turbo run build | tee /tmp/out.log; fi',
     "docker run --rm --entrypoint sh image@sha256:0 -c 'clamd --version; ls -l /var/lib/clamav/'",
   ])
     everywhere(script, null, true);
@@ -601,7 +615,7 @@ test('what an image or a step starts outside the suppression is refused', () => 
     notRead,
   );
   const workflow = (top, step) =>
-    `on: push\n${top}jobs:\n  a:\n    runs-on: x\n    env:\n      PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n    steps:\n${step}`;
+    `on: push\n${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n    env:\n      PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n    steps:\n${step}`;
   refused(
     workflowLifecycle,
     'new.yml',
@@ -872,7 +886,7 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
   ])
     for (const errors of steps(script))
       assert.match(errors, /a line continuation inside an operator is not read/, script);
-  for (const script of ['echo ok &&\\\necho ok', 'echo ok \\\n&& echo ok', 'echo ok >\\\nlog'])
+  for (const script of ['echo ok &&\\\necho ok', 'echo ok \\\n&& echo ok', 'echo ok >\\\n/tmp/log'])
     assert.deepEqual(steps(script), ['', ''], script);
   const unreviewed = /writes the environment of later steps in a line this check has not reviewed/;
   for (const script of [
@@ -900,7 +914,7 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
 
   // PM: a protected name in an `env`, at every level and in every kind of file, but as a reviewed pair.
   const workflow = (top, job, step) =>
-    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n${top}jobs:\n  a:\n    runs-on: x\n${job}    steps:\n      - run: echo ok\n${step}`;
+    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n${job}    steps:\n      - run: echo ok\n${step}`;
   const levels = (entry) => [
     workflow(`  ${entry}\n`, '', ''),
     workflow('', `    env:\n      ${entry}\n`, ''),
@@ -913,9 +927,75 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
   ];
   const errors = (text, path = 'new.yml') => workflowLifecycle(path, text).errors.join('\n');
   const sets = (name) => new RegExp(`env sets ${name}: `);
-  for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV', 'PATH', 'GITHUB_TOKEN'])
+  // #1118 F4: by family, what makes a program a step starts load code that is not the repository's
+  const LOADED =
+    'NODE_OPTIONS NODE_PATH NODE_ENV NODE_EXTRA_CA_CERTS BASH_ENV ENV PATH GITHUB_TOKEN LD_PRELOAD ' +
+    'LD_LIBRARY_PATH LD_AUDIT SHELLOPTS BASHOPTS PS4 IFS GIT_SSH_COMMAND GIT_SSH GIT_CONFIG_COUNT ' +
+    'GIT_CONFIG_GLOBAL GIT_CONFIG GIT_EXEC_PATH PSQLRC CURL_HOME GOFLAGS GOTOOLCHAIN GOPATH ' +
+    'CGO_CFLAGS OPENSSL_CONF OPENSSL_MODULES DOCKER_CONFIG DOCKER_HOST HOME XDG_CONFIG_HOME TMPDIR ' +
+    'CC CXX GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML TURBO_TEAM TURBO_BINARY_PATH PRISMA_QUERY_ENGINE_LIBRARY ' +
+    'COREPACK_HOME PLAYWRIGHT_BROWSERS_PATH ESBUILD_BINARY_PATH INPUT_PATH INPUT_REF ' +
+    // PR #1154 r1 F3: what the reviewed PATH line, psql and glibc load; where `mc`, `openssl` write
+    'PNPM_HOME PGSYSCONFDIR PGSERVICEFILE GCONV_PATH GLIBC_TUNABLES MC_CONFIG_DIR RANDFILE';
+  for (const name of LOADED.split(' ')) {
     for (const text of levels(`${name}: x`)) assert.match(errors(text), sets(name), text);
-  for (const text of levels('NODE_ENV: test')) assert.equal(errors(text), '', text);
+    everywhere(`${name}=x echo ok`, new RegExp(`sets ${name}: `));
+  }
+  // after a control word or a wrapper that no command follows, an assignment is the shell's own
+  for (const script of [
+    '{ PATH=/tmp/bin:$PATH; }',
+    'if true; then HOME=/tmp/h; fi',
+    'if true; then echo ok; else HOME=/tmp/h; fi',
+    'while PATH=x; do break; done',
+    'for a in 1; do PATH=x; done',
+    '! IFS=x',
+    'time PATH=x',
+    '{ A=1 PATH=x; }',
+  ])
+    everywhere(script, /sets (?:PATH|HOME|IFS): /);
+  for (const script of ['{ dir=/tmp/x; }', 'if true; then status=1; fi', 'echo PATH=x'])
+    everywhere(script, null, true);
+  for (const entry of [
+    'NODEX: x',
+    'GITLAB_TOKEN: x',
+    'LD: x',
+    'PS: x',
+    'GO_LIVE: x',
+    'HOMEPAGE: x',
+    'ACC: x',
+    'GITLEAKS_TEST_BINARY: x',
+    'BINARY_PATH: x',
+    'INPUT: x',
+    // F5: a program reads these names in capitals; in any other case a name is a text's own
+    'goal: x',
+    'cc: x',
+    'home: x',
+    'node_modules: x',
+  ])
+    for (const text of levels(entry)) assert.equal(errors(text), '', text);
+  everywhere('goal=1; cc=gcc; home=/tmp/h; ifs=,; git_dir=x; echo ok', null, true);
+  for (const text of levels('NPM_Config_Script_Shell: x'))
+    assert.match(errors(text), /a package manager option/);
+  // and that holds on Linux alone (on Windows `node_options` is NODE_OPTIONS, and no shell
+  // named is not bash): a job's runner is a reviewed image, written out
+  for (const runner of [
+    'windows-2022',
+    'macos-15',
+    'ubuntu-latest',
+    'Ubuntu-24.04',
+    'self-hosted',
+    '[ubuntu-24.04]',
+    '[self-hosted, ubuntu-24.04]',
+    '${{ matrix.os }}',
+    '{ group: x, labels: ubuntu-24.04 }',
+  ]) {
+    const text = swap(workflow('', '', ''), 'runs-on: ubuntu-24.04', `runs-on: ${runner}`);
+    assert.match(errors(text), /job a: runs-on is not a runner image this check reads/, runner);
+  }
+  assert.match(
+    errors(swap(workflow('', '', ''), '    runs-on: ubuntu-24.04\n', '')),
+    /job a: runs-on is not a runner image/,
+  );
   for (const entry of ['<<: { NODE_OPTIONS: x }', 'A: [NODE_OPTIONS]', 'A-B: x'])
     for (const text of levels(entry)) assert.match(errors(text), /is not a name with one value/);
   const composite = `${repoText(ENTRY.action)}    - shell: bash\n      env:\n        NODE_OPTIONS: x\n      run: echo ok\n`;
@@ -924,6 +1004,15 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
     'ENV NODE_OPTIONS=-r/tmp/x.js',
     'ARG NODE_PATH=/tmp',
     'ENV GITHUB_X=1',
+    'ENV LD_PRELOAD=/tmp/x.so',
+    'ARG GIT_SSH_COMMAND=x',
+    'ENV NODE_ENV=development',
+    'ARG NODE_ENV=production',
+    'ENV BASHOPTS=x',
+    // F3: the home the reviewed PATH line puts on the search path is the one written out
+    'ENV PNPM_HOME=/tmp/bin',
+    'ARG PNPM_HOME=/pnpm',
+    'ENV GCONV_PATH=/tmp',
   ])
     refused(
       dockerfileLifecycle,
@@ -933,24 +1022,95 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
         'ENV PNPM_HOME=/pnpm\n',
         `ENV PNPM_HOME=/pnpm\n${instruction}\n`,
       ),
-      /what node loads|an environment file is not text's to set/,
+      /what (?:node|a program) loads|an environment file is not text's to set/,
     );
   everywhere('GITHUB_TOKEN=x echo ok', /sets GITHUB_TOKEN: /);
-  assert.equal(ENV_PAIRS.size, 0, 'the repository sets no protected name in an env today');
+  // and the PATH line stands only in a stage where that home is set: unset, PATH starts with ''
+  const unset = /names a PNPM_HOME this stage has not set to \/pnpm/;
+  const docker = repoText(ENTRY.docker);
+  refused(dockerfileLifecycle, ENTRY.docker, swap(docker, 'ENV PNPM_HOME=/pnpm\n', ''), unset);
+  // a stage FROM the one that set it has it; a stage FROM an image does not
+  const again = (after) => swap(docker, after, `${after}ENV PATH="$PNPM_HOME:$PATH"\n`);
+  assert.deepEqual(dockerfileLifecycle(ENTRY.docker, again('FROM deps AS build\n')).errors, []);
+  refused(dockerfileLifecycle, ENTRY.docker, again('ENV NODE_ENV=production\n'), unset);
+  // #1118 F3: a pair is reviewed for ONE level of one file: at any other level it is refused.
+  // The real pairs each still stand in their file at their level, with a name that loads no code.
+  const real = [...ENV_PAIRS];
+  for (const pair of real) {
+    const [, path, level, name, value] =
+      pair.match(/^(\S+): (workflow|job|step|service): (NODE_VERSION|NODE_ENV|GO[A-Z]+)=(\S+)$/) ??
+      [];
+    const at = { workflow: '^', job: '^    ', step: '^        ', service: '^        ' }[level];
+    assert.match(
+      repoText(path),
+      new RegExp(`${at}env:\\n(?:${at} .*\\n)*?${at}  ${name}: '?${value}'?$`, 'm'),
+      pair,
+    );
+  }
   const memory = 'NODE_OPTIONS: --max-old-space-size=4096';
-  ENV_PAIRS.add('new.yml: NODE_OPTIONS=--max-old-space-size=4096').add('new.yml: NODE_PATH=1');
   try {
-    for (const text of levels(memory)) assert.equal(errors(text), '', text);
-    for (const text of levels(memory))
-      assert.match(errors(text, 'other.yml'), sets('NODE_OPTIONS'));
-    for (const text of levels(`${memory} -r /tmp/x.js`))
-      assert.match(errors(text), sets('NODE_OPTIONS'));
-    for (const text of levels('NODE_PATH: 1')) assert.match(errors(text), sets('NODE_PATH'));
-    for (const text of levels(memory.replace('OPTIONS', 'PATH')))
-      assert.match(errors(text), sets('NODE_PATH'));
+    for (const [reviewed, level] of ['workflow', 'job', 'step', 'service'].entries()) {
+      ENV_PAIRS.clear();
+      ENV_PAIRS.add(`new.yml: ${level}: NODE_OPTIONS=--max-old-space-size=4096`);
+      ENV_PAIRS.add(`new.yml: ${level}: NODE_PATH=1`);
+      for (const [at, text] of levels(memory).entries()) {
+        if (at === reviewed) assert.equal(errors(text), '', text);
+        else assert.match(errors(text), sets('NODE_OPTIONS'), `${level}: ${text}`);
+        assert.match(errors(text, 'other.yml'), sets('NODE_OPTIONS'));
+      }
+      for (const text of levels(`${memory} -r /tmp/x.js`))
+        assert.match(errors(text), sets('NODE_OPTIONS'));
+      for (const text of levels('NODE_PATH: 1')) assert.match(errors(text), sets('NODE_PATH'));
+      for (const text of levels(memory.replace('OPTIONS', 'PATH')))
+        assert.match(errors(text), sets('NODE_PATH'));
+    }
+    // a pair without its level (the form before #1118 F3) admits nothing
+    ENV_PAIRS.clear();
+    ENV_PAIRS.add('new.yml: NODE_OPTIONS=--max-old-space-size=4096');
+    for (const text of levels(memory)) assert.match(errors(text), sets('NODE_OPTIONS'), text);
   } finally {
     ENV_PAIRS.clear();
+    for (const pair of real) ENV_PAIRS.add(pair);
   }
+
+  // #1118 F2: a value of an `env` or a `with` hands on no file the runner reads, at every level.
+  const handsOn = /hands on github\.env, github\.path, github\.output or github\.state/;
+  const context = (member) => `OUT: \${{ ${member} }}`;
+  for (const member of [
+    'github.env',
+    'github.path',
+    'github.output',
+    'github.state',
+    'GITHUB.ENV',
+    'github . env',
+    "github['env']",
+    "github[format('{0}', 'env')]",
+    'toJSON(github)',
+    "format('{0}', github.env)",
+    "format('}}', github.env)",
+    "'a' }}/x${{ github.env",
+    'github.sha || github.env',
+  ]) {
+    for (const text of levels(context(member))) assert.match(errors(text), handsOn, text);
+    const used = workflow(
+      '',
+      '',
+      `      - uses: actions/cache@v4\n        with:\n          key: \${{ ${member} }}\n          path: /tmp/x\n`,
+    );
+    assert.match(errors(used), handsOn, used);
+    const called = `on: push\njobs:\n  call:\n    uses: ./.github/workflows/ci.yml\n    with:\n      out: \${{ ${member} }}\n`;
+    assert.match(errors(called), handsOn, called);
+  }
+  for (const member of [
+    'github.sha',
+    'github.event.before',
+    'github.event.path',
+    'github.environment',
+    'github.path_x',
+    'runner.temp',
+  ])
+    for (const text of levels(context(member))) assert.equal(errors(text), '', text);
+  for (const text of levels('OUT: github.env')) assert.equal(errors(text), '', text);
 
   // After a `cd`, only what `&&` joins to it is read as run there: the `cd` ran, and succeeded.
   const [cd, node] = ['cd services/api-gateway', 'node dist/main.js'];
@@ -1003,7 +1163,7 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
   for (const errors of steps(`true || # c\n\n${cd} && ${node}`)) assert.match(errors, line);
   for (const script of [
     `${cd} && ${node}`,
-    `${cd} 2>/dev/null && echo "$(true; true)" && { ${node} | tee log; }`,
+    `${cd} 2>/dev/null && echo "$(true; true)" && { ${node} | tee /tmp/log; }`,
     // under a condition too: what `&&` joins to the `cd` runs there whenever it runs
     `if true\nthen\n${cd} && ${node}\nfi`,
     `for i in 1 2; do echo ok; done\n${cd} &&\n${node}`,
@@ -1036,7 +1196,8 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['f() { echo a > x; }', ['? what `f` writes', 'x']],
     // the programs that write their operands
     // before `--`, a word computed from its start, or inside an option, may be any option
-    ['cp "$src" fixtures/claim.sql', ['? "$src"']],
+    // (what the other words name is written all the same: a review of the text forgives no path)
+    ['cp "$src" fixtures/claim.sql', ['? "$src"', 'fixtures/claim.sql']],
     ['cp -- "$src" fixtures/claim.sql', ['? "$src"', 'fixtures/claim.sql']],
     ['cp fixtures/$n.sql /tmp/x', ['? fixtures/$n.sql']],
     ['curl "$FLAG" out.sql https://h/x', ['? "$FLAG"']],
@@ -1093,7 +1254,7 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['curl -sSo$OUT https://h/x', ['? -sSo$OUT']],
     ['curl -H"X: $TOKEN" -d "$BODY" https://h/x', ['? -H"X: $TOKEN"', '? "$BODY"']],
     ['wget --output-document="$OUT" https://h/x', ['? --output-document="$OUT"']],
-    ['cp --target-directory="$OUT" a', ['? --target-directory="$OUT"']],
+    ['cp --target-directory="$OUT" a', ['? --target-directory="$OUT"', 'a']],
     ['curl --output out.sql https://h/x', ['out.sql']],
     ['curl --out out.sql https://h/x', ['out.sql']],
     ['curl -D headers -c jar https://h/x', ['headers', 'jar']],
@@ -1181,10 +1342,10 @@ test('the write-target model places every write of a step, or it is unknown (FU-
       'scripts/generate.sh',
       './generate.sh',
       'pnpm install --frozen-lockfile',
-      'openssl rand -hex 24',
+      'awk -f a.awk',
       'watch cp a b',
       'uniq a b',
-      'rm -f /tmp/x',
+      'rmdir /tmp/x',
     ].map((text) => [text, [`? what \`${text.split(' ')[0]}\` writes`]]),
     [
       'x="$(node -p 1)"; export A=1 B="$(pnpm -v)"',
@@ -1215,6 +1376,51 @@ test('the write-target model places every write of a step, or it is unknown (FU-
       ['? what such a word names'],
     ]),
     ['cat <<EOF > x\nEOF', ['? a here-document, which is not read', 'x', '? what `EOF` writes']],
+    // PR #1154 r1 F1: the programs the shell reader lists by name alone. A deletion, a new
+    // directory and a change of mode are writes of the operand; a mode is no operand
+    ['rm -rf apps/web/.next -- -x', ['apps/web/.next', '-x']],
+    ['mkdir -pm 700 a 700', ['a', '700']],
+    ['mkdir -m a b', ['a', 'b']],
+    ['chmod 0644 0755 f; chmod u+x,g g; chmod +x h', ['0755', 'f', 'u+x,g', 'g', 'h']],
+    ['chmod -w 644; chmod 644 -w; chmod -R 0755 d', ['644', '644', '0755', 'd']],
+    ['chmod --reference=a b', ['? what such an option reads or runs']],
+    ['mktemp; mktemp -d; mktemp /tmp/x.XXXXXX; mktemp "$RUNNER_TEMP/x.XXXXXX"', []],
+    [
+      'mktemp -d x.XXX; mktemp -pscripts; mktemp --tmpdir=a -t t.XXX',
+      ['x.XXX', 'scripts', 'a', 't.XXX'],
+    ],
+    ['openssl rand -hex 32; openssl rand -base64 32; /usr/bin/openssl rand 8', []],
+    ['openssl rand -out f -base64 8; openssl rand -out "$RUNNER_TEMP/k" 8', ['f']],
+    ...[
+      'openssl rand -hex 8 -out f',
+      'openssl rand -hex "$n"',
+      'openssl rand -writerand f 8',
+      'openssl req -x509 -keyout k.pem',
+      'openssl enc -in a -out b',
+      'openssl genrsa -out /tmp/k.pem 2048',
+      'openssl',
+      'mc alias set a http://h k s',
+      'mc support diag a',
+      'mc update',
+      'mc mb -C scripts local/b',
+      'mc mb "$BUCKET"',
+      'mc mb --autocompletion local/b',
+      'mc --config-dir d cp a b',
+      'mc mirror --watch local/b /tmp/x',
+    ].map((text) => [text, ['? a form of the program that is not read']]),
+    ['gitleaks detect --redact --report-format=sarif --report-path=f --no-color', ['f']],
+    ['gitleaks detect --report-path f -r g -vrh --report i', ['f', 'g', 'h', 'i']],
+    // `--diagnostics` writes into the directory it runs in (its value may be the other option's)
+    ['gitleaks detect --diagnostics=cpu; gitleaks dir --diagnostics-dir d .', ['', 'cpu', 'd']],
+    ['gitleaks detect --log-opts="$RANGE" -r f', ['? --log-opts="$RANGE"', 'f']],
+    ['gitleaks detect "$FLAG"', ['? "$FLAG"']],
+    ['gitleaks detect --log-opts=--output=package.json', ['? what such an option reads or runs']],
+    ['mc mb --ignore-existing rasta/documents; mc anonymous set none rasta/documents; mc', []],
+    ['mc cp local/b/.npmrc .npmrc', ['local/b/.npmrc', '.npmrc']],
+    ['mc mirror local/b scripts', ['local/b', 'scripts']],
+    ['mc get local/b/x "$OUT"', ['? "$OUT"', 'local/b/x']],
+    ['for _ in $(seq 1 3); do sleep 1; done; tool="$(command -v gitleaks)"', []],
+    ['command rm -f .npmrc; bash -c "rm -f package.json"', ['.npmrc', 'package.json']],
     [
       'echo a > /tmp/x\r\necho b > /tmp/y',
       [
@@ -1274,6 +1480,8 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['actions/download-artifact', { path: ' \n' }, ['?  \n']],
     ['aquasecurity/trivy-action', { 'cache-dir': '' }, ['? an empty path']],
     ['actions/cache', { key: 'k', path: '~/.cache/.. ' }, ['? ~/.cache/..']],
+    ['actions/cache', { key: 'k', path: '~/.npmrc' }, ['? ~/.npmrc']],
+    ['actions/cache', { key: 'k', path: '~/.cache' }, ['? ~/.cache']],
     ['actions/cache', { key: 'k', path: '${{ runner.temp }}/..\t' }, ['? ${{ runner.temp }}/..']],
     ['actions/cache', { key: 'k', path: '~/.cache/x\nnode_modules\n' }, ['node_modules']],
     ['actions/cache', { key: 'k', path: 7 }, ['? 7']],
@@ -1391,9 +1599,265 @@ test('the write-target model places every write of a step, or it is unknown (FU-
   assert.deepEqual(jobWrites({ run: 'echo a > x' }).map(show), ['? steps that are not a list']);
 });
 
+// FU-340 part B, the shell reader: before it a step could write a script or a configuration
+// file and a later command ran or read it as the repository's.
+test('a step writes into the checkout only a reviewed output (FU-340 part B)', () => {
+  // the shell reader: a workflow step and an action step write nothing a later command runs or reads
+  const reviewedOnly = /a step writes into the checkout only the outputs reviewed in OUTPUTS/;
+  const unplaced = /which this check cannot tell from the checkout/;
+  for (const [script, pattern] of [
+    // the script a step then runs; the configuration a program reads, named by no later word
+    [
+      'echo ok > scripts/ci-pull-image.sh\nscripts/ci-pull-image.sh x',
+      /writes scripts\/ci-pull-image\.sh: /,
+    ],
+    ['echo "script-shell=/tmp/x" >> .npmrc\npnpm install --frozen-lockfile', /writes \.npmrc: /],
+    ['echo ok | tee infrastructure/docker/clamav/clamd.conf', reviewedOnly],
+    ['curl -fsSo scripts/ci-pull-image.sh https://example.org/x', reviewedOnly],
+    ['curl -fsSO https://example.org/x', /writes the checkout: /],
+    ["bash -c 'echo ok > package.json'", /writes package\.json: /],
+    ['echo ok > new-file', /writes new-file: /],
+    ['echo ok > .economic-coverage2/x.json', /writes \.economic-coverage2\/x\.json: /],
+    ['echo ok > .economic-coverage/../package.json', unplaced],
+    // only `${{ env.NAME }}` is read as one computed word: any other expression may be a write
+    ['echo ${{ github.sha }} > /tmp/x', /may write what an expression pastes in, which/],
+    ['echo ok > "$OUT"', unplaced],
+    ['echo ok > "${dir}/x"', unplaced],
+    ['echo ok > /home/runner/work/x', unplaced],
+    ['cd services/api-gateway && node dist/main.js > log', unplaced],
+    // PR #1130 r1 F1: a second destination is no command of the reader's policy to judge
+    [
+      'tee --suffix=.bak /tmp/x; cp -b /tmp/a /tmp/b',
+      /may write a second destination no word names, which/,
+    ],
+    // PR #1154 r1 F1: a program the reader lists by name alone, with an operand in the checkout
+    ['openssl rand -out scripts/ci-pull-image.sh -hex 8', /writes scripts\/ci-pull-image\.sh: /],
+    ['openssl rand -hex 8 -out scripts/ci-pull-image.sh', /may write a form of the program that/],
+    ['gitleaks detect --report-path=package.json', /writes package\.json: /],
+    ['gitleaks detect --diagnostics=cpu', /writes the checkout: /],
+    ['mc cp local/b/.npmrc .npmrc\npnpm install --frozen-lockfile', /writes \.npmrc: /],
+    ['mc mb -C scripts local/b', /may write a form of the program that is not read, which/],
+    ['rm -f .npmrc', /writes \.npmrc: /],
+    ['rm -rf scripts', /writes scripts: /],
+    ['mktemp scripts/x.XXXXXX', /writes scripts\/x\.XXXXXX: /],
+    ['mkdir -p node_modules/.bin', /writes node_modules\/\.bin: /],
+    ['chmod +x scripts/ci-pull-image.sh', /writes scripts\/ci-pull-image\.sh: /],
+    ["bash -c 'rm -f .npmrc'", /writes \.npmrc: /],
+    ['if true; then command rm -f package.json; fi', /writes package\.json: /],
+    ...['rm -f', 'mkdir', 'chmod 0755', 'mktemp', 'gitleaks detect -r', 'mc cp local/b/x'].map(
+      (program) => [`${program} "$OUT"`, /may write "\$OUT", which/],
+    ),
+    ['openssl rand -out "$OUT" 8', /may write "\$OUT", which/],
+    // of the web build's output only the deletion is reviewed: no step writes into it
+    ['echo ok > apps/web/.next/server.js', /writes apps\/web\/\.next\/server\.js: /],
+    ['mkdir -p apps/web/.next', /writes apps\/web\/\.next: /],
+    ['mc cp local/b/x apps/web/.next/x', /writes apps\/web\/\.next\/x: /],
+  ])
+    for (const run of [runs.workflow, runs.action])
+      assert.match(run(script).errors.join('\n'), pattern, script);
+  for (const script of [
+    'echo ok > /tmp/x.log',
+    'echo ok > "$RUNNER_TEMP/a/b.txt"',
+    `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/x`,
+    'echo ok > .economic-coverage/x.json',
+    // PR #1130 r1 F2: a command the model has no contract for is the reader's own to judge, by
+    // its policy: a listed program, a reviewed line, a file of the inventory
+    'mkdir -p "$RUNNER_TEMP/x"\nchmod 0700 "$RUNNER_TEMP/x"\npnpm install --frozen-lockfile',
+    // PR #1154 r1 F1: the real forms of the programs listed by name alone, and the two outputs
+    'rm -rf apps/web/.next\nrm -rf apps/web/.next/cache /tmp/x',
+    'gitleaks detect --redact --report-format=sarif --report-path=results.sarif --no-color',
+    'key="$(openssl rand -hex 32)"\nopenssl rand -out "$RUNNER_TEMP/k" -base64 32',
+    'mc mb --ignore-existing rasta/documents\nmc anonymous set none rasta/documents',
+    'log="$(mktemp "$RUNNER_TEMP/x.XXXXXX")"\nmkdir -m 700 /tmp/x\nchmod u+x "$RUNNER_TEMP/x"',
+    'for _ in $(seq 1 3); do sleep 1; done\ntool="$(command -v gitleaks)"',
+  ])
+    for (const run of [runs.workflow, runs.action])
+      assert.deepEqual(run(script).errors, [], script);
+  // F1, the class: a program the reader lists by name alone has a contract in the model; a
+  // command without one is left to the reader only where a grammar of the reader's own reads it
+  assert.deepEqual(
+    LISTED.filter((name) => !CONTRACTS.has(name)),
+    [],
+  );
+  for (const name of ['openssl', 'gitleaks', 'mc', 'mktemp', 'rm', 'mkdir', 'chmod', 'seq', 'eval'])
+    assert.ok(LISTED.includes(name), name);
+  for (const name of [...LISTED, 'sort', 'sh', 'f', 'constructor', ''])
+    assert.equal(judged(name), false, name);
+  for (const name of ['pnpm', 'npm', 'node', 'docker', 'bash', 'git', 'psql', 'scripts/x.sh'])
+    assert.equal(judged(name), true, name);
+  const left = 'node gen.mjs f; bash scripts/x.sh; sort -o f /tmp/x; pnpm install';
+  assert.equal(stepWrites({ run: left }).filter((target) => target.command).length, 4);
+  assert.equal(writeProblems({ run: left }, 'new.yml').length, 4);
+  assert.deepEqual(writeProblems({ run: left }, 'new.yml', { judged: () => true }), []);
+  assert.equal(writeProblems({ run: left }, 'new.yml', { judged }).length, 1);
+  const unread = (script) => runs.workflow(script).errors.join('\n');
+  assert.match(unread('sort -o package.json /tmp/x'), /runs `sort`, /);
+  for (const [script, name] of [
+    ['sort -o package.json /tmp/x', 'sort'],
+    ['f() { echo ok; }\nf', 'f'],
+    ['constructor x', 'constructor'],
+  ])
+    assert.match(unread(script), new RegExp(`may write what \`${name}\` writes, which`), script);
+  for (const script of ['pnpm install --frozen-lockfile', 'bash scripts/ci-pull-image.sh x'])
+    assert.equal(unread(script), '', script);
+  // the #1118 F2 sibling: a matrix value is not read, and the write through it is refused
+  const matrix = workflowLifecycle(
+    'new.yml',
+    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    strategy:\n      matrix:\n        f: ['\${{ github.env }}']\n    steps:\n      - env:\n          OUT: \${{ matrix.f }}\n        run: mc cp /tmp/x "$OUT"\n`,
+  ).errors;
+  assert.equal(matrix.length, 1, matrix.join('\n'));
+  assert.match(matrix[0], /may write "\$OUT", which/);
+  const used = (text) =>
+    workflowLifecycle(
+      'new.yml',
+      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ${text}\n`,
+    ).errors.join('\n');
+  const SHA = '0'.repeat(40);
+  assert.match(used(`actions/download-artifact@${SHA}`), /writes the checkout: /);
+  assert.match(
+    used(`actions/download-artifact@${SHA}\n        with:\n          path: scripts`),
+    /writes scripts: /,
+  );
+  assert.match(
+    used(`actions/cache@${SHA}\n        with:\n          key: k\n          path: node_modules`),
+    /writes node_modules: /,
+  );
+  assert.match(
+    used(`aquasecurity/trivy-action@${SHA}\n        with:\n          image-ref: x`),
+    /writes \.cache\/trivy: /,
+  );
+  assert.equal(
+    used(
+      `actions/download-artifact@${SHA}\n        with:\n          path: .economic-coverage/shards`,
+    ),
+    '',
+  );
+
+  // a review ends with an edit of the text or of the input; and none is left over
+  const [ci, drill] = ['ci', 'backup-drill-monthly'].map((name) => `.github/workflows/${name}.yml`);
+  const trivy = '.github/actions/restore-trivy-db/action.yml';
+  const texts = { [drill]: repoText(drill), [trivy]: repoText(trivy) };
+  assert.deepEqual(workflowLifecycle(ci, repoText(ci), texts).errors, []);
+  const edited = (path, from, to) => {
+    assert.ok(repoText(path).includes(from), from);
+    const text = repoText(path).replaceAll(from, to);
+    return LIFECYCLE_CHECKS[lifecycleFileKind(path)](path, text, texts).errors.join('\n');
+  };
+  assert.match(
+    edited(ci, 'SCAN_STATUS=0\n', 'SCAN_STATUS=0\n          echo ok\n'),
+    /may write "\$SCAN_LOG", which/,
+  );
+  assert.match(
+    edited(drill, 'echo "The drill command exited', 'echo "the drill command exited'),
+    /may write "\$\{dir\}\/stdout\.json", which/,
+  );
+  for (const reviewed of REVIEWED_INPUTS.keys()) {
+    const [, path, expression] = reviewed
+      .replace('=', ': ')
+      .match(/^(\S+): \S+ ([\w-]+: \$\{\{ \S+) \}\}$/);
+    assert.match(edited(path, expression, `${expression}2`), unplaced, reviewed);
+  }
+  // a reviewed input is one input of one action in one file, and reviews nothing else of its step
+  const archive = 'path: ${{ steps.pin.outputs.archive }}';
+  const cache = `actions/cache@${SHA}\n        with:\n          key: k\n          ${archive}`;
+  assert.match(used(cache), /may write \$\{\{ steps\.pin\.outputs\.archive \}\}, which/);
+  // in another file also after the very steps of the reviewed one
+  const copied = indent(repoText(ENTRY.action).split('  steps:\n')[1], '  ');
+  assert.match(
+    workflowLifecycle(
+      'new.yml',
+      `jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n${copied}`,
+    ).errors.join('\n'),
+    /may write \$\{\{ steps\.pin\.outputs\.archive \}\}, which/,
+  );
+  assert.match(
+    edited(ENTRY.action, archive, `${archive}\n        lookup-only: true`),
+    /may write what actions\/cache does with its input lookup-only, which/,
+  );
+  assert.match(
+    edited(ENTRY.action, 'uses: actions/cache@', 'uses: actions/download-artifact@'),
+    /may write \$\{\{ steps\.pin\.outputs\.archive \}\}, which/,
+  );
+  // nor without the step that sets its value, as it was read: renamed, removed, edited or
+  // after it, the expression is empty and the action writes its default place
+  const pin = '    - id: pin\n';
+  const [cacheStep] = repoText(ENTRY.action).match(/ {4}- uses: actions\/cache@.*\n(?: {6}.*\n)*/);
+  for (const [path, from, to] of [
+    [ENTRY.action, pin, '    - id: pinned\n'],
+    [ENTRY.action, `${pin}      shell`, '    - shell'],
+    [ENTRY.action, 'ci-tool-download.mjs key', 'ci-tool-download.mjs  key'],
+    [ENTRY.action, pin, `${cacheStep}${pin}`],
+    [ENTRY.action, pin, `${pin}      shell: bash\n      run: echo ok\n${pin}`],
+    [ENTRY.action, cacheStep, `${pin}      shell: bash\n      run: echo ok\n${cacheStep}`],
+    [trivy, 'id: where', 'id: place'],
+    [ci, 'id: trivy-db\n', 'id: trivy-db2\n'],
+    [ci, 'key: ${{ needs.trivy-db.outputs.key }}', 'key: other'],
+  ])
+    assert.match(edited(path, from, to), unplaced, `${path}: ${to}`);
+  // PR #1154 r1 F2: the caller's reviewed step is a local action, so what it hands on is that
+  // action's: its `outputs` mapping and the step the mapping names are part of the review
+  const where = 'value: ${{ steps.where.outputs.dir }}';
+  for (const [from, to] of [
+    [where, 'value: .cache/trivy'],
+    [where, 'value: ${{ steps.where.outputs.archive }}'],
+    [where, 'value: ${{ steps.other.outputs.dir }}'],
+    [where, `${where}\n  other:\n    value: x`],
+    ['echo "dir=$RUNNER_TEMP/trivy-db"', 'echo "dir=.cache/trivy"'],
+    ['      id: where\n', '      id: where\n      if: false\n'],
+    ['  steps:\n', '  steps:\n    - id: where\n      shell: bash\n      run: echo ok\n'],
+    [
+      '    - name: Check the restored Trivy DB\n',
+      '    - id: where\n      shell: bash\n      run: echo ok\n    - name: Check the restored Trivy DB\n',
+    ],
+    ['outputs:\n  dir:', 'outputs:\n  dirs:'],
+  ]) {
+    const action = swap(repoText(trivy), from, to);
+    const errors = workflowLifecycle(ci, repoText(ci), { ...texts, [trivy]: action }).errors;
+    assert.match(
+      errors.join('\n'),
+      /may write \$\{\{ steps\.trivy-db\.outputs\.dir \}\}, which/,
+      to,
+    );
+  }
+  // and without the action's file, or with one that is not read, nothing was reviewed
+  for (const action of [undefined, 'outputs: [', 'x'])
+    assert.match(
+      workflowLifecycle(ci, repoText(ci), { ...texts, [trivy]: action }).errors.join('\n'),
+      unplaced,
+    );
+  // under the home directory an action restores only the cache
+  for (const path of ['~/.npmrc', '~/.config/pnpm', '~/.local/bin', '~/.bashrc', '~/.cache', '~'])
+    assert.match(
+      used(`actions/cache@${SHA}\n        with:\n          key: k\n          path: ${path}`),
+      unplaced,
+      path,
+    );
+  assert.equal(
+    used(`actions/cache@${SHA}\n        with:\n          key: k\n          path: ~/.cache/x`),
+    '',
+  );
+  const real = [ci, drill].flatMap((path) =>
+    Object.values(parseDocument(repoText(path)).toJS().jobs).flatMap((job) => job.steps ?? []),
+  );
+  const sha256 = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+  assert.deepEqual(
+    [...REVIEWED_TEXTS].filter(
+      (digest) => !real.some((step) => sha256(String(step.run)) === digest),
+    ),
+    [],
+  );
+  for (const output of OUTPUTS.keys())
+    assert.deepEqual(
+      [...FILES].filter((file) => file === output || file.startsWith(`${output}/`)),
+      [],
+      output,
+    );
+});
+
 test('the shell that reads a step and the variables it is given are read at every level (FU-334)', () => {
   const env = "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n";
-  const job = (steps) => `on: push\n${env}jobs:\n  a:\n    runs-on: x\n    steps:\n${steps}`;
+  const job = (steps) =>
+    `on: push\n${env}jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n${steps}`;
   const run = (extra) => `      - run: bash scripts/ci-install-browser.sh\n${extra}`;
   const errors = (text) => workflowLifecycle('new.yml', text).errors.join('\n');
   assert.equal(errors(job(run(''))), '');
@@ -1487,6 +1951,7 @@ test('a container runs only a reviewed program, body or script (FU-334)', () => 
     ['docker run --rm --mount type=bind,src=/tmp,dst=/usr/bin image', form('docker')],
     [`cd services/api-gateway\n${semgrep}`, changed],
     [`PWD=/tmp ${semgrep}`, changed],
+    [`{ PWD=/tmp; }\n${semgrep}`, changed],
     // PR #1100 r1 F2, closed by the reader of #1099 (every binding form marks the name): `unset`.
     [`unset PWD\n${semgrep}`, changed],
   ])
@@ -1567,7 +2032,7 @@ test('r1 probes: containers, services and directories are read only as reviewed 
   const job = (extra, top = '', step = 'run: echo') =>
     workflowLifecycle(
       'new.yml',
-      `on: push\n${env}${top}jobs:\n  a:\n    runs-on: x\n${extra}    steps:\n      - ${step}\n`,
+      `on: push\n${env}${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n${extra}    steps:\n      - ${step}\n`,
     ).errors.join('\n');
   const health = (command) =>
     `'--health-cmd "${command}" --health-interval 10s --health-timeout 5s --health-retries 10'`;
@@ -1611,7 +2076,7 @@ test('a step builds and uses only files of the inventory (FU-334)', () => {
   const build = (inputs, uses = 'docker/build-push-action@0', matrix = '') =>
     `      - uses: ${uses}\n        with:\n${inputs.map((input) => `          ${input}\n`).join('')}${matrix}`;
   const job = (steps, matrix = "['economic-service', 'api-gateway']") =>
-    `on: push\n${env}jobs:\n  a:\n    runs-on: x\n    strategy:\n      matrix:\n        service: ${matrix}\n    steps:\n${steps}`;
+    `on: push\n${env}jobs:\n  a:\n    runs-on: ubuntu-24.04\n    strategy:\n      matrix:\n        service: ${matrix}\n    steps:\n${steps}`;
   const checks = {
     workflow: (step, matrix) => workflowLifecycle('new.yml', job(step, matrix)),
     action: (step) =>
