@@ -3389,7 +3389,7 @@
   },
   {
     "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
-    "hash": "e13170bf60170c0fdc52c1b930543dc2b1abc2acdc700ce96e26d658767f89fd",
+    "hash": "90f08dcd686d21c4bf2354fbc9e78a5a1eac0bf8c0a94ade5c30a93ddcfd5a91",
     "occurrence": 0,
     "line": 150,
     "decision": "platform-wide: hashed HOLD event/asset identity and closed cause only; bounded evidence latch, no tenant-facing contents"

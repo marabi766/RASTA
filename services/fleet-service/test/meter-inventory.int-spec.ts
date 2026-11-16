@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assetSyncRebalanceTimeoutMs, loadFleetEnv } from '../src/config/env';
 import { SOURCE_REFUSAL_HISTORY_TRANSACTION } from '../src/config/source-evidence-policy';
-import { SourceDriftRefusal } from '../src/fleet/drift-quarantine';
+import { persistSourceDriftHold, SourceDriftRefusal } from '../src/fleet/drift-quarantine';
 import { Prisma } from '../src/generated/prisma';
 import { eligibilityClockWrite } from '@rasta/testing';
 import { createHash, randomUUID } from 'node:crypto';
@@ -260,6 +260,98 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     await expect(
       new FleetRepository(prisma).holdRefusedExhaustion(id('EVT'), undefined),
     ).rejects.toThrow();
+  });
+  it('HOLD namespace isolates real cause-named runs and counts concurrent later causes', async () => {
+    await expect(prisma.client.$executeRaw`UPDATE meter_inventory_seal SET run_id = 'HOLD:fake:0',
+      operator_id = 'USR', inventory = '[]'::jsonb, boundary = 'invalid'`).rejects.toThrow(
+      'meter_seal_run_namespace',
+    );
+    const cause = 'SOURCE_REFUSAL_UNCONFIRMED';
+    const sealed = await command.seal(cause, actor);
+    const eventId = id('EVT');
+    const hold = (later = false) =>
+      persistSourceDriftHold(
+        prisma.transaction.bind(prisma),
+        eventId,
+        undefined,
+        later ? 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL' : cause,
+      );
+    await hold();
+    await Promise.all([hold(true), hold(), hold(true)]);
+    expect(await prisma.client.$queryRaw`SELECT run_id FROM meter_drift_overflow`).toEqual([
+      { run_id: 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:3' },
+    ]);
+    expect(
+      await prisma.client.$queryRaw`SELECT EXISTS(SELECT 1 FROM meter_drift_overflow
+      WHERE run_id = ${cause}) AS collision`,
+    ).toEqual([{ collision: false }]);
+    await expect(command.seal('HOLD:SOURCE_REFUSAL_UNCONFIRMED:3', actor)).rejects.toThrow();
+    await expect(
+      command.withQuarantineClear(cause, sealed.boundary, async () => 'unsafe'),
+    ).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+    await expect(prisma.client.$executeRaw`INSERT INTO meter_drift_overflow
+      (event_id,asset_id,named_owner,reason,run_id) VALUES ('HOLD:OLD','AST','PLATFORM',
+      'SOURCE_DRIFT_HOLD',${cause})`).rejects.toThrow('SOURCE_HOLD_CAUSE_INVALID');
+    await expect(prisma.client.$executeRaw`UPDATE meter_drift_overflow
+      SET run_id = 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:4'`).rejects.toThrow(
+      'SOURCE_DRIFT_QUARANTINE_FIXED',
+    );
+    const down = readFileSync(
+      join(__dirname, '../prisma/migrations/20261116100000_meter_hold_cause_namespace/down.sql'),
+      'utf8',
+    );
+    const guard = down.match(/DO \$\$ BEGIN[\s\S]*?END \$\$;/)?.[0];
+    if (!guard) throw new Error('namespace rollback guard missing');
+    await expect(
+      owner.transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+        await tx.$executeRawUnsafe(guard);
+      }),
+    ).rejects.toThrow('ACTIVE_HOLD_CAUSE_ROLLBACK_REFUSED');
+    // Owner fixture sets the maximum; the next occurrence must refuse without changing it.
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_overflow DISABLE TRIGGER meter_drift_overflow_guard`,
+    );
+    await prisma.client
+      .$executeRaw`UPDATE meter_drift_overflow SET run_id = 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:9223372036854775807'`;
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".meter_drift_overflow ENABLE TRIGGER meter_drift_overflow_guard`,
+    );
+    await expect(hold(true)).rejects.toThrow();
+    expect(await prisma.client.$queryRaw`SELECT run_id FROM meter_drift_overflow`).toEqual([
+      { run_id: 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:9223372036854775807' },
+    ]);
+  });
+  it('HOLD namespace migration deterministically backfills retained legacy causes', async () => {
+    const migration = readFileSync(
+      join(
+        __dirname,
+        '../prisma/migrations/20261116100000_meter_hold_cause_namespace/migration.sql',
+      ),
+      'utf8',
+    );
+    await owner.transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE meter_drift_overflow DROP CONSTRAINT meter_hold_cause_namespace',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE meter_drift_overflow DISABLE TRIGGER meter_drift_overflow_guard',
+      );
+      await tx.$executeRaw`INSERT INTO meter_drift_overflow (event_id,asset_id,named_owner,reason,run_id)
+        SELECT 'HOLD:' || cause, 'hash', 'PLATFORM', 'SOURCE_DRIFT_HOLD', cause
+        FROM unnest(ARRAY['SOURCE_REFUSAL_UNCONFIRMED','SOURCE_INFRASTRUCTURE_DURING_REFUSAL']) cause`;
+      for (const sql of migration
+        .slice(migration.indexOf('-- Preserve'), migration.indexOf('CREATE OR REPLACE'))
+        .split(/;\s*\n/))
+        if (sql.trim()) await tx.$executeRawUnsafe(sql);
+    });
+    expect(
+      await prisma.client.$queryRaw`SELECT run_id FROM meter_drift_overflow ORDER BY run_id`,
+    ).toEqual([
+      { run_id: 'HOLD:SOURCE_INFRASTRUCTURE_DURING_REFUSAL:0' },
+      { run_id: 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:0' },
+    ]);
   });
   const events = () => prisma.client.outboxMessage.findMany({ where: { aggregateId: runId } });
   it.each([
@@ -1724,7 +1816,7 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
     ]);
     await prisma.client.$executeRaw`INSERT INTO meter_drift_overflow
       (event_id, asset_id, named_owner, reason, run_id)
-      VALUES ('HOLD:BOUNDED', 'AST', 'PLATFORM', 'SOURCE_DRIFT_HOLD', 'UNCONFIRMED')`;
+      VALUES ('HOLD:BOUNDED', 'AST', 'PLATFORM', 'SOURCE_DRIFT_HOLD', 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:0')`;
     expect(
       await prisma.client.$queryRaw`SELECT count(*)::int AS n FROM meter_drift_overflow`,
     ).toEqual([{ n: 10000 }]);
@@ -2004,8 +2096,8 @@ describe('fleet durable source seal and future-creation fence (real PostgreSQL)'
             reason: 'SOURCE_DRIFT_HOLD',
             asset_id: createHash('sha256').update(assetId).digest('hex'),
             run_id: mode.startsWith('refused-then-')
-              ? 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL'
-              : 'SOURCE_REFUSAL_UNCONFIRMED',
+              ? `HOLD:SOURCE_INFRASTRUCTURE_DURING_REFUSAL:${mode === 'refused-then-ambiguous-exhausted' ? 1 : 0}`
+              : 'HOLD:SOURCE_REFUSAL_UNCONFIRMED:1',
           },
         ]);
         expect(

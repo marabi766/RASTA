@@ -135,7 +135,7 @@ export async function quarantineTransaction<T>(
 export const sourceEventHash = (value: string): string =>
   createHash('sha256').update(value).digest('hex');
 
-/** Closed operator cause, stored in the HOLD's run_id slot (no sealed run is claimed). */
+/** Reserved HOLD namespace cannot equal a seal run ID; PostgreSQL counts later writes. */
 export type SourceHoldCause = 'SOURCE_REFUSAL_UNCONFIRMED' | 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL';
 
 export async function persistSourceDriftHold<T>(
@@ -150,7 +150,7 @@ export async function persistSourceDriftHold<T>(
     await tx.$executeRaw`INSERT INTO meter_drift_overflow
       (event_id, asset_id, named_owner, reason, run_id)
       VALUES (${`HOLD:${sourceEventHash(eventId)}`}, ${sourceEventHash(assetId ?? eventId)},
-        'PLATFORM', 'SOURCE_DRIFT_HOLD', ${cause}) ON CONFLICT (event_id) DO NOTHING`;
+        'PLATFORM', 'SOURCE_DRIFT_HOLD', ${`HOLD:${cause}:0`}) ON CONFLICT (event_id) DO NOTHING`;
     return undefined as T;
   });
 }
