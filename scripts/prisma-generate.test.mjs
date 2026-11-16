@@ -260,8 +260,10 @@ test('every Dockerfile stage, workflow step and action runs lifecycle hooks supp
   const files = [...authoredFiles(root)];
   const workflows = Object.fromEntries(
     files
-      .filter(
-        (file) => lifecycleFileKind(relative(root, file).replaceAll('\\', '/')) === 'workflow',
+      .filter((file) =>
+        ['workflow', 'action'].includes(
+          lifecycleFileKind(relative(root, file).replaceAll('\\', '/')),
+        ),
       )
       .map((file) => [relative(root, file).replaceAll('\\', '/'), readFileSync(file, 'utf8')]),
   );
@@ -964,8 +966,16 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
     'GITLEAKS_TEST_BINARY: x',
     'BINARY_PATH: x',
     'INPUT: x',
+    // F5: a program reads these names in capitals; in any other case a name is a text's own
+    'goal: x',
+    'cc: x',
+    'home: x',
+    'node_modules: x',
   ])
     for (const text of levels(entry)) assert.equal(errors(text), '', text);
+  everywhere('goal=1; cc=gcc; home=/tmp/h; ifs=,; git_dir=x; echo ok', null, true);
+  for (const text of levels('NPM_Config_Script_Shell: x'))
+    assert.match(errors(text), /a package manager option/);
   for (const entry of ['<<: { NODE_OPTIONS: x }', 'A: [NODE_OPTIONS]', 'A-B: x'])
     for (const text of levels(entry)) assert.match(errors(text), /is not a name with one value/);
   const composite = `${repoText(ENTRY.action)}    - shell: bash\n      env:\n        NODE_OPTIONS: x\n      run: echo ok\n`;
@@ -1705,7 +1715,9 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
 
   // a review ends with an edit of the text or of the input; and none is left over
   const [ci, drill] = ['ci', 'backup-drill-monthly'].map((name) => `.github/workflows/${name}.yml`);
-  const texts = { [drill]: repoText(drill) };
+  const trivy = '.github/actions/restore-trivy-db/action.yml';
+  const texts = { [drill]: repoText(drill), [trivy]: repoText(trivy) };
+  assert.deepEqual(workflowLifecycle(ci, repoText(ci), texts).errors, []);
   const edited = (path, from, to) => {
     assert.ok(repoText(path).includes(from), from);
     const text = repoText(path).replaceAll(from, to);
@@ -1747,7 +1759,7 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
   );
   // nor without the step that sets its value, as it was read: renamed, removed, edited or
   // after it, the expression is empty and the action writes its default place
-  const [trivy, pin] = ['.github/actions/restore-trivy-db/action.yml', '    - id: pin\n'];
+  const pin = '    - id: pin\n';
   const [cacheStep] = repoText(ENTRY.action).match(/ {4}- uses: actions\/cache@.*\n(?: {6}.*\n)*/);
   for (const [path, from, to] of [
     [ENTRY.action, pin, '    - id: pinned\n'],
@@ -1761,10 +1773,37 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
     [ci, 'key: ${{ needs.trivy-db.outputs.key }}', 'key: other'],
   ])
     assert.match(edited(path, from, to), unplaced, `${path}: ${to}`);
-  // the caller's reviewed step is a local action: what it hands on is what its step `where` set
-  const outputs = parseDocument(repoText(trivy)).toJS().outputs;
-  assert.deepEqual(Object.keys(outputs), ['dir']);
-  assert.equal(outputs.dir.value, '${{ steps.where.outputs.dir }}');
+  // PR #1154 r1 F2: the caller's reviewed step is a local action, so what it hands on is that
+  // action's: its `outputs` mapping and the step the mapping names are part of the review
+  const where = 'value: ${{ steps.where.outputs.dir }}';
+  for (const [from, to] of [
+    [where, 'value: .cache/trivy'],
+    [where, 'value: ${{ steps.where.outputs.archive }}'],
+    [where, 'value: ${{ steps.other.outputs.dir }}'],
+    [where, `${where}\n  other:\n    value: x`],
+    ['echo "dir=$RUNNER_TEMP/trivy-db"', 'echo "dir=.cache/trivy"'],
+    ['      id: where\n', '      id: where\n      if: false\n'],
+    ['  steps:\n', '  steps:\n    - id: where\n      shell: bash\n      run: echo ok\n'],
+    [
+      '    - name: Check the restored Trivy DB\n',
+      '    - id: where\n      shell: bash\n      run: echo ok\n    - name: Check the restored Trivy DB\n',
+    ],
+    ['outputs:\n  dir:', 'outputs:\n  dirs:'],
+  ]) {
+    const action = swap(repoText(trivy), from, to);
+    const errors = workflowLifecycle(ci, repoText(ci), { ...texts, [trivy]: action }).errors;
+    assert.match(
+      errors.join('\n'),
+      /may write \$\{\{ steps\.trivy-db\.outputs\.dir \}\}, which/,
+      to,
+    );
+  }
+  // and without the action's file, or with one that is not read, nothing was reviewed
+  for (const action of [undefined, 'outputs: [', 'x'])
+    assert.match(
+      workflowLifecycle(ci, repoText(ci), { ...texts, [trivy]: action }).errors.join('\n'),
+      unplaced,
+    );
   // under the home directory an action restores only the cache
   for (const path of ['~/.npmrc', '~/.config/pnpm', '~/.local/bin', '~/.bashrc', '~/.cache', '~'])
     assert.match(

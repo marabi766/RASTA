@@ -496,11 +496,16 @@ export const REVIEWED_TEXTS = new Set([
 ]);
 /**
  * The computed inputs reviewed by hand, as `<file>: <action> <input>=<text>`: each names an
- * output a step of the same file sets to a path under `$RUNNER_TEMP` (`ci-tool-download.mjs
- * key`; the reviewed lines of the step `where`, which the caller hands on as `trivy-db`). The
- * review is of that step too, by the sha256 of it as parsed: it stands once among the steps
- * before the one that uses it (renamed, removed or moved after it, the expression is empty and
- * the action writes its default place).
+ * output a step of the same file sets to a path under `$RUNNER_TEMP`. The review is of that
+ * step too, by the sha256 of it as parsed: it stands once among the steps before the one that
+ * uses it (renamed, removed or moved after it, the expression is empty and the action writes
+ * its default place). PR #1154 r1 F2, what sets each value:
+ *  1. install-ci-tool `pin`: `node scripts/ci-tool-download.mjs key` prints it. The step is
+ *     held, the script is NOT: what that script prints is not proven here (a listed program).
+ *  2. restore-trivy-db `where`: its two reviewed `echo` lines (the reader's `ENV_FILE_LINES`).
+ *  3. ci.yml `trivy-db` uses that local action, so the value is the action's: the digest holds
+ *     the calling step, the action's whole `outputs` mapping and the one step of the action
+ *     that mapping names for the output (`where`), which stands once in it.
  */
 export const REVIEWED_INPUTS = new Map([
   [
@@ -513,7 +518,7 @@ export const REVIEWED_INPUTS = new Map([
   ],
   [
     '.github/workflows/ci.yml: aquasecurity/trivy-action cache-dir=${{ steps.trivy-db.outputs.dir }}',
-    'sha256:95bcb70fbd9689c9e9de1f4d1649e9629f187828b2449161e6a0116887351454',
+    'sha256:663fba543cc6d0c8d21592999ac3ffcce94bbb08dc97a9a7599b3d1bdde9e551',
   ],
 ]);
 /**
@@ -544,8 +549,13 @@ export const CONTRACTS = new Set([...QUIET, ...Object.keys(WRITERS), 'eval', 'tr
  * command `name`, which the model has no contract for, by a grammar of its own (PR #1154 r1 F1:
  * an exact reviewed line, a verb table, a file of the inventory). A program it lists by name
  * alone is none: its operands are read by nobody, so it has a contract here or is refused.
+ * `action(path)`: the parsed file of the local action in the directory `path`, or null.
  */
-export function writeProblems(given, file, { local, before = [], judged = () => false } = {}) {
+export function writeProblems(
+  given,
+  file,
+  { local, before = [], judged = () => false, action = () => null } = {},
+) {
   // the shell reader still reads `${{ env.NAME }}` as one computed word here, as its own rules
   // do (`scriptProblems`): the model refuses every expression, and proving the value from the
   // YAML for both readers is the next change (PM decision 2, its own PR)
@@ -553,10 +563,19 @@ export function writeProblems(given, file, { local, before = [], judged = () => 
     record(given) && typeof given.run === 'string'
       ? { ...given, run: given.run.replace(/\$\{\{ env\.\w+ \}\}/g, '$__workflow_env_expression') }
       : given;
+  const OUTPUT = /^\$\{\{ steps\.([\w-]+)\.outputs\.([\w-]+) \}\}$/;
   const producer = (value) => {
-    const id = /^\$\{\{ steps\.([\w-]+)\.outputs\.[\w-]+ \}\}$/.exec(value)?.[1];
+    const [, id, output] = OUTPUT.exec(value) ?? [];
     const named = before.filter((earlier) => record(earlier) && earlier.id === id);
-    return named.length === 1 ? sha256(JSON.stringify(named[0])) : null;
+    if (named.length !== 1) return null;
+    if (!String(named[0].uses ?? '').startsWith('./')) return sha256(JSON.stringify(named[0]));
+    // F2: a local action hands on what its own `outputs` mapping names
+    const read = action(String(named[0].uses).slice(2));
+    const outputs = record(read?.outputs) ? read.outputs : {};
+    const from = Object.hasOwn(outputs, output) && OUTPUT.exec(outputs[output]?.value)?.[1];
+    const steps = Array.isArray(read?.runs?.steps) ? read.runs.steps : [];
+    const sets = steps.filter((inner) => record(inner) && inner.id === from);
+    return from && sets.length === 1 ? sha256(JSON.stringify([named[0], outputs, sets[0]])) : null;
   };
   const reviewed = new Set(
     record(step) && REVIEWED_TEXTS.has(sha256(String(step.run)))

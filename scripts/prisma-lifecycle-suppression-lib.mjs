@@ -101,16 +101,18 @@ const REPO_FILE = /^(?:scripts|infrastructure)\/(?!.*\.\.)[\w./-]+$/;
  * the service and system files of `psql` (`PGSERVICEFILE`, `PGSYSCONFDIR`); what glibc loads
  * (`GCONV_PATH`, `GLIBC_TUNABLES`); and where two programs listed by name alone write with no
  * word saying so (`MC_CONFIG_DIR`, `RANDFILE`). A list of families is not closed: a name outside
- * it that a program reads is not refused (the reverse list is FU-340 part C).
+ * it that a program reads is not refused (the reverse list is FU-340 part C). These names are
+ * read as the programs read them, in capitals (F5): `goal=` or `cc=` in a text is a variable of
+ * its own. A package manager option (`PROTECTED`) is read in any case, as npm reads it.
  */
 const PROTECTED = /^(?:p?npm_config_\w*|PATH|CDPATH|BASH_ENV|ENV|GITHUB_\w*|RUNNER_TEMP)$/i;
 const LOADED =
-  /^(?:LD_\w+|GCONV_PATH|GLIBC_TUNABLES|BASH\w*|SHELLOPTS|PS\d|IFS|HOME|XDG_\w+|TMPDIR|GIT_\w+|GO[A-Z\d]+|CGO_\w+|CC|CXX|OPENSSL_\w+|RANDFILE|DOCKER_\w+|GITLEAKS_CONFIG\w*|MC_CONFIG_DIR|PNPM_HOME|TURBO_\w+|PRISMA_(?!SKIP_POSTINSTALL_GENERATE$)\w+|COREPACK_\w+|PLAYWRIGHT_\w+|\w+_BINARY_PATH|PSQLRC|PGSYSCONFDIR|PGSERVICEFILE|CURL_HOME|INPUT_\w+)$/i;
+  /^(?:LD_\w+|GCONV_PATH|GLIBC_TUNABLES|BASH\w*|SHELLOPTS|PS\d|IFS|HOME|XDG_\w+|TMPDIR|GIT_\w+|GO[A-Z\d]+|CGO_\w+|CC|CXX|OPENSSL_\w+|RANDFILE|DOCKER_\w+|GITLEAKS_CONFIG\w*|MC_CONFIG_DIR|PNPM_HOME|TURBO_\w+|PRISMA_(?!SKIP_POSTINSTALL_GENERATE$)\w+|COREPACK_\w+|PLAYWRIGHT_\w+|\w+_BINARY_PATH|PSQLRC|PGSYSCONFDIR|PGSERVICEFILE|CURL_HOME|INPUT_\w+)$/;
 const unassignable = (name) =>
   PROTECTED.test(name)
     ? `sets ${name}: a package manager option, the search path or an environment file is not text's to set`
-    : LOADED.test(name) || /^NODE_/i.test(name)
-      ? `sets ${name}: what ${/^NODE_/i.test(name) ? 'node' : 'a program'} loads is not text's to set`
+    : LOADED.test(name) || /^NODE_/.test(name)
+      ? `sets ${name}: what ${/^NODE_/.test(name) ? 'node' : 'a program'} loads is not text's to set`
       : null;
 /**
  * FU-340: the only settings of a protected name in a YAML `env`, each with the value as written.
@@ -761,15 +763,20 @@ function outsideSteps(where, job, errors, path) {
  * (`file: Containerfile`, `/tmp/Dockerfile`, `${{ env.ROOT }}/Dockerfile`). `matrix` is the job's;
  * `before`, the steps of the same list before this one.
  */
-function stepProblems(path, where, step, errors, commands, files, matrix, before, composite) {
+function stepProblems(path, where, step, errors, commands, files, matrix, before, texts, inAction) {
   if (!record(step)) return void errors.push(`${where} is not a mapping`);
   const refuse = (problem) => errors.push(`${where}: ${problem}`);
   readsEnv(where, step, errors, path, 'step');
   handsOn(where, 'with', step.with, errors);
-  const { problem } = effectiveShell({ step, composite: composite && step.run !== undefined });
+  const { problem } = effectiveShell({ step, composite: inAction && step.run !== undefined });
   if (problem) refuse(problem);
   // FU-340 part B: a local action's own steps are read, each as a step, where its file is read
-  writeProblems(step, path, { local: () => [], before, judged }).forEach(refuse);
+  // F2: an output a local action hands on is read with that action's file, from `texts`
+  const action = (local) => {
+    const text = texts[`${local}/action.yml`] ?? texts[`${local}/action.yaml`];
+    return typeof text === 'string' ? (readYaml(local, text).value ?? null) : null;
+  };
+  writeProblems(step, path, { local: () => [], before, judged, action }).forEach(refuse);
   if (step.uses !== undefined) usesProblems(step, matrix, files).forEach(refuse);
   else if (step.with !== undefined) refuse('with is given to no action');
   if (step.run === undefined) return;
@@ -783,7 +790,7 @@ function stepProblems(path, where, step, errors, commands, files, matrix, before
 /**
  * @param {string} name
  * @param {string} text
- * @param {Record<string, string>} workflows Independently inventoried repository workflow texts.
+ * @param {Record<string, string>} workflows Independently inventoried repository workflow and action texts.
  * @param {Set<string>} files Every repository path of the inventory the caller read.
  * @param {string[]} ancestors Calls already being checked; no environment is inherited.
  * @returns {{ errors: string[], commands: string[] }}
@@ -853,7 +860,8 @@ export function workflowLifecycle(name, text, workflows = {}, files = new Set(),
     for (const [index, step] of job.steps.entries()) {
       const at = `${where} step ${index + 1}`;
       const before = job.steps.slice(0, index);
-      stepProblems(name, at, step, errors, commands, files, job.strategy?.matrix, before);
+      const matrix = job.strategy?.matrix;
+      stepProblems(name, at, step, errors, commands, files, matrix, before, workflows);
       const inStep = record(step) && sets(at, step);
       if (!everywhere && !inJob && !inStep)
         errors.push(
@@ -872,7 +880,7 @@ export function workflowLifecycle(name, text, workflows = {}, files = new Set(),
  * @param {string} text
  * @returns {{ errors: string[], commands: string[] }}
  */
-export function actionLifecycle(name, text, _workflows, files = new Set()) {
+export function actionLifecycle(name, text, texts = {}, files = new Set()) {
   const read = readYaml(name, text);
   if (read.problem) return { errors: [read.problem], commands: [] };
   const errors = [];
@@ -891,6 +899,7 @@ export function actionLifecycle(name, text, _workflows, files = new Set()) {
       files,
       null,
       before,
+      texts,
       true,
     );
   }
