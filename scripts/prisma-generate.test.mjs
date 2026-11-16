@@ -1032,15 +1032,13 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['echo a 2> err.log >&2', ['err.log']],
     ['echo a >| x; exec 3<> y; echo b >& z', ['x', 'y', 'z']],
     ['echo "$(echo a > x)" `echo b > y`', ['? a backtick command substitution', 'x', 'y']],
-    ['f() { echo a > x; }', ['x']],
+    // a function is read where it is written; what a call of it runs is not followed
+    ['f() { echo a > x; }', ['? what `f` writes', 'x']],
     // the programs that write their operands
     // before `--`, a word computed from its start, or inside an option, may be any option
     ['cp "$src" fixtures/claim.sql', ['? "$src"']],
     ['cp -- "$src" fixtures/claim.sql', ['? "$src"', 'fixtures/claim.sql']],
     ['cp fixtures/$n.sql /tmp/x', ['? fixtures/$n.sql']],
-    ['sed "$FLAG" s/a/b/ f.sql', ['? "$FLAG"']],
-    ['sed -n "${n}p" f.sql', ['? "${n}p"']],
-    ['sed -n -- "$expr" f.sql', []],
     ['curl "$FLAG" out.sql https://h/x', ['? "$FLAG"']],
     ['curl -"$flags" out.sql', ['? -"$flags"']],
     ['curl -fsS "$URL"', ['? "$URL"']],
@@ -1051,11 +1049,32 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['mv a b; ln -sf c d; install e bin/e', ['a', 'b', 'c', 'd', 'e', 'bin/e']],
     ['ln -s /tmp/x', ['']],
     ['echo x | tee -a log other', ['log', 'other']],
-    ['sed -i s/a/b/ f.sql', ['s/a/b', 'f.sql']],
-    ['sed -ni.bak p f.sql', ['p', 'f.sql']],
-    ['sed -l5i s/a/b/ f.sql', ['s/a/b', 'f.sql']],
-    ['sed --in-place s/a/b/ f.sql', ['s/a/b', 'f.sql']],
-    ['sed -n p f.sql', []],
+    // PR #1130 r1 F1: a backup is a second destination, named by options and the environment
+    ...[
+      'cp -b a b',
+      'cp -fb a b',
+      'cp --b a b',
+      'mv --backup=numbered a b',
+      'install -S .bak a b',
+      'ln --suffix=.o -sf a b',
+      'tar --backup -xf /tmp/a.tgz -C out',
+      'tar --suffix=.o -xf /tmp/a.tgz -C out',
+      'SIMPLE_BACKUP_SUFFIX=.sql VERSION_CONTROL=simple cp -b a b',
+      // and a second destination of another kind: a numbered file, an archive named after the value
+      'curl --no-clobber -o f.sql https://h/x',
+      'wget --warc-file=f.sql -O /tmp/x https://h/x',
+      'wget --warc-file f.sql -O /tmp/x https://h/x',
+    ].map((text) => [text, ['? a second destination no word names']]),
+    ['cp -a a b; tar -xSf /tmp/a.tgz -C out', ['a', 'b', 'out']],
+    // and `sed` writes what its program says (`w f`, a backup of `-i.bak`), which is not read
+    ...[
+      'sed -i s/a/b/ f.sql',
+      'sed -ni.bak p f.sql',
+      "sed -i'bak/*' p f.sql",
+      'sed --in-place=.bak s/a/b/ f.sql',
+      'sed -n "w f.sql" /tmp/input',
+      'sed -n p f.sql',
+    ].map((text) => [text, ['? what `sed` writes']]),
     ['tar -xzf a.tgz', ['', 'a.tgz']],
     ['tar -xzf a.tgz -C out', ['a.tgz', 'out']],
     ['unzip a.zip', ['', 'a.zip']],
@@ -1069,8 +1088,7 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['curl -#o out.sql https://h/x; curl -4sSo out.sql https://h/x', ['out.sql', 'out.sql']],
     ["curl -o 'out#1.sql' https://h/x", ['? out#1.sql']],
     ['curl -{s,o} out.sql https://h/x', ['? -{s,o}']],
-    ['sed {-i,s/a/b/} f.sql', ['? {-i,s/a/b/}']],
-    [`curl -s -w '%output{out.sql}%{json}' https://h/x`, ['? a file its format names']],
+    [`curl -s -w '%output{out.sql}%{json}' https://h/x`, ['? what such a word names']],
     ['curl -o"$OUT" https://h/x', ['? -o"$OUT"']],
     ['curl -sSo$OUT https://h/x', ['? -sSo$OUT']],
     ['curl -H"X: $TOKEN" -d "$BODY" https://h/x', ['? -H"X: $TOKEN"', '? "$BODY"']],
@@ -1081,7 +1099,17 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['curl -D headers -c jar https://h/x', ['headers', 'jar']],
     ['curl -sO https://h/x.sql; curl -#O https://h/x.sql', ['', '']],
     ['curl --remote-name https://h/x.sql', ['']],
-    ['curl -K options https://h/x', ['? its options file']],
+    // an option that reads more options from a file, or runs a program
+    ...[
+      'curl -K options https://h/x',
+      'wget -e output_document=f.sql https://h/x',
+      'wget --config=options -O /tmp/x https://h/x',
+      'tar -xf /tmp/a.tgz -C /tmp --to-command=scripts/generate.sh',
+      'tar -I scripts/generate.sh -xf /tmp/a.tgz -C /tmp',
+      'tar -xPf /tmp/a.tgz -C /tmp',
+      'tar --absolute-names -xf /tmp/a.tgz -C /tmp',
+      'install -s --strip-program=scripts/generate.sh /tmp/a /tmp/b',
+    ].map((text) => [text, ['? what such an option reads or runs']]),
     ['curl $OPTIONS https://h/x', ['? $OPTIONS']],
     ['wget https://h/x', ['']],
     ['wget -O out https://h/x', ['out']],
@@ -1110,9 +1138,14 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['cd ops && echo a > x', ['? x']],
     // text that runs in the same shell may hold a `cd`; a wrapper that changes directory, or
     // that runs the words of one operand
-    ...["eval 'cd ops'", 'trap "rm -f /tmp/x" EXIT', 'source /tmp/e.sh', '. /tmp/e.sh', 'eval'].map(
-      (text) => [`${text}; echo a > x`, ['? x']],
-    ),
+    ...["eval 'cd ops'", 'trap "echo b > /tmp/x" EXIT', 'eval'].map((text) => [
+      `${text}; echo a > x`,
+      ['? x'],
+    ]),
+    ...['source', '.'].map((word) => [
+      `${word} /tmp/e.sh; echo a > x`,
+      [`? what \`${word}\` writes`, '? x'],
+    ]),
     ['eval "${kafka_credentials}"; echo a > x', ['x']],
     ...[
       'env -C ops tee x',
@@ -1128,7 +1161,7 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ["eval 'echo b > y'; trap 'echo c > /etc/z' EXIT", ['? y', '? /etc/z']],
     ['bash -c "$body"', ['? bash -c runs a body this check cannot read']],
     ['bash', ['? what bash reads as commands']],
-    ['bash scripts/x.sh', []],
+    ['bash scripts/x.sh a', ['? the script scripts/x.sh, which is not read']],
     ['eval "$text"', ['? "$text"']],
     ['eval "${kafka_credentials}"', []],
     // a program this cannot place
@@ -1140,7 +1173,48 @@ test('the write-target model places every write of a step, or it is unknown (FU-
       'find . -name x -delete; patch -p1; gunzip a.gz; busybox cp a b',
       ['find', 'patch', 'gunzip', 'busybox'].map((name) => `? what \`${name}\` writes`),
     ],
-    ['cat <<EOF > x\nEOF', ['? a here-document, which is not read', 'x']],
+    // PR #1130 r1 F2: a command outside the lists is unknown, whatever its words name
+    ...[
+      'sort -o f.sql /tmp/input',
+      'pg_dump -f f.sql db',
+      'node scripts/generate.mjs f.sql',
+      'scripts/generate.sh',
+      './generate.sh',
+      'pnpm install --frozen-lockfile',
+      'openssl rand -hex 24',
+      'watch cp a b',
+      'uniq a b',
+      'rm -f /tmp/x',
+    ].map((text) => [text, [`? what \`${text.split(' ')[0]}\` writes`]]),
+    [
+      'x="$(node -p 1)"; export A=1 B="$(pnpm -v)"',
+      ['node', 'pnpm'].map((n) => `? what \`${n}\` writes`),
+    ],
+    // the effect contracts: the shell's own words and programs with no option to write a file
+    [
+      'if [ -f a ]; then echo b; elif test -d c; then :; else true; fi; for i in 1 2; do printf $i; done\n' +
+        'while read -r l; do break; done; until false; do continue; done; case $x in a) exit 1;; esac; x=1\n' +
+        'export A=1; unset A; set -e; cat a | grep b | head -1 | tail -1 | wc -l | cut -c1 | tr a b; date; sleep 1\n' +
+        'basename a; dirname b; exec 3>&1; [[ -f a ]] && { wait; }; ! /usr/bin/grep -q a b; g() { local a; return; }',
+      ['? what `g` writes'],
+    ],
+    // `psql` reads `-f`; its output and log options name a file
+    [
+      'psql -v ON_ERROR_STOP=1 -h localhost -U u -d d -f f.sql; curl -d a=b -o /tmp/x http://h/x',
+      [],
+    ],
+    ['wget -O /tmp/x https://h/x --hsts-file=h; wget https://h/x --output-document=f', ['h', 'f']],
+    ['psql -o out.txt -c "SELECT 1"; psql -XAtL log -f f.sql', ['out.txt', 'log']],
+    ['psql -c "SELECT 1" --output=f.sql; psql --log-file f.sql', ['f.sql', 'f.sql']],
+    ['psql --output o.txt -c "SELECT 1"; psql --out o.txt', ['o.txt', 'o.txt']],
+    ['psql -oo.txt -c "SELECT 1"; psql -XLlog', ['o.txt', 'log']],
+    ['psql "$FLAGS" -f f.sql; psql -o"$OUT"', ['? "$FLAGS"', '? -o"$OUT"']],
+    // a command of its own: a meta-command, an output that is a pipe
+    ...["psql -c '\\copy task to f.sql'", "psql -o '|scripts/generate.sh' -f f.sql"].map((text) => [
+      text,
+      ['? what such a word names'],
+    ]),
+    ['cat <<EOF > x\nEOF', ['? a here-document, which is not read', 'x', '? what `EOF` writes']],
     [
       'echo a > /tmp/x\r\necho b > /tmp/y',
       [

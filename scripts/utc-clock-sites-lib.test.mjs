@@ -2773,13 +2773,86 @@ test('PR #1109 r2 F2: a file a step may have written before psql reads it leaves
   refused['.github/actions/sql/action.yml'] = composite(f);
   // Controls: another file, a place outside the checkout, an action that restores elsewhere or writes nothing.
   const elsewhere = ['printf x > fixtures/other.sql', 'echo x > fixtures/claim.sql2', 'echo x > /tmp/claim.sql', 'echo x > "$RUNNER_TEMP/fixtures/claim.sql"', 'echo x >> "$GITHUB_ENV"',
-    `curl -s -o /dev/null -w '%{http_code}' https://example.org/fixtures/claim.sql`, 'cp /tmp/a /tmp/b', 'sed -n p fixtures/claim.sql', 'git log -1 -- fixtures/claim.sql'];
+    `curl -s -o /dev/null -w '%{http_code}' https://example.org/fixtures/claim.sql`, 'cp /tmp/a /tmp/b', 'git log -1 -- fixtures/claim.sql'];
   for (const [at, write] of elsewhere.entries()) passing[name('elsewhere', at)] = jobs(run(write), run(`${write}\n${f}`));
   const inert = [uses('actions/checkout@v4'), uses('actions/checkout@v4', { 'fetch-depth': 0 }), uses('actions/download-artifact@v4', { path: 'fixtures/other.sql' }),
     uses('actions/download-artifact@v4', { path: '${{ runner.temp }}/x' }), uses('actions/cache@v4', { key: 'k', path: '~/.cache/x' }),
     uses('actions/upload-artifact@v4', { name: 'n', path: 'fixtures' }), uses('./.github/actions/quiet')];
   for (const [at, step] of inert.entries()) passing[name('inert', at)] = jobs(step, run(f));
   assertUnresolved(refused, passing, fixtures);
+});
+
+// PR #1130 r1 F1 and F2: a second destination (a backup) and a command the model has no contract for are writes it cannot
+// place, so every file read after one is unresolved. Each `refused` row printed [] before. Such a site is listed in the
+// inventory only under a key that holds the steps those writes come from: a review of exactly those steps.
+test('PR #1130 r1 F1, F2: a backup and a command the write model does not read leave every later file unresolved', () => {
+  const f = 'psql -f fixtures/claim.sql', file = '.github/workflows/w.yml';
+  const composite = (script) => `runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: ${script}\n`;
+  const fixtures = { 'fixtures/claim.sql': 'SELECT 1', 'fixtures/claim.sql.bak': 'SELECT 1', '.github/actions/quiet/action.yml': composite('echo ok > /tmp/log'),
+    '.github/actions/generate/action.yml': composite('node scripts/generate.mjs'), '.github/actions/outer/action.yml': 'runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/generate\n' };
+  const jobs = (...steps) => `jobs:\n  a:\n    steps:\n${steps.map((step) => `      - ${step.replace(/\n/g, '\n        ')}\n`).join('')}`;
+  const run = (script) => `run: |\n  ${script.replace(/\n/g, '\n  ')}`;
+  const [refused, passing] = [{}, {}];
+  const name = (kind, at) => `.github/workflows/${kind}-${at}.yml`;
+  // F1: every program of the model that can keep a backup, by each option and variable that names it; the backup is the file read.
+  const backups = ['sed -i.bak s/TRUE/true/ fixtures/claim.sql', 'sed -ni.bak p fixtures/claim.sql', 'sed --in-place=.bak s/TRUE/true/ fixtures/claim.sql', `sed -i'*.bak' s/TRUE/true/ fixtures/claim.sql`,
+    ...['cp', 'mv', 'install'].flatMap((program) => ['-b -S .bak', '--backup --suffix=.bak', '--backup=simple -S.bak', '-bS .bak'].map((options) => `${program} ${options} /tmp/x.sql fixtures/claim.sql`)),
+    'ln -sfb -S .bak /tmp/x.sql fixtures/claim.sql', 'ln -sf --backup --suffix .bak /tmp/x.sql fixtures/claim.sql', 'SIMPLE_BACKUP_SUFFIX=.bak cp -b /tmp/x.sql fixtures/claim.sql',
+    'export SIMPLE_BACKUP_SUFFIX=.bak VERSION_CONTROL=never\nmv --backup /tmp/x.sql fixtures/claim.sql', 'tar --backup --suffix=.bak -cf fixtures/claim.sql -C /tmp x'];
+  for (const [at, write] of backups.entries()) {
+    refused[name('backup', at)] = jobs(run(`${write}\n${f}.bak`));
+    refused[name('backup-earlier', at)] = jobs(run(write), run(`${f}.bak`));
+    passing[name('backup-later', at)] = jobs(run(`${f}.bak`), run(write));
+  }
+  // F2: the review's producers and their siblings: a program outside the lists, a script run or sourced, a `sed` program, an output option.
+  const producers = ['sort -o fixtures/claim.sql /tmp/input', 'pg_dump -f fixtures/claim.sql db', 'psql -o fixtures/claim.sql -c "SELECT 1"', 'psql -XAtL fixtures/claim.sql -c "SELECT 1"',
+    'node scripts/generate-fixture.mjs fixtures/claim.sql', 'bash scripts/generate.sh', 'sh -e scripts/generate.sh', 'source scripts/generate.sh', '. scripts/generate.sh', 'scripts/generate.sh', './generate.sh',
+    'sed -n "w fixtures/claim.sql" /tmp/input', 'sed -n p fixtures/claim.sql', 'pnpm run generate', 'generate() { :; }\ngenerate', 'timeout 5 node scripts/generate.mjs', 'watch -n1 true', 'x="$(make fixtures)"'];
+  for (const [at, write] of producers.entries()) {
+    refused[name('same', at)] = jobs(run(`${write}\n${f}`));
+    refused[name('after', at)] = jobs(run(`${f}\n${write}`));
+    refused[name('earlier', at)] = jobs(run(write), run('echo ok'), run(f));
+    passing[name('later', at)] = jobs(run(f), run(write));
+    passing[name('job', at)] = `${jobs(run(write))}  b:\n    steps:\n      - ${run(f).replace(/\n/g, '\n        ')}\n`;
+  }
+  refused[name('action', 0)] = jobs('uses: ./.github/actions/generate', run(f));
+  // Controls: the effect contracts (the shell's own words, programs with no option that writes a file) and `psql` without an output option.
+  const quiet = ['set -euo pipefail\nif [ -f fixtures/claim.sql ]; then echo found; else exit 1; fi', 'for n in 1 2; do printf "%s" "$n"; sleep 1; done', 'cat fixtures/claim.sql | grep -c SELECT | tail -1',
+    'export PGHOST=localhost\ntest -s fixtures/claim.sql && head -1 fixtures/claim.sql', `psql -v ON_ERROR_STOP=1 -h localhost -U u -d d -c 'SELECT 1'`, 'cp -a /tmp/a /tmp/b', 'trap - EXIT'];
+  for (const [at, text] of quiet.entries()) passing[name('quiet', at)] = jobs(run(text), run(`${text}\n${f}`));
+  assertUnresolved(refused, passing, fixtures);
+
+  // The reviewed form: the key of a site read after such a write also holds each step one comes from.
+  const scan = (steps, entries = {}, more = {}) => claimScan({ ...fixtures, ...more, [file]: jobs(...steps), 'scripts/opaque-sql-sinks.json': JSON.stringify(entries) });
+  const keyOf = (steps, more) => /\[(.+)\] \(FU-340: /.exec(scan(steps, {}, more).join('\n'))?.[1];
+  const install = run('pnpm install --frozen-lockfile'), reader = run(f), plain = siteKey(file, 'cli', f);
+  const reviewed = keyOf([install, reader]), listed = { [reviewed]: 'install writes node_modules alone' };
+  assert.match(reviewed, /^\.github\/workflows\/w\.yml:cli:sha256:[0-9a-f]{64}$/);
+  assert.notEqual(reviewed, plain);
+  assert.deepEqual(scan([install, reader], listed), []);
+  // a step the model reads, added before or after, does not change what was reviewed
+  assert.deepEqual(scan([run('echo ok > /tmp/log'), 'uses: ./.github/actions/quiet', install, 'uses: actions/checkout@v4', run(`cat fixtures/claim.sql\n${f}`), run('node x.mjs')], listed), []);
+  // the review does not cover: a reviewed step that was edited, another such step, a write the model places on the file, the site's plain key
+  const stale = `FU-324: stale or invalid opaque SQL inventory entry: ${reviewed}`;
+  for (const steps of [[run('pnpm install'), reader], [install, run('node x.mjs'), reader], [install, run(`node x.mjs\n${f}`)],
+    [install, 'uses: ./.github/actions/generate', reader], [install, run('echo x > fixtures/claim.sql'), reader], [install, run('cp -b /tmp/x fixtures/other.sql'), reader]]) {
+    const found = scan(steps, listed);
+    assert.equal(found.length, 2, JSON.stringify(steps));
+    assert.match(found[0], /^\.github\/workflows\/w\.yml:\d+: FU-324: unresolved executable SQL \[/);
+    assert.equal(found[1], stale);
+  }
+  assert.equal(scan([install, reader], { [plain]: 'the command alone' }).length, 2);
+  assert.match(scan([install, run('echo x > fixtures/claim.sql'), reader]).join(), new RegExp(`\\[${plain.replace(/[.]/g, '\\.')}\\]$`));
+  // a local action is held with the steps it has, also the one it uses in turn and one the model did not read (a write before it)
+  const edited = { '.github/actions/generate/action.yml': composite('node scripts/other.mjs') }, replaced = { '.github/actions/quiet/action.yml': composite('echo "$SQL" > fixtures/claim.sql') };
+  for (const [steps, more] of [[['uses: ./.github/actions/generate', reader], edited], [[install, 'uses: ./.github/actions/outer', reader], edited], [[install, 'uses: ./.github/actions/quiet', reader], replaced]]) {
+    const key = keyOf(steps);
+    assert.ok(key && keyOf(steps, more) && key !== keyOf(steps, more), JSON.stringify(steps));
+    assert.deepEqual(scan(steps, { [key]: 'read' }), []);
+    assert.equal(scan(steps, { [key]: 'read' }, more).length, 2);
+  }
+  // and a step that is no mapping with what it is
+  assert.ok(keyOf(['one', reader]) && keyOf(['one', reader]) !== keyOf(['two', reader]));
 });
 
 test('PR #1109 r1 F3, PR #1111 r1 item 1: a part this cannot read, anywhere in the executed text, leaves the site unresolved', () => {

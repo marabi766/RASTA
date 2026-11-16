@@ -2386,8 +2386,23 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
     const doc = parseDocument(read(`${path}/action.yml`) ?? read(`${path}/action.yaml`) ?? '');
     return doc.errors.length ? null : (doc.toJS()?.runs?.steps ?? null);
   };
-  // the repository's copy is what `psql -f` reads only at a path of the checkout that no step so far may have written
-  const unwritten = (written) => (file) => (stale(written, posix.normalize(file)) ? null : read(file));
+  // the repository's copy is what `psql -f` reads only at a path of the checkout that no step so far may have written.
+  // PR #1130 r1 F2: after a write the model cannot place (a program outside its lists, a script, a computed target) the
+  // file is still read, to be checked, but its site is unresolved under a key that also holds each step such a write
+  // comes from (`bound`: and the steps of a local action one uses): the inventory lists it on a review of those steps,
+  // and the entry is stale once one of them is edited or another is added. GitHub nests composite actions no deeper than 10.
+  const bound = (step, depth = 0) => [step, typeof step?.uses === 'string' && step.uses.startsWith('./') && depth < 10
+    ? (action(posix.normalize(step.uses.slice(2)))?.map?.((inner) => bound(inner, depth + 1)) ?? null) : null];
+  const unwritten = (written) => {
+    const unplaced = [...new Set(written.filter((target) => target.unknown !== undefined).map((target) => target.step))];
+    const placed = written.filter((target) => target.unknown === undefined), served = new Set();
+    const input = (file) => {
+      const text = stale(placed, posix.normalize(file)) ? null : read(file);
+      if (text !== null && unplaced.length) served.add(text);
+      return text;
+    };
+    return Object.assign(input, { reviewed: (text) => (served.has(text) ? `\n${sha256(JSON.stringify(unplaced.map((step) => bound(step))))}` : '') });
+  };
   for (const path of authored) {
     const local = relative(repository, path);
     if (TEST_PATH.test(local) || /\.(?:md|png|jpe?g|ico|woff2?|pdf)$|^docs\//.test(local)) continue;
@@ -2398,12 +2413,13 @@ function claimFileProblems(repository, opaque, opaqueUsed) {
     // `rewritten`: what the file's reader puts other text in before a shell is given the command.
     const sites = (script, line, input, rewritten = /$^/) => {
       for (const site of cliSqlSites(script, input, line)) {
-        const key = siteKey(local, 'cli', site.command);
+        const steps = input?.reviewed?.(site.text) ?? '';
+        const key = siteKey(local, 'cli', site.command + steps);
         const sql = site.text === null ? null : psqlText(site.text);
         if (sql) texts.push({ text: sql.sql, line: site.line + 1, strict: true });
-        if (sql?.whole && !rewritten.test(site.command)) continue;
+        if (sql?.whole && !rewritten.test(site.command) && !steps) continue;
         if (typeof opaque[key] === 'string' && opaque[key].trim()) opaqueUsed.add(key);
-        else problems.push(`${local}:${site.line + 1}: FU-324: unresolved executable SQL [${key}]`);
+        else problems.push(`${local}:${site.line + 1}: FU-324: unresolved executable SQL [${key}]${steps && ' (FU-340: its file is read after a write this check cannot place; the key holds the steps such a write comes from)'}`);
       }
     };
     if (/\.[cm]?[jt]sx?$/.test(local)) {

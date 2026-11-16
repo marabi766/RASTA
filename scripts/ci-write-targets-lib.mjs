@@ -25,15 +25,20 @@ import {
  * No value is followed: `dir=…` then `> "$dir/x"` is unknown, and so is a text with `${{ … }}`.
  *
  * Read: a redirection of any command; the operands of a program of `WRITERS` (which one is the
- * destination depends on options this does not read, so each may be; of `curl` and `wget` the
- * values of the options that name a file, until FU-340 part C reads their whole grammar; a word
- * that starts computed may be any option); a `-c` body, `eval` and `trap` text; what an action
- * restores (`ACTIONS`, every input of each read or listed). A program this cannot place
- * (`UNPLACED`), a computed command word, `xargs`, an action or an input outside the table and
- * text the tokenizer does not read are unknown. Not read (D-173: an accidental edit, not a
- * hostile one): what any other program writes (`node x.mjs`, a repository script, `pnpm`,
- * `openssl`, `gitleaks`, `mc`, a container through a mount), a function named like a program,
- * the `w` of a `sed` script, a script file a shell is started on or sources, a path that reaches a file
+ * destination depends on options this does not read, so each may be; of `curl`, `wget` and
+ * `psql` the values of the options that name a file, until FU-340 part C reads their whole
+ * grammar; a word that starts computed may be any option; a backup or another second
+ * destination goes where no word says: unknown); a `-c` body, `eval` and `trap` text; what an
+ * action restores (`ACTIONS`, every input of each read or listed). The commands of `QUIET` write
+ * no file of their own. EVERY other command is unknown (PR #1130 r1 F2): a program outside
+ * these lists (`node x.mjs f`, `pnpm`, `sort -o f`, `pg_dump -f f`, `sed`, whose program is not
+ * read: its `w`), a repository script, a script file a shell is started on or sources, a
+ * function, a computed command word, `xargs`; and so are an action or an input outside the
+ * table and text the tokenizer does not read. A guard that still reads a file after an unknown
+ * write does so on a review of the steps it comes from: each target names its `step`.
+ * Not read (D-173: an accidental edit, not a hostile one): a function or a file on `PATH` named
+ * like a program of the lists, what the SQL of a file `psql` reads writes (a `\o`: the SQL guard
+ * leaves that site unresolved), a path that reaches a file
  * through a link the repository holds, a service container given the workspace as a volume.
  */
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -85,21 +90,35 @@ const option =
 /**
  * `attached`: the short options whose value, written in the same word, is a target. `here`: it
  * writes into the directory it runs in when a word is such an option; `there`: unless one is;
- * `alone`: when it has one operand (`ln -s /tmp/x`). `when`: it writes only then (`sed -i`).
+ * `alone`: when it has one operand (`ln -s /tmp/x`).
  * `values`: its operands are addresses, and only the word after such an option (the last of its
- * cluster) is a target (`curl -so f`); `refers`: such an option reads more options from a file,
- * and `names`: such a word names a file inside a format, so what it writes is unknown.
+ * cluster) is a target (`curl -so f`); `refers`: such an option reads more options from a file
+ * or runs a program, and `names`: such a word names a file inside a format or holds a command
+ * of the program's own (`psql -c '\o f'`, `-o '|tee f'`), so what it writes is unknown.
+ * `backs` (PR #1130 r1 F1): such an option makes a second destination no word names: a backup
+ * of what is replaced, named by a suffix or a numbering its options or the environment
+ * (`SIMPLE_BACKUP_SUFFIX`, `VERSION_CONTROL`) give; `f.1` of `curl --no-clobber -o f`; the
+ * `f.warc.gz` of `wget --warc-file f`. It is not placed, so unknown.
  */
+const backs = option('bS', 'backup suffix');
 const WRITERS = {
   tee: {},
   truncate: {},
   dd: {},
-  cp: { attached: 't' },
-  mv: { attached: 't' },
-  ln: { attached: 't', alone: true },
-  install: { attached: 't' },
-  sed: { when: option('i', 'in-place') },
-  tar: { attached: 'Cf', there: option('C', 'directory') },
+  cp: { attached: 't', backs },
+  mv: { attached: 't', backs },
+  ln: { attached: 't', alone: true, backs },
+  install: { attached: 't', backs, refers: option('', 'strip-program') },
+  tar: {
+    attached: 'Cf',
+    there: option('C', 'directory'),
+    backs: option('', 'backup suffix'),
+    // `-P`: its members go where the archive says
+    refers: option(
+      'IFP',
+      'to-command use-compress-program checkpoint-action info-script new-volume-script rsh-command rmt-command absolute-names',
+    ),
+  },
   unzip: { attached: 'd', there: option('d') },
   curl: {
     attached: 'oDc',
@@ -111,20 +130,30 @@ const WRITERS = {
     here: option('OJ', 'remote-name remote-name-all remote-header-name'),
     refers: option('K', 'config'),
     names: /%output\{/,
+    backs: option('', 'no-clobber'),
   },
   wget: {
     attached: 'OPoa',
     values: option(
       'OPoa',
-      'output-document directory-prefix output-file append-output save-cookies warc-file rejected-log',
+      'output-document directory-prefix output-file append-output save-cookies rejected-log hsts-file',
       '$',
     ),
     there: option('OP', 'output-document directory-prefix'),
+    refers: option('e', 'config use-askpass execute'),
+    backs: option('', 'warc-file'),
   },
+  psql: { attached: 'oL', values: option('oL', 'output log-file', '$'), names: /\\|^\|/ },
 };
-/** Programs that write where no operand says, or what this does not read. */
-const UNPLACED = list(
-  'patch rsync scp gunzip gzip bunzip2 bzip2 unxz xz zstd unzstd busybox toybox',
+/**
+ * The effect contracts (PR #1130 r1 F2): the commands that write no file of their own, only
+ * what a redirection names: the shell's own words, and programs that have no option to write
+ * one. `git` and `find` are such in the forms read below. Any other command is unknown.
+ */
+const QUIET = list(
+  'if then elif else fi for while until do done case esac select function { } ! [ [[ : true ' +
+    'false test echo printf set export unset local readonly declare read shift return exit ' +
+    'break continue wait exec cd pushd popd sleep cat grep head tail wc cut tr date basename dirname',
 );
 const GIT_READS = /^(?:cat-file|log|rev-list|rev-parse|diff|show|status|ls-files|describe)$/;
 /** A name the runner binds, written other than to expand it: the text may bind it itself. */
@@ -138,8 +167,16 @@ const CREDENTIALS = /^"\$\{\w+_credentials\}"$/;
 const credentials = (name, rest) =>
   name === 'eval' && rest.length > 0 && rest.every((word) => CREDENTIALS.test(word.source));
 
+/** Whether a command outside `WRITERS` is one of the effect contracts: it writes no file. */
+const quiet = (name, rest) =>
+  name === '' ||
+  QUIET.has(name) ||
+  credentials(name, rest) ||
+  (name === 'git' && GIT_READS.test(rest[0]?.value) && !rest.some((w) => /^--ou/.test(w.value))) ||
+  (name === 'find' && !rest.some((word) => word.dynamic || FIND_WRITES.test(word.value)));
+
 /** The words a program of `WRITERS` may write, `null` standing for the directory it runs in. */
-function operandTargets({ attached, here, there, alone, when, values, refers, names }, words) {
+function operandTargets({ attached, here, there, alone, values, refers, names, backs }, words) {
   const end = words.findIndex((word) => !word.dynamic && word.value === '--');
   const args = end < 0 ? words : words.slice(0, end);
   const after = end < 0 || values ? [] : words.slice(end + 1);
@@ -151,18 +188,23 @@ function operandTargets({ attached, here, there, alone, when, values, refers, na
   );
   if (open.length) return open;
   const has = (is) => args.some((word) => !word.dynamic && is(word.value));
-  if (when && !has(when)) return [];
-  if (refers && has(refers)) return [{ value: '', dynamic: true, source: 'its options file' }];
+  if (backs && has(backs))
+    return [{ value: '', dynamic: true, source: 'a second destination no word names' }];
+  if (refers && has(refers))
+    return [{ value: '', dynamic: true, source: 'what such an option reads or runs' }];
   if (names && words.some((word) => names.test(word.value)))
-    return [{ value: '', dynamic: true, source: 'a file its format names' }];
+    return [{ value: '', dynamic: true, source: 'what such a word names' }];
   const found = (here && has(here)) || (there && !has(there)) ? [null] : [];
   for (const [at, word] of args.entries()) {
     const operand = values
       ? at > 0 && !args[at - 1].dynamic && values(args[at - 1].value)
       : word.dynamic || !word.value.startsWith('-');
     if (operand) found.push(word);
+    // `name=value`: of a program whose operands are addresses, only of an option that names a file
     const value =
-      /^(?:--)?[\w-]+=(.+)$/.exec(word.value)?.[1] ??
+      (values
+        ? values(word.value) && /^--[a-z-]+=(.+)$/.exec(word.value)?.[1]
+        : /^(?:--)?[\w-]+=(.+)$/.exec(word.value)?.[1]) ||
       (attached && new RegExp(`^-(?!-)\\S*?[${attached}](.+)$`).exec(word.value)?.[1]);
     if (value && !word.dynamic) found.push({ value, dynamic: false });
   }
@@ -226,20 +268,21 @@ export function shellWrites(text, cwd = null, depth = 0) {
     }
     if (unplaced) targets.push(unknown(unplaced));
     else if (Object.hasOwn(WRITERS, name)) operandTargets(WRITERS[name], rest).forEach(add);
-    else if (
-      UNPLACED.has(name) ||
-      (name === 'git' &&
-        !(GIT_READS.test(rest[0]?.value) && !rest.some((w) => /^--ou/.test(w.value)))) ||
-      (name === 'find' && rest.some((word) => word.dynamic || FIND_WRITES.test(word.value)))
-    )
-      targets.push(unknown(`what \`${name}\` writes`));
     else if (name === 'eval' && !credentials(name, rest)) inner(rest);
-    else if (name === 'trap') inner(rest.filter((word) => word.source !== '--').slice(0, 1));
+    // `trap - EXIT` sets none
+    else if (name === 'trap')
+      inner(
+        rest
+          .filter((word) => word.source !== '--')
+          .slice(0, 1)
+          .filter((w) => w.source !== '-'),
+      );
     else if (SHELL_WORD.test(name)) {
       const run = shellInvocation(rest, name);
       if (run.body) inner([run.body]);
-      else if (!run.file) targets.push(unknown(run.problem ?? `what ${name} reads as commands`));
-    }
+      else if (run.file) targets.push(unknown(`the script ${run.file.source}, which is not read`));
+      else targets.push(unknown(run.problem ?? `what ${name} reads as commands`));
+    } else if (!quiet(name, rest)) targets.push(unknown(`what \`${name}\` writes`));
   }
   return targets.filter(Boolean);
 }
@@ -290,7 +333,7 @@ const CACHE_SERVICE = /^type=gha(?:,[\w-]+=[^,\s]+)*$/;
  * the caller does not read it here.
  */
 export function stepWrites(step, local = () => null, depth = 0) {
-  if (!record(step)) return [unknown('a step that is not a mapping')];
+  if (!record(step)) return [{ step, ...unknown('a step that is not a mapping') }];
   // a merge key is not applied here: what it adds to the step is not read
   const targets = Object.hasOwn(step, '<<') ? [unknown('a step with a merge key')] : [];
   if (step.uses !== undefined) {
@@ -334,7 +377,8 @@ export function stepWrites(step, local = () => null, depth = 0) {
     // GitHub pastes the value in before the shell reads the text: it can hold a command
     if (String(step.run).includes('${{')) targets.push(unknown('what an expression pastes in'));
   }
-  return targets;
+  // the innermost step a target comes from: what a review of an unknown write has read
+  return targets.map((target) => ({ step, ...target }));
 }
 
 /**
