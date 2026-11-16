@@ -739,9 +739,18 @@ const SERVICE_OPTIONS = new Set([
   health('/mailpit readyz'),
 ]);
 const SERVICE_COMMAND = 'postgres -c max_connections=300';
+/**
+ * The runner images reviewed. Every rule here reads a step as Linux runs it: `bash` where no
+ * shell is named, and a name of the environment in the case it is written (F5: on Windows
+ * `node_options` is `NODE_OPTIONS`). Another label, a list or an expression is refused. That a
+ * runner of the repository's own carries the label is not in the text and is not proven.
+ */
+const RUNNERS = new Set(['ubuntu-24.04']);
 function outsideSteps(where, job, errors, path) {
   for (const key of Object.keys(job))
     if (!JOB_KEYS.has(key)) errors.push(`${where}: ${clip(key)} is not a job key this check reads`);
+  if (!RUNNERS.has(job['runs-on']))
+    errors.push(`${where}: runs-on is not a runner image this check reads its steps for`);
   const services = job.services ?? {};
   if (!record(services)) return void errors.push(`${where}: services is not a mapping`);
   for (const [id, service] of Object.entries(services)) {

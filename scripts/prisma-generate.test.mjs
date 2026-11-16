@@ -299,7 +299,7 @@ test('local workflow calls prove their own suppression; missing, mixed, remote a
   const call = (uses) =>
     `env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  call:\n    uses: ${uses}\n`;
   const child =
-    "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  run:\n    steps:\n      - run: pnpm install\n";
+    "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  run:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: pnpm install\n";
   const source = call(`./${target}`);
   const check = (text = source, workflows = { [target]: child }) =>
     workflowLifecycle(caller, text, workflows);
@@ -421,8 +421,8 @@ test('a workflow step or an action outside the suppression is refused', () => {
 
   // A new workflow: suppressed at any of the three levels, for every step, or refused.
   const fresh = (top, job, step) =>
-    `on: push\n${top}jobs:\n  a:\n    runs-on: x\n${job}    steps:\n      - run: pnpm deploy /out\n${step}` +
-    '  b:\n    runs-on: x\n    steps:\n      - uses: actions/checkout@v4\n';
+    `on: push\n${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n${job}    steps:\n      - run: pnpm deploy /out\n${step}` +
+    '  b:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n';
   const at = (indent) => `${indent}env:\n${indent}  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n`;
   assert.deepEqual(workflowLifecycle('new.yml', fresh(at(''), '', '')).errors, []);
   refused(workflowLifecycle, 'new.yml', fresh('', '', ''), /job a step 1 runs without/);
@@ -483,7 +483,7 @@ const runs = {
   workflow: (script) =>
     workflowLifecycle(
       'new.yml',
-      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: |\n${indent(script, '          ')}\n`,
+      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: |\n${indent(script, '          ')}\n`,
     ),
   action: (script) =>
     actionLifecycle(
@@ -615,7 +615,7 @@ test('what an image or a step starts outside the suppression is refused', () => 
     notRead,
   );
   const workflow = (top, step) =>
-    `on: push\n${top}jobs:\n  a:\n    runs-on: x\n    env:\n      PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n    steps:\n${step}`;
+    `on: push\n${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n    env:\n      PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n    steps:\n${step}`;
   refused(
     workflowLifecycle,
     'new.yml',
@@ -914,7 +914,7 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
 
   // PM: a protected name in an `env`, at every level and in every kind of file, but as a reviewed pair.
   const workflow = (top, job, step) =>
-    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n${top}jobs:\n  a:\n    runs-on: x\n${job}    steps:\n      - run: echo ok\n${step}`;
+    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n${job}    steps:\n      - run: echo ok\n${step}`;
   const levels = (entry) => [
     workflow(`  ${entry}\n`, '', ''),
     workflow('', `    env:\n      ${entry}\n`, ''),
@@ -976,6 +976,26 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
   everywhere('goal=1; cc=gcc; home=/tmp/h; ifs=,; git_dir=x; echo ok', null, true);
   for (const text of levels('NPM_Config_Script_Shell: x'))
     assert.match(errors(text), /a package manager option/);
+  // and that holds on Linux alone (on Windows `node_options` is NODE_OPTIONS, and no shell
+  // named is not bash): a job's runner is a reviewed image, written out
+  for (const runner of [
+    'windows-2022',
+    'macos-15',
+    'ubuntu-latest',
+    'Ubuntu-24.04',
+    'self-hosted',
+    '[ubuntu-24.04]',
+    '[self-hosted, ubuntu-24.04]',
+    '${{ matrix.os }}',
+    '{ group: x, labels: ubuntu-24.04 }',
+  ]) {
+    const text = swap(workflow('', '', ''), 'runs-on: ubuntu-24.04', `runs-on: ${runner}`);
+    assert.match(errors(text), /job a: runs-on is not a runner image this check reads/, runner);
+  }
+  assert.match(
+    errors(swap(workflow('', '', ''), '    runs-on: ubuntu-24.04\n', '')),
+    /job a: runs-on is not a runner image/,
+  );
   for (const entry of ['<<: { NODE_OPTIONS: x }', 'A: [NODE_OPTIONS]', 'A-B: x'])
     for (const text of levels(entry)) assert.match(errors(text), /is not a name with one value/);
   const composite = `${repoText(ENTRY.action)}    - shell: bash\n      env:\n        NODE_OPTIONS: x\n      run: echo ok\n`;
@@ -1683,14 +1703,14 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
   // the #1118 F2 sibling: a matrix value is not read, and the write through it is refused
   const matrix = workflowLifecycle(
     'new.yml',
-    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    strategy:\n      matrix:\n        f: ['\${{ github.env }}']\n    steps:\n      - env:\n          OUT: \${{ matrix.f }}\n        run: mc cp /tmp/x "$OUT"\n`,
+    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    strategy:\n      matrix:\n        f: ['\${{ github.env }}']\n    steps:\n      - env:\n          OUT: \${{ matrix.f }}\n        run: mc cp /tmp/x "$OUT"\n`,
   ).errors;
   assert.equal(matrix.length, 1, matrix.join('\n'));
   assert.match(matrix[0], /may write "\$OUT", which/);
   const used = (text) =>
     workflowLifecycle(
       'new.yml',
-      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: ${text}\n`,
+      `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ${text}\n`,
     ).errors.join('\n');
   const SHA = '0'.repeat(40);
   assert.match(used(`actions/download-artifact@${SHA}`), /writes the checkout: /);
@@ -1744,9 +1764,10 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
   // in another file also after the very steps of the reviewed one
   const copied = indent(repoText(ENTRY.action).split('  steps:\n')[1], '  ');
   assert.match(
-    workflowLifecycle('new.yml', `jobs:\n  a:\n    runs-on: x\n    steps:\n${copied}`).errors.join(
-      '\n',
-    ),
+    workflowLifecycle(
+      'new.yml',
+      `jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n${copied}`,
+    ).errors.join('\n'),
     /may write \$\{\{ steps\.pin\.outputs\.archive \}\}, which/,
   );
   assert.match(
@@ -1835,7 +1856,8 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
 
 test('the shell that reads a step and the variables it is given are read at every level (FU-334)', () => {
   const env = "env:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\n";
-  const job = (steps) => `on: push\n${env}jobs:\n  a:\n    runs-on: x\n    steps:\n${steps}`;
+  const job = (steps) =>
+    `on: push\n${env}jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n${steps}`;
   const run = (extra) => `      - run: bash scripts/ci-install-browser.sh\n${extra}`;
   const errors = (text) => workflowLifecycle('new.yml', text).errors.join('\n');
   assert.equal(errors(job(run(''))), '');
@@ -2010,7 +2032,7 @@ test('r1 probes: containers, services and directories are read only as reviewed 
   const job = (extra, top = '', step = 'run: echo') =>
     workflowLifecycle(
       'new.yml',
-      `on: push\n${env}${top}jobs:\n  a:\n    runs-on: x\n${extra}    steps:\n      - ${step}\n`,
+      `on: push\n${env}${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n${extra}    steps:\n      - ${step}\n`,
     ).errors.join('\n');
   const health = (command) =>
     `'--health-cmd "${command}" --health-interval 10s --health-timeout 5s --health-retries 10'`;
@@ -2054,7 +2076,7 @@ test('a step builds and uses only files of the inventory (FU-334)', () => {
   const build = (inputs, uses = 'docker/build-push-action@0', matrix = '') =>
     `      - uses: ${uses}\n        with:\n${inputs.map((input) => `          ${input}\n`).join('')}${matrix}`;
   const job = (steps, matrix = "['economic-service', 'api-gateway']") =>
-    `on: push\n${env}jobs:\n  a:\n    runs-on: x\n    strategy:\n      matrix:\n        service: ${matrix}\n    steps:\n${steps}`;
+    `on: push\n${env}jobs:\n  a:\n    runs-on: ubuntu-24.04\n    strategy:\n      matrix:\n        service: ${matrix}\n    steps:\n${steps}`;
   const checks = {
     workflow: (step, matrix) => workflowLifecycle('new.yml', job(step, matrix)),
     action: (step) =>
