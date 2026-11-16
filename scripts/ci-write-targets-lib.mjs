@@ -17,8 +17,9 @@ import {
  *  - the shell reader (prisma-lifecycle-suppression-lib.mjs) for everything a step runs, uses,
  *    builds or mounts, named or not (`pnpm` reads `.npmrc` and `package.json`, a build its whole
  *    context): a step writes nothing into the checkout that this model reads but a reviewed
- *    output (`writeProblems`). A command the model has no contract for (`command`) is the
- *    reader's own to judge, by its policy; what such a program writes is not proven there.
+ *    output (`writeProblems`). A command the model has no contract for (`command`) is left to
+ *    the reader only where it reads that command by a grammar of its own (`judged`); what such
+ *    a program writes on its own is not proven there. Any other is refused like an unknown.
  *
  * A target is `{ path }` (a path of the checkout, '' its root: a write to a directory is a write
  * to everything below it) or `{ unknown }`: it cannot be placed (computed, a pattern, absolute
@@ -106,8 +107,14 @@ const option =
  * of what is replaced, named by a suffix or a numbering its options or the environment
  * (`SIMPLE_BACKUP_SUFFIX`, `VERSION_CONTROL`) give; `f.1` of `curl --no-clobber -o f`; the
  * `f.warc.gz` of `wget --warc-file f`. It is not placed, so unknown.
+ * PR #1154 r1 F1, the programs the shell reader lists by name alone: `forms`: all of the program
+ * that is read, as its words joined by one blank (a computed word is `$`); any other form is
+ * unknown. `verb`: its first word is a verb, and after one of these every operand is an address.
+ * `mode`: the word after such an option, and with `leads` the first word, is a mode when it is
+ * written as one. A deletion and a change of mode are writes of the operand.
  */
 const backs = option('bS', 'backup suffix');
+const MODE = /^(?:[0-7]{3,4}|[ugoa]*[+=][rwxXst]+)$/;
 const WRITERS = {
   tee: {},
   truncate: {},
@@ -151,6 +158,31 @@ const WRITERS = {
     backs: option('', 'warc-file'),
   },
   psql: { attached: 'oL', values: option('oL', 'output log-file', '$'), names: /\\|^\|/ },
+  rm: {},
+  mkdir: { mode: option('m', 'mode', '$') },
+  chmod: { leads: true, refers: option('', 'reference') },
+  // without a template the file lies under `TMPDIR`, which no text sets (the reader's `LOADED`)
+  mktemp: { attached: 'p' },
+  // `rand` alone: any other subcommand has its own options that name a file
+  openssl: {
+    forms: /^rand(?: -hex| -base64| -out \S+)* \d+$/,
+    values: (text) => /^-out$/.test(text),
+  },
+  // `--log-opts` are options of the `git log` it starts, which has an `--output`
+  gitleaks: {
+    attached: 'r',
+    values: option('r', 'report-path diagnostics-dir', '$'),
+    here: option('', 'diagnostics'),
+    refers: option('', 'log-opts'),
+  },
+  // `mb` and `anonymous set` name an address alone; which operand of a copy is a local file its
+  // aliases say, so each may be. An option of a copy, `-C` (it moves mc's own configuration)
+  // and any other verb (`support`, `update`, `alias`) write where no word says
+  mc: {
+    forms:
+      /^(?:|mb(?: --ignore-existing)? [\w./-]+|anonymous set \w+ [\w./-]+|(?:cp|mv|mirror|get|put)(?: (?!-)\S+)+)$/,
+    verb: /^(?:mb|anonymous)$/,
+  },
 };
 /**
  * The effect contracts (PR #1130 r1 F2): the commands that write no file of their own, only
@@ -160,7 +192,8 @@ const WRITERS = {
 const QUIET = list(
   'if then elif else fi for while until do done case esac select function { } ! [ [[ : true ' +
     'false test echo printf set export unset local readonly declare read shift return exit ' +
-    'break continue wait exec cd pushd popd sleep cat grep head tail wc cut tr date basename dirname',
+    'break continue wait exec command cd pushd popd sleep seq cat grep head tail wc cut tr date ' +
+    'basename dirname',
 );
 const GIT_READS = /^(?:cat-file|log|rev-list|rev-parse|diff|show|status|ls-files|describe)$/;
 /** A name the runner binds, written other than to expand it: the text may bind it itself. */
@@ -183,7 +216,10 @@ const quiet = (name, rest) =>
   (name === 'find' && !rest.some((word) => word.dynamic || FIND_WRITES.test(word.value)));
 
 /** The words a program of `WRITERS` may write, `null` standing for the directory it runs in. */
-function operandTargets({ attached, here, there, alone, values, refers, names, backs }, words) {
+function operandTargets(spec, words) {
+  const { attached, here, there, alone, values, refers, names, backs, forms, verb, mode, leads } =
+    spec;
+  const said = (source) => [{ value: '', dynamic: true, source }];
   const end = words.findIndex((word) => !word.dynamic && word.value === '--');
   const args = end < 0 ? words : words.slice(0, end);
   const after = end < 0 || values ? [] : words.slice(end + 1);
@@ -193,20 +229,29 @@ function operandTargets({ attached, here, there, alone, values, refers, names, b
     (word) =>
       word.dynamic && /^(?:-|$)/.test(word.value.slice(0, word.cut)) && placeWord(word, null),
   );
-  if (open.length) return open;
   const has = (is) => args.some((word) => !word.dynamic && is(word.value));
-  if (backs && has(backs))
-    return [{ value: '', dynamic: true, source: 'a second destination no word names' }];
-  if (refers && has(refers))
-    return [{ value: '', dynamic: true, source: 'what such an option reads or runs' }];
-  if (names && words.some((word) => names.test(word.value)))
-    return [{ value: '', dynamic: true, source: 'what such a word names' }];
+  if (backs && has(backs)) return said('a second destination no word names');
+  if (refers && has(refers)) return said('what such an option reads or runs');
+  if (names && words.some((word) => names.test(word.value))) return said('what such a word names');
+  if (forms && !forms.test(words.map((word) => (word.dynamic ? '$' : word.value)).join(' ')))
+    return said('a form of the program that is not read');
+  if (verb?.test(words[0]?.value)) return open;
   const found = (here && has(here)) || (there && !has(there)) ? [null] : [];
   for (const [at, word] of args.entries()) {
-    const operand = values
-      ? at > 0 && !args[at - 1].dynamic && values(args[at - 1].value)
-      : word.dynamic || !word.value.startsWith('-');
-    if (operand) found.push(word);
+    // `--name=value` holds its value: the next word is none of it
+    const follows = (is) =>
+      at > 0 &&
+      !args[at - 1].dynamic &&
+      is(args[at - 1].value) &&
+      !/^--.*=/.test(args[at - 1].value);
+    // `chmod 644 -w`: with a mode written as an option, the first word is a file
+    const own =
+      (verb && at === 0) ||
+      (!word.dynamic &&
+        MODE.test(word.value) &&
+        (at === 0 ? leads && !has((text) => text.startsWith('-')) : mode && follows(mode)));
+    const operand = values ? follows(values) : word.dynamic || !word.value.startsWith('-');
+    if (operand && !own && !open.includes(word)) found.push(word);
     // `name=value`: of a program whose operands are addresses, only of an option that names a file
     const value =
       (values
@@ -217,6 +262,8 @@ function operandTargets({ attached, here, there, alone, values, refers, names, b
   }
   found.push(...after);
   const operands = found.filter((word) => word?.source !== undefined).length;
+  // a word that may be any option is unknown; what the other words name is written all the same
+  if (open.length) return [...open, ...found.filter(Boolean)];
   return alone && operands === 1 ? [null, ...found] : found;
 }
 
@@ -263,7 +310,10 @@ export function shellWrites(text, cwd = null, depth = 0) {
   if (bare.includes('`')) targets.push(unknown('a backtick command substitution'));
   if (BOUND.test(bare))
     targets.push(unknown('a name of the runner written other than to expand it'));
-  const add = (word) => targets.push(word === null ? place('.', from) : placeWord(word, from));
+  const add = (word, removed) => {
+    const target = word === null ? place('.', from) : placeWord(word, from);
+    targets.push(target && removed ? { ...target, removed } : target);
+  };
   const inner = (words) =>
     words.some((word) => word.dynamic)
       ? targets.push(unknown(words.map((word) => word.source).join(' ')))
@@ -274,7 +324,8 @@ export function shellWrites(text, cwd = null, depth = 0) {
       if (word.redirect?.includes('>') && !duplicate) add(word);
     }
     if (unplaced) targets.push(unknown(unplaced));
-    else if (Object.hasOwn(WRITERS, name)) operandTargets(WRITERS[name], rest).forEach(add);
+    else if (Object.hasOwn(WRITERS, name))
+      operandTargets(WRITERS[name], rest).forEach((word) => add(word, name === 'rm'));
     else if (name === 'eval' && !credentials(name, rest)) inner(rest);
     // `trap - EXIT` sets none
     else if (name === 'trap')
@@ -435,10 +486,13 @@ export function stale(targets, path) {
  *  1. ci.yml "Secret scan": `tee "$SCAN_LOG"`, the `mktemp` file under `$RUNNER_TEMP`.
  *  2. backup-drill-monthly.yml "Run the full drill": `"${dir}/…"`, `dir` being
  *     `"${RUNNER_TEMP}/backup-drill"`, assigned once in the same text.
+ *  3. backup-drill-monthly.yml "Remove anything the drill left": `rm -rf -- "${dir:?}"`, the
+ *     same `dir`, assigned once in the same text.
  */
 export const REVIEWED_TEXTS = new Set([
   'sha256:7d74b40b62548c6ae58e97165b4ebd77bc6792ad4a7d8c85ec296ef373c1e48a',
   'sha256:5564580934f1389438d3f794a35676840ae13fedb65aaee631d8ce15ebb3e923',
+  'sha256:d220007d3ebea96beeb855d11e9fece19f6a9eee19d8482da65323bbc15e9ac1',
 ]);
 /**
  * The computed inputs reviewed by hand, as `<file>: <action> <input>=<text>`: each names an
@@ -465,19 +519,33 @@ export const REVIEWED_INPUTS = new Map([
 /**
  * All a step may write inside the checkout: these paths and what lies below them. None is a
  * file of the repository or holds one (the test holds the inventory to that), and no program a
- * step starts reads one as its configuration.
+ * step starts reads a `written` one as its configuration. Of a `removed` one only the deletion
+ * is reviewed (`rm`): a step writes nothing into it.
  *  - `.economic-coverage`: the coverage shards the merge job downloads and reports on.
+ *  - `results.sarif`: the report of the secret scan (ci.yml, `--report-path`); no step reads it.
+ *  - `apps/web/.next`: the web build's output, which git ignores. ci.yml deletes an older one
+ *    before `pnpm build` (whose own writes are not proven here), so that the coverage check
+ *    reads the manifest of this build. The server a later step starts loads it: no write.
  */
-export const OUTPUTS = new Set(['.economic-coverage']);
+export const OUTPUTS = new Map([
+  ['.economic-coverage', 'written'],
+  ['results.sarif', 'written'],
+  ['apps/web/.next', 'removed'],
+]);
+/** Every command name that has a contract here: it writes nothing, or its operands are read. */
+export const CONTRACTS = new Set([...QUIET, ...Object.keys(WRITERS), 'eval', 'trap']);
 
 /**
  * The shell reader's rule: why a step of `file` may not write what it writes. A target this
  * cannot place is refused unless its text or its input is reviewed; a path of the checkout is
  * refused unless it is a reviewed output. So nothing a later step of the job runs, uses,
  * builds, mounts or reads as configuration, named or not, was put there by a step. `before`:
- * the steps of the same list before this one.
+ * the steps of the same list before this one. `judged(name)`: whether the reader reads the
+ * command `name`, which the model has no contract for, by a grammar of its own (PR #1154 r1 F1:
+ * an exact reviewed line, a verb table, a file of the inventory). A program it lists by name
+ * alone is none: its operands are read by nobody, so it has a contract here or is refused.
  */
-export function writeProblems(given, file, local, before = []) {
+export function writeProblems(given, file, { local, before = [], judged = () => false } = {}) {
   // the shell reader still reads `${{ env.NAME }}` as one computed word here, as its own rules
   // do (`scriptProblems`): the model refuses every expression, and proving the value from the
   // YAML for both readers is the next change (PM decision 2, its own PR)
@@ -501,14 +569,17 @@ export function writeProblems(given, file, local, before = []) {
           .map(([, value]) => String(value)),
   );
   const problems = new Set();
-  for (const { unknown: text, path, command } of stepWrites(step, local))
-    // a command the model has no contract for (`command`) is the reader's own to judge: there it
-    // is a program of its policy, a reviewed line or a file of the inventory, or it is refused
-    if (command !== undefined) continue;
+  const output = (path, removed) =>
+    [...OUTPUTS].some(
+      ([reviewed, how]) =>
+        (path === reviewed || path.startsWith(`${reviewed}/`)) && (how === 'written' || removed),
+    );
+  for (const { unknown: text, path, command, removed } of stepWrites(step, local))
+    if (command !== undefined && judged(command)) continue;
     else if (text !== undefined) {
       if (!reviewed.has(text))
         problems.add(`may write ${text}, which this check cannot tell from the checkout`);
-    } else if (![...OUTPUTS].some((output) => path === output || path.startsWith(`${output}/`)))
+    } else if (!output(path, removed))
       problems.add(
         `writes ${path || 'the checkout'}: a step writes into the checkout only the outputs reviewed in OUTPUTS`,
       );

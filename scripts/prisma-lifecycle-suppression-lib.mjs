@@ -96,12 +96,16 @@ const REPO_FILE = /^(?:scripts|infrastructure)\/(?!.*\.\.)[\w./-]+$/;
  * starts (`TURBO_*`, `PRISMA_*` but the one this check is about, `COREPACK_*`, `PLAYWRIGHT_*`,
  * any `*_BINARY_PATH`), the startup files of `psql` and `curl`, and where every one of them
  * looks for its own (`HOME`, `XDG_*`) or `mktemp` puts a file (`TMPDIR`); and `INPUT_*`, the
- * form an action reads its inputs in (they are given in `with`, where they are read). A list of
- * families is not closed: a name outside it that a program reads is not refused.
+ * form an action reads its inputs in (they are given in `with`, where they are read). PR #1154
+ * r1 F3: `PNPM_HOME`, which the reviewed `PATH` line of every image puts on the search path;
+ * the service and system files of `psql` (`PGSERVICEFILE`, `PGSYSCONFDIR`); what glibc loads
+ * (`GCONV_PATH`, `GLIBC_TUNABLES`); and where two programs listed by name alone write with no
+ * word saying so (`MC_CONFIG_DIR`, `RANDFILE`). A list of families is not closed: a name outside
+ * it that a program reads is not refused (the reverse list is FU-340 part C).
  */
 const PROTECTED = /^(?:p?npm_config_\w*|PATH|CDPATH|BASH_ENV|ENV|GITHUB_\w*|RUNNER_TEMP)$/i;
 const LOADED =
-  /^(?:LD_\w+|BASH\w*|SHELLOPTS|PS\d|IFS|HOME|XDG_\w+|TMPDIR|GIT_\w+|GO[A-Z\d]+|CGO_\w+|CC|CXX|OPENSSL_\w+|DOCKER_\w+|GITLEAKS_CONFIG\w*|TURBO_\w+|PRISMA_(?!SKIP_POSTINSTALL_GENERATE$)\w+|COREPACK_\w+|PLAYWRIGHT_\w+|\w+_BINARY_PATH|PSQLRC|CURL_HOME|INPUT_\w+)$/i;
+  /^(?:LD_\w+|GCONV_PATH|GLIBC_TUNABLES|BASH\w*|SHELLOPTS|PS\d|IFS|HOME|XDG_\w+|TMPDIR|GIT_\w+|GO[A-Z\d]+|CGO_\w+|CC|CXX|OPENSSL_\w+|RANDFILE|DOCKER_\w+|GITLEAKS_CONFIG\w*|MC_CONFIG_DIR|PNPM_HOME|TURBO_\w+|PRISMA_(?!SKIP_POSTINSTALL_GENERATE$)\w+|COREPACK_\w+|PLAYWRIGHT_\w+|\w+_BINARY_PATH|PSQLRC|PGSYSCONFDIR|PGSERVICEFILE|CURL_HOME|INPUT_\w+)$/i;
 const unassignable = (name) =>
   PROTECTED.test(name)
     ? `sets ${name}: a package manager option, the search path or an environment file is not text's to set`
@@ -123,8 +127,15 @@ export const ENV_PAIRS = new Set([
   '.github/workflows/ci.yml: step: GOFLAGS=-mod=readonly',
   '.github/workflows/ci.yml: step: GOTOOLCHAIN=local',
 ]);
-/** The instructions that set a protected name: every image puts pnpm's home on the path and runs in production mode. */
-const DOCKER_ENV = new Set(['ENV PATH="$PNPM_HOME:$PATH"', 'ENV NODE_ENV=production']);
+/**
+ * The instructions that set a protected name: every image puts pnpm's home on the path and runs
+ * in production mode. F3: that home is the one written here, so the `PATH` line names `/pnpm`.
+ */
+const DOCKER_ENV = new Set([
+  'ENV PNPM_HOME=/pnpm',
+  'ENV PATH="$PNPM_HOME:$PATH"',
+  'ENV NODE_ENV=production',
+]);
 /**
  * #1118 F2: the runner's own files are named in a reviewed line of shell text (`ENV_FILE`),
  * never handed on as a value: `OUT: ${{ github.env }}` then `>> "$OUT"` wrote records no line
@@ -397,6 +408,18 @@ function hostPolicy(files, cwd) {
   };
   return policy;
 }
+/**
+ * PR #1154 r1 F1: the programs listed by name alone (`LISTED`): nothing here reads their
+ * operands, so what each writes is the model's to place, by a contract (the test holds that
+ * every one has one). The model leaves to this reader only a command it has no contract for
+ * and this reader reads by a grammar (`judged`): an exact reviewed line (`REVIEWED`,
+ * `REVIEWED_DIGESTS`, `DOCKER_EXEC`), a verb table (`PNPM`, `NPM`), a shell's `-c` body, or a
+ * file run by its path, which is one of the inventory or refused.
+ */
+const GRAMMARS = hostPolicy(new Set(), '').programs;
+export const LISTED = Object.keys(GRAMMARS).filter((name) => GRAMMARS[name] === true);
+export const judged = (name) =>
+  name.includes('/') || (Object.hasOwn(GRAMMARS, name) && typeof GRAMMARS[name] === 'function');
 /** `eval` runs only what the Kafka credentials script printed into the variable it names. */
 const EVAL = /\beval "\$\{(\w+_credentials)\}"/g;
 const credentials = (name) =>
@@ -494,15 +517,17 @@ export function dockerfileLifecycle(name, text) {
   let stage = null;
   let suppressed = false;
   let replaced = false; // a file was copied in or a search path changed: names prove nothing
+  let home = false; // F3: `ENV PNPM_HOME=/pnpm` stands in this stage, so `$PNPM_HOME` is `/pnpm`
   for (const { line, keyword, rest } of instructions.list) {
     const refuse = (problem) => errors.push(`${name}:${line}: ${problem}`);
     if (keyword === 'FROM') {
-      if (stage) stages.set(stage, { suppressed, replaced });
+      if (stage) stages.set(stage, { suppressed, replaced, home });
       const from = rest.match(/^(\S+)(?:\s+AS\s+(\S+))?$/i);
       if (!from) refuse(`FROM ${clip(rest)} is not a form this check reads`);
-      ({ suppressed, replaced } = stages.get(from?.[1].toLowerCase()) ?? {
+      ({ suppressed, replaced, home } = stages.get(from?.[1].toLowerCase()) ?? {
         suppressed: false,
         replaced: false,
+        home: false,
       });
       stage = from?.[2]?.toLowerCase() ?? null;
     } else if (keyword === 'ENV' && rest === DOCKER_SETTING) {
@@ -515,6 +540,9 @@ export function dockerfileLifecycle(name, text) {
         refuse(`${keyword} ${clip(rest)} is not a form this check reads`);
       else if (unassignable(rest.split('=')[0]) && !DOCKER_ENV.has(`${keyword} ${rest}`))
         refuse(`${keyword} ${clip(rest)} ${unassignable(rest.split('=')[0])}`);
+      else if (rest.includes('$PNPM_HOME') && !home)
+        refuse(`${keyword} ${clip(rest)} names a PNPM_HOME this stage has not set to /pnpm`);
+      if (rest === 'PNPM_HOME=/pnpm') home = true;
       if (/PATH/.test(rest)) replaced = true;
     } else if (keyword === 'RUN') {
       if (suppressed) {
@@ -741,7 +769,7 @@ function stepProblems(path, where, step, errors, commands, files, matrix, before
   const { problem } = effectiveShell({ step, composite: composite && step.run !== undefined });
   if (problem) refuse(problem);
   // FU-340 part B: a local action's own steps are read, each as a step, where its file is read
-  writeProblems(step, path, () => [], before).forEach(refuse);
+  writeProblems(step, path, { local: () => [], before, judged }).forEach(refuse);
   if (step.uses !== undefined) usesProblems(step, matrix, files).forEach(refuse);
   else if (step.with !== undefined) refuse('with is given to no action');
   if (step.run === undefined) return;

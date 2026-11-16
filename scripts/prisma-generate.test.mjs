@@ -11,6 +11,7 @@ import { dockerRun, effectiveShell, readOptions, readShell } from './ci-shell-po
 import { parseCommands } from './ci-shell-text-lib.mjs';
 import * as lifecycleLib from './prisma-lifecycle-suppression-lib.mjs';
 import {
+  CONTRACTS,
   jobWrites,
   OUTPUTS,
   REVIEWED_INPUTS,
@@ -21,7 +22,8 @@ import {
   writeProblems,
 } from './ci-write-targets-lib.mjs';
 
-const { CONTAINER_SCRIPTS, ENV_PAIRS, MATRIX, MOUNTS, lifecycleFileKind } = lifecycleLib;
+const { CONTAINER_SCRIPTS, ENV_PAIRS, LISTED, MATRIX, MOUNTS, judged, lifecycleFileKind } =
+  lifecycleLib;
 // FU-334: every file a step runs, uses or builds is a member of this inventory, read once.
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const FILES = new Set(
@@ -930,7 +932,9 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
     'GIT_CONFIG_GLOBAL GIT_CONFIG GIT_EXEC_PATH PSQLRC CURL_HOME GOFLAGS GOTOOLCHAIN GOPATH ' +
     'CGO_CFLAGS OPENSSL_CONF OPENSSL_MODULES DOCKER_CONFIG DOCKER_HOST HOME XDG_CONFIG_HOME TMPDIR ' +
     'CC CXX GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML TURBO_TEAM TURBO_BINARY_PATH PRISMA_QUERY_ENGINE_LIBRARY ' +
-    'COREPACK_HOME PLAYWRIGHT_BROWSERS_PATH ESBUILD_BINARY_PATH INPUT_PATH INPUT_REF';
+    'COREPACK_HOME PLAYWRIGHT_BROWSERS_PATH ESBUILD_BINARY_PATH INPUT_PATH INPUT_REF ' +
+    // PR #1154 r1 F3: what the reviewed PATH line, psql and glibc load; where `mc`, `openssl` write
+    'PNPM_HOME PGSYSCONFDIR PGSERVICEFILE GCONV_PATH GLIBC_TUNABLES MC_CONFIG_DIR RANDFILE';
   for (const name of LOADED.split(' ')) {
     for (const text of levels(`${name}: x`)) assert.match(errors(text), sets(name), text);
     everywhere(`${name}=x echo ok`, new RegExp(`sets ${name}: `));
@@ -975,6 +979,10 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
     'ENV NODE_ENV=development',
     'ARG NODE_ENV=production',
     'ENV BASHOPTS=x',
+    // F3: the home the reviewed PATH line puts on the search path is the one written out
+    'ENV PNPM_HOME=/tmp/bin',
+    'ARG PNPM_HOME=/pnpm',
+    'ENV GCONV_PATH=/tmp',
   ])
     refused(
       dockerfileLifecycle,
@@ -987,6 +995,14 @@ test('descriptors, syntax words, records, env names and an unproven cd are refus
       /what (?:node|a program) loads|an environment file is not text's to set/,
     );
   everywhere('GITHUB_TOKEN=x echo ok', /sets GITHUB_TOKEN: /);
+  // and the PATH line stands only in a stage where that home is set: unset, PATH starts with ''
+  const unset = /names a PNPM_HOME this stage has not set to \/pnpm/;
+  const docker = repoText(ENTRY.docker);
+  refused(dockerfileLifecycle, ENTRY.docker, swap(docker, 'ENV PNPM_HOME=/pnpm\n', ''), unset);
+  // a stage FROM the one that set it has it; a stage FROM an image does not
+  const again = (after) => swap(docker, after, `${after}ENV PATH="$PNPM_HOME:$PATH"\n`);
+  assert.deepEqual(dockerfileLifecycle(ENTRY.docker, again('FROM deps AS build\n')).errors, []);
+  refused(dockerfileLifecycle, ENTRY.docker, again('ENV NODE_ENV=production\n'), unset);
   // #1118 F3: a pair is reviewed for ONE level of one file: at any other level it is refused.
   // The real pairs each still stand in their file at their level, with a name that loads no code.
   const real = [...ENV_PAIRS];
@@ -1150,7 +1166,8 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['f() { echo a > x; }', ['? what `f` writes', 'x']],
     // the programs that write their operands
     // before `--`, a word computed from its start, or inside an option, may be any option
-    ['cp "$src" fixtures/claim.sql', ['? "$src"']],
+    // (what the other words name is written all the same: a review of the text forgives no path)
+    ['cp "$src" fixtures/claim.sql', ['? "$src"', 'fixtures/claim.sql']],
     ['cp -- "$src" fixtures/claim.sql', ['? "$src"', 'fixtures/claim.sql']],
     ['cp fixtures/$n.sql /tmp/x', ['? fixtures/$n.sql']],
     ['curl "$FLAG" out.sql https://h/x', ['? "$FLAG"']],
@@ -1207,7 +1224,7 @@ test('the write-target model places every write of a step, or it is unknown (FU-
     ['curl -sSo$OUT https://h/x', ['? -sSo$OUT']],
     ['curl -H"X: $TOKEN" -d "$BODY" https://h/x', ['? -H"X: $TOKEN"', '? "$BODY"']],
     ['wget --output-document="$OUT" https://h/x', ['? --output-document="$OUT"']],
-    ['cp --target-directory="$OUT" a', ['? --target-directory="$OUT"']],
+    ['cp --target-directory="$OUT" a', ['? --target-directory="$OUT"', 'a']],
     ['curl --output out.sql https://h/x', ['out.sql']],
     ['curl --out out.sql https://h/x', ['out.sql']],
     ['curl -D headers -c jar https://h/x', ['headers', 'jar']],
@@ -1295,10 +1312,10 @@ test('the write-target model places every write of a step, or it is unknown (FU-
       'scripts/generate.sh',
       './generate.sh',
       'pnpm install --frozen-lockfile',
-      'openssl rand -hex 24',
+      'awk -f a.awk',
       'watch cp a b',
       'uniq a b',
-      'rm -f /tmp/x',
+      'rmdir /tmp/x',
     ].map((text) => [text, [`? what \`${text.split(' ')[0]}\` writes`]]),
     [
       'x="$(node -p 1)"; export A=1 B="$(pnpm -v)"',
@@ -1329,6 +1346,51 @@ test('the write-target model places every write of a step, or it is unknown (FU-
       ['? what such a word names'],
     ]),
     ['cat <<EOF > x\nEOF', ['? a here-document, which is not read', 'x', '? what `EOF` writes']],
+    // PR #1154 r1 F1: the programs the shell reader lists by name alone. A deletion, a new
+    // directory and a change of mode are writes of the operand; a mode is no operand
+    ['rm -rf apps/web/.next -- -x', ['apps/web/.next', '-x']],
+    ['mkdir -pm 700 a 700', ['a', '700']],
+    ['mkdir -m a b', ['a', 'b']],
+    ['chmod 0644 0755 f; chmod u+x,g g; chmod +x h', ['0755', 'f', 'u+x,g', 'g', 'h']],
+    ['chmod -w 644; chmod 644 -w; chmod -R 0755 d', ['644', '644', '0755', 'd']],
+    ['chmod --reference=a b', ['? what such an option reads or runs']],
+    ['mktemp; mktemp -d; mktemp /tmp/x.XXXXXX; mktemp "$RUNNER_TEMP/x.XXXXXX"', []],
+    [
+      'mktemp -d x.XXX; mktemp -pscripts; mktemp --tmpdir=a -t t.XXX',
+      ['x.XXX', 'scripts', 'a', 't.XXX'],
+    ],
+    ['openssl rand -hex 32; openssl rand -base64 32; /usr/bin/openssl rand 8', []],
+    ['openssl rand -out f -base64 8; openssl rand -out "$RUNNER_TEMP/k" 8', ['f']],
+    ...[
+      'openssl rand -hex 8 -out f',
+      'openssl rand -hex "$n"',
+      'openssl rand -writerand f 8',
+      'openssl req -x509 -keyout k.pem',
+      'openssl enc -in a -out b',
+      'openssl genrsa -out /tmp/k.pem 2048',
+      'openssl',
+      'mc alias set a http://h k s',
+      'mc support diag a',
+      'mc update',
+      'mc mb -C scripts local/b',
+      'mc mb "$BUCKET"',
+      'mc mb --autocompletion local/b',
+      'mc --config-dir d cp a b',
+      'mc mirror --watch local/b /tmp/x',
+    ].map((text) => [text, ['? a form of the program that is not read']]),
+    ['gitleaks detect --redact --report-format=sarif --report-path=f --no-color', ['f']],
+    ['gitleaks detect --report-path f -r g -vrh --report i', ['f', 'g', 'h', 'i']],
+    // `--diagnostics` writes into the directory it runs in (its value may be the other option's)
+    ['gitleaks detect --diagnostics=cpu; gitleaks dir --diagnostics-dir d .', ['', 'cpu', 'd']],
+    ['gitleaks detect --log-opts="$RANGE" -r f', ['? --log-opts="$RANGE"', 'f']],
+    ['gitleaks detect "$FLAG"', ['? "$FLAG"']],
+    ['gitleaks detect --log-opts=--output=package.json', ['? what such an option reads or runs']],
+    ['mc mb --ignore-existing rasta/documents; mc anonymous set none rasta/documents; mc', []],
+    ['mc cp local/b/.npmrc .npmrc', ['local/b/.npmrc', '.npmrc']],
+    ['mc mirror local/b scripts', ['local/b', 'scripts']],
+    ['mc get local/b/x "$OUT"', ['? "$OUT"', 'local/b/x']],
+    ['for _ in $(seq 1 3); do sleep 1; done; tool="$(command -v gitleaks)"', []],
+    ['command rm -f .npmrc; bash -c "rm -f package.json"', ['.npmrc', 'package.json']],
     [
       'echo a > /tmp/x\r\necho b > /tmp/y',
       [
@@ -1538,6 +1600,28 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
       'tee --suffix=.bak /tmp/x; cp -b /tmp/a /tmp/b',
       /may write a second destination no word names, which/,
     ],
+    // PR #1154 r1 F1: a program the reader lists by name alone, with an operand in the checkout
+    ['openssl rand -out scripts/ci-pull-image.sh -hex 8', /writes scripts\/ci-pull-image\.sh: /],
+    ['openssl rand -hex 8 -out scripts/ci-pull-image.sh', /may write a form of the program that/],
+    ['gitleaks detect --report-path=package.json', /writes package\.json: /],
+    ['gitleaks detect --diagnostics=cpu', /writes the checkout: /],
+    ['mc cp local/b/.npmrc .npmrc\npnpm install --frozen-lockfile', /writes \.npmrc: /],
+    ['mc mb -C scripts local/b', /may write a form of the program that is not read, which/],
+    ['rm -f .npmrc', /writes \.npmrc: /],
+    ['rm -rf scripts', /writes scripts: /],
+    ['mktemp scripts/x.XXXXXX', /writes scripts\/x\.XXXXXX: /],
+    ['mkdir -p node_modules/.bin', /writes node_modules\/\.bin: /],
+    ['chmod +x scripts/ci-pull-image.sh', /writes scripts\/ci-pull-image\.sh: /],
+    ["bash -c 'rm -f .npmrc'", /writes \.npmrc: /],
+    ['if true; then command rm -f package.json; fi', /writes package\.json: /],
+    ...['rm -f', 'mkdir', 'chmod 0755', 'mktemp', 'gitleaks detect -r', 'mc cp local/b/x'].map(
+      (program) => [`${program} "$OUT"`, /may write "\$OUT", which/],
+    ),
+    ['openssl rand -out "$OUT" 8', /may write "\$OUT", which/],
+    // of the web build's output only the deletion is reviewed: no step writes into it
+    ['echo ok > apps/web/.next/server.js', /writes apps\/web\/\.next\/server\.js: /],
+    ['mkdir -p apps/web/.next', /writes apps\/web\/\.next: /],
+    ['mc cp local/b/x apps/web/.next/x', /writes apps\/web\/\.next\/x: /],
   ])
     for (const run of [runs.workflow, runs.action])
       assert.match(run(script).errors.join('\n'), pattern, script);
@@ -1549,13 +1633,50 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
     // PR #1130 r1 F2: a command the model has no contract for is the reader's own to judge, by
     // its policy: a listed program, a reviewed line, a file of the inventory
     'mkdir -p "$RUNNER_TEMP/x"\nchmod 0700 "$RUNNER_TEMP/x"\npnpm install --frozen-lockfile',
+    // PR #1154 r1 F1: the real forms of the programs listed by name alone, and the two outputs
+    'rm -rf apps/web/.next\nrm -rf apps/web/.next/cache /tmp/x',
+    'gitleaks detect --redact --report-format=sarif --report-path=results.sarif --no-color',
+    'key="$(openssl rand -hex 32)"\nopenssl rand -out "$RUNNER_TEMP/k" -base64 32',
+    'mc mb --ignore-existing rasta/documents\nmc anonymous set none rasta/documents',
+    'log="$(mktemp "$RUNNER_TEMP/x.XXXXXX")"\nmkdir -m 700 /tmp/x\nchmod u+x "$RUNNER_TEMP/x"',
+    'for _ in $(seq 1 3); do sleep 1; done\ntool="$(command -v gitleaks)"',
   ])
     for (const run of [runs.workflow, runs.action])
       assert.deepEqual(run(script).errors, [], script);
-  const judged = 'node gen.mjs f; bash scripts/x.sh; sort -o f /tmp/x; pnpm install';
-  assert.deepEqual(writeProblems({ run: judged }, 'new.yml'), []);
-  assert.equal(stepWrites({ run: judged }).filter((target) => target.command).length, 4);
-  assert.match(runs.workflow('sort -o package.json /tmp/x').errors.join('\n'), /runs `sort`, /);
+  // F1, the class: a program the reader lists by name alone has a contract in the model; a
+  // command without one is left to the reader only where a grammar of the reader's own reads it
+  assert.deepEqual(
+    LISTED.filter((name) => !CONTRACTS.has(name)),
+    [],
+  );
+  for (const name of ['openssl', 'gitleaks', 'mc', 'mktemp', 'rm', 'mkdir', 'chmod', 'seq', 'eval'])
+    assert.ok(LISTED.includes(name), name);
+  for (const name of [...LISTED, 'sort', 'sh', 'f', 'constructor', ''])
+    assert.equal(judged(name), false, name);
+  for (const name of ['pnpm', 'npm', 'node', 'docker', 'bash', 'git', 'psql', 'scripts/x.sh'])
+    assert.equal(judged(name), true, name);
+  const left = 'node gen.mjs f; bash scripts/x.sh; sort -o f /tmp/x; pnpm install';
+  assert.equal(stepWrites({ run: left }).filter((target) => target.command).length, 4);
+  assert.equal(writeProblems({ run: left }, 'new.yml').length, 4);
+  assert.deepEqual(writeProblems({ run: left }, 'new.yml', { judged: () => true }), []);
+  assert.equal(writeProblems({ run: left }, 'new.yml', { judged }).length, 1);
+  const unread = (script) => runs.workflow(script).errors.join('\n');
+  assert.match(unread('sort -o package.json /tmp/x'), /runs `sort`, /);
+  for (const [script, name] of [
+    ['sort -o package.json /tmp/x', 'sort'],
+    ['f() { echo ok; }\nf', 'f'],
+    ['constructor x', 'constructor'],
+  ])
+    assert.match(unread(script), new RegExp(`may write what \`${name}\` writes, which`), script);
+  for (const script of ['pnpm install --frozen-lockfile', 'bash scripts/ci-pull-image.sh x'])
+    assert.equal(unread(script), '', script);
+  // the #1118 F2 sibling: a matrix value is not read, and the write through it is refused
+  const matrix = workflowLifecycle(
+    'new.yml',
+    `on: push\nenv:\n  PRISMA_SKIP_POSTINSTALL_GENERATE: 'true'\njobs:\n  a:\n    runs-on: x\n    strategy:\n      matrix:\n        f: ['\${{ github.env }}']\n    steps:\n      - env:\n          OUT: \${{ matrix.f }}\n        run: mc cp /tmp/x "$OUT"\n`,
+  ).errors;
+  assert.equal(matrix.length, 1, matrix.join('\n'));
+  assert.match(matrix[0], /may write "\$OUT", which/);
   const used = (text) =>
     workflowLifecycle(
       'new.yml',
@@ -1665,7 +1786,7 @@ test('a step writes into the checkout only a reviewed output (FU-340 part B)', (
     ),
     [],
   );
-  for (const output of OUTPUTS)
+  for (const output of OUTPUTS.keys())
     assert.deepEqual(
       [...FILES].filter((file) => file === output || file.startsWith(`${output}/`)),
       [],
