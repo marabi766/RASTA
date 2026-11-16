@@ -155,14 +155,19 @@ export class PrismaService implements OnModuleInit {
    */
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
-    options?: { timeoutMs?: number; maxWaitMs?: number },
+    options?: { timeoutMs?: number; maxWaitMs?: number; statementTimeoutMs?: number },
   ): Promise<T> {
     const settings = {
       ...(options?.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
       ...(options?.maxWaitMs === undefined ? {} : { maxWait: options.maxWaitMs }),
     };
     return this.client.$transaction(
-      (tx) => fn(tx as ExtendedPrismaClient),
+      async (tx) => {
+        // Prisma's interactive timeout does not cancel a statement waiting on a lock.
+        if (options?.statementTimeoutMs !== undefined)
+          await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(options.statementTimeoutMs)}, true)`;
+        return fn(tx as ExtendedPrismaClient);
+      },
       Object.keys(settings).length === 0 ? undefined : settings,
     );
   }

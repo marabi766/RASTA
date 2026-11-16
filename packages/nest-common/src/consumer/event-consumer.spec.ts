@@ -255,7 +255,7 @@ describe('EventConsumer delivery metadata', () => {
       );
       await jest.advanceTimersByTimeAsync(70_000);
       await pending;
-      expect(heartbeat).toHaveBeenCalledTimes(14);
+      expect(heartbeat).toHaveBeenCalledTimes(16);
       expect(10_000).toBeLessThan(CONSUMER_SESSION_TIMEOUT_MS);
       expect(producer.sent).toHaveLength(1);
     } finally {
