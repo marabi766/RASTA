@@ -2,7 +2,6 @@ import { envEnumProbes } from '@rasta/config';
 import { CONSUMER_SESSION_TIMEOUT_MS } from '@rasta/nest-common';
 import {
   assetSyncBudgetProblem,
-  assetSyncAttemptWorstCaseMs,
   assetSyncRebalanceTimeoutMs,
   assetSyncDeliveryWorstCaseMs,
   dispatchPolicyFromEnv,
@@ -10,12 +9,6 @@ import {
   loadFleetEnv,
   parkingFromEnv,
 } from './env';
-import {
-  ACTIVATION_RETRY_ATTEMPTS,
-  ACTIVATION_RETRY_BACKOFF_MS,
-  SOURCE_REFUSAL_HISTORY_TRANSACTION,
-} from './source-evidence-policy';
-import { DEFAULT_MAX_RETRIES } from '@rasta/nest-common';
 import { fleetOperationBudgets } from './operation-budgets';
 
 /** #240 r9: no asset-sync transaction may expire while it holds, or waits on, a lock across upstream calls. */
@@ -47,21 +40,22 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     expect(CONSUMER_SESSION_TIMEOUT_MS).toBe(60_000);
   });
 
-  it('rebalance budget exceeds the imported evidence policy sum, including the exhaustion transaction', () => {
-    // Makes the old formula land exactly on a minute before the callback term.
-    const env = {
-      FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS: 500,
-      ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: 3000,
-      FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: 15950,
-    };
-    const history =
-      SOURCE_REFUSAL_HISTORY_TRANSACTION.timeoutMs + SOURCE_REFUSAL_HISTORY_TRANSACTION.maxWaitMs;
-    const sum =
-      assetSyncDeliveryWorstCaseMs(env) +
-      ACTIVATION_RETRY_ATTEMPTS * assetSyncAttemptWorstCaseMs(env) +
-      (DEFAULT_MAX_RETRIES + ACTIVATION_RETRY_ATTEMPTS + 1) * history +
-      (ACTIVATION_RETRY_ATTEMPTS - 1) * ACTIVATION_RETRY_BACKOFF_MS;
-    expect(assetSyncRebalanceTimeoutMs(env)).toBeGreaterThan(sum + 3000);
+  it('rebalance covers an independent worst case over valid configurations', () => {
+    // First refusal on delivery attempt 3: ten attempts, eight history writes,
+    // one HOLD and one callback; two ordinary pauses and seven 10s pauses.
+    for (const wait of [50, 500, 650])
+      for (const upstream of [500, 2000, 3000])
+        for (let timeout = 3 * upstream + 5001; timeout <= 15000; timeout += 137) {
+          const env = {
+            FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS: wait,
+            ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: upstream,
+            FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: timeout,
+          };
+          if (assetSyncBudgetProblem(env)) continue;
+          const worstCase =
+            10 * (2 * wait + upstream + timeout) + 500 + 1000 + 7 * 10000 + 10 * (50 + 500 + 400);
+          expect(assetSyncRebalanceTimeoutMs(env)).toBeGreaterThanOrEqual(worstCase + 3000);
+        }
   });
 
   it('refuses to start when the transactions would not outlive the upstream calls (fail closed)', () => {

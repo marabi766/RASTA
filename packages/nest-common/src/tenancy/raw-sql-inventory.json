@@ -3400,5 +3400,12 @@
     "occurrence": 0,
     "line": 97,
     "decision": "platform-wide: retained history/quarantine existence for exact event hash/id before DLQ; unreadable evidence refuses exhaustion"
+  },
+  {
+    "file": "services/fleet-service/src/prisma/prisma.service.ts",
+    "hash": "c0cce21962507f8dd24519f7d2da85a52bf278d866ab8aa4334ad330082d36be",
+    "occurrence": 0,
+    "line": 168,
+    "decision": "platform-wide: transaction-local PostgreSQL statement deadline only; no tenant records or payload"
   }
 ]
