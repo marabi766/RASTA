@@ -3292,9 +3292,9 @@
   {
     "file": "services/fleet-service/src/fleet/meter-inventory.ts",
     "line": 50,
-    "hash": "9c9404ba2fa23ed44ac7e92638ddf66b95f7ac86f8904aa7a0a0d3e46f04ba32",
+    "hash": "610ddc005bbbed497a27b968548bc1de348bbf39889f59d206cf63798b3c3345",
     "occurrence": 0,
-    "decision": "platform-wide: locks the global source seal across refusal rollback or activation; never returns owner evidence to a tenant"
+    "decision": "platform-wide: locks the global source seal across refusal rollback or activation; never returns owner evidence to a tenant; transaction-local holder UUID binds exact arm/release transitions; no tenant reads"
   },
   {
     "file": "services/fleet-service/src/fleet/meter-inventory.ts",

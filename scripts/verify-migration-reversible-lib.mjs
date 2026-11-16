@@ -4510,6 +4510,7 @@ export const EXPECTED = {
       'usage_record',
     ],
     triggers: [
+      'meter_activation_holder_guard',
       'meter_drift_evidence_identity',
       'meter_drift_capacity_guard',
       'meter_drift_capacity_no_truncate',
@@ -4524,6 +4525,7 @@ export const EXPECTED = {
       'meter_inventory_seal_no_truncate',
     ],
     functions: [
+      'meter_activation_holder_guard',
       'meter_drift_quarantine_guard',
       'meter_drift_evidence_guard',
       'meter_inventory_creation_fence',

@@ -51,7 +51,8 @@ export class FleetMeterInventorySeal {
     const lockGate = async (tx: ExtendedPrismaClient): Promise<void> => {
       const [gate] = await tx.$queryRaw<
         { run_id: string | null; boundary: string | null; isolation: string }[]
-      >`SELECT run_id, boundary, current_setting('transaction_isolation') AS isolation
+      >`SELECT run_id, boundary, current_setting('transaction_isolation') AS isolation,
+        set_config('rasta.meter_activation_token', ${token}, true) AS holder
         FROM meter_inventory_seal WHERE id = true FOR UPDATE`;
       if (
         !gate ||

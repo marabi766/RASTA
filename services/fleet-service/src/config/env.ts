@@ -289,6 +289,14 @@ export function assetSyncDeliveryWorstCaseMs(env: AssetSyncTimeouts): number {
   return DEFAULT_MAX_RETRIES * attempt + pauses;
 }
 
+/** Ordinary attempts + seven extra attempts + HOLD + 70s pauses, rounded up.
+ * DLQ broker retries are additional; this is not an end-to-end deadline. */
+export function assetSyncRebalanceTimeoutMs(env: AssetSyncTimeouts): number {
+  const ordinary = assetSyncDeliveryWorstCaseMs(env);
+  const attempt = (ordinary - 3 * DEFAULT_BACKOFF_MS) / DEFAULT_MAX_RETRIES;
+  return Math.ceil((ordinary + 8 * attempt + 70_000 + 3_000) / 60_000) * 60_000;
+}
+
 /**
  * Why the asset-sync timeouts cannot work together, or undefined when they can
  * (#240 r9–r11).
