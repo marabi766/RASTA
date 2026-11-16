@@ -3360,13 +3360,6 @@
     "decision": "platform-wide: nonblocking singleton seal gate before any tenant effect; lock contention becomes bounded activation retry"
   },
   {
-    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
-    "line": 125,
-    "hash": "ea0dc0618d4308a6f165a858c08fe2d12f401da0afc102c3d9f9f3f225fada36",
-    "occurrence": 0,
-    "decision": "platform-wide: bounded idempotent hashed event HOLD; closed cause in run_id, no owner or tenant reads"
-  },
-  {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 1141,
     "hash": "4027f8227f7c8aa050ca5fc64076cb9a631f88e75ffb6641106f52dd29f704ce",
@@ -3382,16 +3375,30 @@
   },
   {
     "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
-    "line": 98,
+    "line": 85,
     "hash": "f677b469e24151253c64c3eeb84c1c2d3aeb30554efc605887c806aa8188f72e",
     "occurrence": 0,
-    "decision": "platform-wide: hash-only append-only refusal history; bound event hash, no tenant payload, no seal/parked-row dependency"
+    "decision": "platform-wide: hash-only append-only history committed atomically with primary or overflow evidence; no tenant payload"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "hash": "f677b469e24151253c64c3eeb84c1c2d3aeb30554efc605887c806aa8188f72e",
+    "occurrence": 1,
+    "line": 103,
+    "decision": "platform-wide: hash-only append-only history committed with refusal evidence or independently after rollback; no tenant payload"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "hash": "e13170bf60170c0fdc52c1b930543dc2b1abc2acdc700ce96e26d658767f89fd",
+    "occurrence": 0,
+    "line": 150,
+    "decision": "platform-wide: hashed HOLD event/asset identity and closed cause only; bounded evidence latch, no tenant-facing contents"
   },
   {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
-    "line": 92,
-    "hash": "d54411274c17c1cb656c32d6cafdc1a69142fd0050e1a1f09de4e530ff281bba",
+    "hash": "0c05e0e73aa70250fdcb46351d45f5b68cfc1afab277adc9a7ae788a3ff43dfb",
     "occurrence": 0,
-    "decision": "platform-wide: durable refusal/evidence existence for exact event hash/id before DLQ; no tenant-facing contents, read failure refuses exhaustion"
+    "line": 97,
+    "decision": "platform-wide: retained history/quarantine existence for exact event hash/id before DLQ; unreadable evidence refuses exhaustion"
   }
 ]
