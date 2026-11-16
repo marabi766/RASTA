@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import {
   executionChain,
@@ -13,8 +14,12 @@ import {
  * repository's copy asks here what a step may have put there since:
  *  - the SQL guard (utc-clock-sites-lib.mjs) for the file of a `psql -f`: a write of its own or
  *    an earlier step of the job that may reach the file (`stale`) leaves the site unresolved;
- *  - the shell reader (prisma-lifecycle-suppression-lib.mjs) is the next to ask (the second
- *    half of FU-340 part B): it shares the tokenizer's findings it reads past (`READ_PAST`).
+ *  - the shell reader (prisma-lifecycle-suppression-lib.mjs) for everything a step runs, uses,
+ *    builds or mounts, named or not (`pnpm` reads `.npmrc` and `package.json`, a build its whole
+ *    context): a step writes nothing into the checkout that this model reads but a reviewed
+ *    output (`writeProblems`). A command the model has no contract for (`command`) is left to
+ *    the reader only where it reads that command by a grammar of its own (`judged`); what such
+ *    a program writes on its own is not proven there. Any other is refused like an unknown.
  *
  * A target is `{ path }` (a path of the checkout, '' its root: a write to a directory is a write
  * to everything below it) or `{ unknown }`: it cannot be placed (computed, a pattern, absolute
@@ -41,6 +46,7 @@ import {
  * leaves that site unresolved), a path that reaches a file
  * through a link the repository holds, a service container given the workspace as a volume.
  */
+const sha256 = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const list = (text) => new Set(text.split(' ').filter(Boolean));
 const unknown = (text) => ({ unknown: text });
@@ -63,7 +69,9 @@ export const READ_PAST = new Set([
 const ELSEWHERE = /^\/(?:dev\/(?:null|stdout|stderr)|tmp\/[\w./-]+)$/;
 const RUNNER_WORD =
   /^"?\$\{?(?:GITHUB_(?:ENV|PATH|OUTPUT|STATE|STEP_SUMMARY)\}?|RUNNER_TEMP\}?(?:\/[\w.-]+)+)"?$/;
-const RUNNER_INPUT = /^(?:\$\{\{ runner\.temp \}\}(?:\/[\w.-]+)*|~\/\.[\w-][\w./-]*)$/;
+// under the home directory only its cache: `~/.npmrc`, `~/.config`, `~/.local/bin` are where a
+// program a step starts finds its startup file or another program
+const RUNNER_INPUT = /^(?:\$\{\{ runner\.temp \}\}(?:\/[\w.-]+)*|~\/\.cache\/[\w./-]+)$/;
 const climbs = (text) => text.split('/').includes('..');
 /** Where a written-out path lies, read from `cwd` (null: a directory this does not know). */
 function place(text, cwd) {
@@ -99,8 +107,14 @@ const option =
  * of what is replaced, named by a suffix or a numbering its options or the environment
  * (`SIMPLE_BACKUP_SUFFIX`, `VERSION_CONTROL`) give; `f.1` of `curl --no-clobber -o f`; the
  * `f.warc.gz` of `wget --warc-file f`. It is not placed, so unknown.
+ * PR #1154 r1 F1, the programs the shell reader lists by name alone: `forms`: all of the program
+ * that is read, as its words joined by one blank (a computed word is `$`); any other form is
+ * unknown. `verb`: its first word is a verb, and after one of these every operand is an address.
+ * `mode`: the word after such an option, and with `leads` the first word, is a mode when it is
+ * written as one. A deletion and a change of mode are writes of the operand.
  */
 const backs = option('bS', 'backup suffix');
+const MODE = /^(?:[0-7]{3,4}|[ugoa]*[+=][rwxXst]+)$/;
 const WRITERS = {
   tee: {},
   truncate: {},
@@ -144,6 +158,31 @@ const WRITERS = {
     backs: option('', 'warc-file'),
   },
   psql: { attached: 'oL', values: option('oL', 'output log-file', '$'), names: /\\|^\|/ },
+  rm: {},
+  mkdir: { mode: option('m', 'mode', '$') },
+  chmod: { leads: true, refers: option('', 'reference') },
+  // without a template the file lies under `TMPDIR`, which no text sets (the reader's `LOADED`)
+  mktemp: { attached: 'p' },
+  // `rand` alone: any other subcommand has its own options that name a file
+  openssl: {
+    forms: /^rand(?: -hex| -base64| -out \S+)* \d+$/,
+    values: (text) => /^-out$/.test(text),
+  },
+  // `--log-opts` are options of the `git log` it starts, which has an `--output`
+  gitleaks: {
+    attached: 'r',
+    values: option('r', 'report-path diagnostics-dir', '$'),
+    here: option('', 'diagnostics'),
+    refers: option('', 'log-opts'),
+  },
+  // `mb` and `anonymous set` name an address alone; which operand of a copy is a local file its
+  // aliases say, so each may be. An option of a copy, `-C` (it moves mc's own configuration)
+  // and any other verb (`support`, `update`, `alias`) write where no word says
+  mc: {
+    forms:
+      /^(?:|mb(?: --ignore-existing)? [\w./-]+|anonymous set \w+ [\w./-]+|(?:cp|mv|mirror|get|put)(?: (?!-)\S+)+)$/,
+    verb: /^(?:mb|anonymous)$/,
+  },
 };
 /**
  * The effect contracts (PR #1130 r1 F2): the commands that write no file of their own, only
@@ -153,7 +192,8 @@ const WRITERS = {
 const QUIET = list(
   'if then elif else fi for while until do done case esac select function { } ! [ [[ : true ' +
     'false test echo printf set export unset local readonly declare read shift return exit ' +
-    'break continue wait exec cd pushd popd sleep cat grep head tail wc cut tr date basename dirname',
+    'break continue wait exec command cd pushd popd sleep seq cat grep head tail wc cut tr date ' +
+    'basename dirname',
 );
 const GIT_READS = /^(?:cat-file|log|rev-list|rev-parse|diff|show|status|ls-files|describe)$/;
 /** A name the runner binds, written other than to expand it: the text may bind it itself. */
@@ -176,7 +216,10 @@ const quiet = (name, rest) =>
   (name === 'find' && !rest.some((word) => word.dynamic || FIND_WRITES.test(word.value)));
 
 /** The words a program of `WRITERS` may write, `null` standing for the directory it runs in. */
-function operandTargets({ attached, here, there, alone, values, refers, names, backs }, words) {
+function operandTargets(spec, words) {
+  const { attached, here, there, alone, values, refers, names, backs, forms, verb, mode, leads } =
+    spec;
+  const said = (source) => [{ value: '', dynamic: true, source }];
   const end = words.findIndex((word) => !word.dynamic && word.value === '--');
   const args = end < 0 ? words : words.slice(0, end);
   const after = end < 0 || values ? [] : words.slice(end + 1);
@@ -186,20 +229,29 @@ function operandTargets({ attached, here, there, alone, values, refers, names, b
     (word) =>
       word.dynamic && /^(?:-|$)/.test(word.value.slice(0, word.cut)) && placeWord(word, null),
   );
-  if (open.length) return open;
   const has = (is) => args.some((word) => !word.dynamic && is(word.value));
-  if (backs && has(backs))
-    return [{ value: '', dynamic: true, source: 'a second destination no word names' }];
-  if (refers && has(refers))
-    return [{ value: '', dynamic: true, source: 'what such an option reads or runs' }];
-  if (names && words.some((word) => names.test(word.value)))
-    return [{ value: '', dynamic: true, source: 'what such a word names' }];
+  if (backs && has(backs)) return said('a second destination no word names');
+  if (refers && has(refers)) return said('what such an option reads or runs');
+  if (names && words.some((word) => names.test(word.value))) return said('what such a word names');
+  if (forms && !forms.test(words.map((word) => (word.dynamic ? '$' : word.value)).join(' ')))
+    return said('a form of the program that is not read');
+  if (verb?.test(words[0]?.value)) return open;
   const found = (here && has(here)) || (there && !has(there)) ? [null] : [];
   for (const [at, word] of args.entries()) {
-    const operand = values
-      ? at > 0 && !args[at - 1].dynamic && values(args[at - 1].value)
-      : word.dynamic || !word.value.startsWith('-');
-    if (operand) found.push(word);
+    // `--name=value` holds its value: the next word is none of it
+    const follows = (is) =>
+      at > 0 &&
+      !args[at - 1].dynamic &&
+      is(args[at - 1].value) &&
+      !/^--.*=/.test(args[at - 1].value);
+    // `chmod 644 -w`: with a mode written as an option, the first word is a file
+    const own =
+      (verb && at === 0) ||
+      (!word.dynamic &&
+        MODE.test(word.value) &&
+        (at === 0 ? leads && !has((text) => text.startsWith('-')) : mode && follows(mode)));
+    const operand = values ? follows(values) : word.dynamic || !word.value.startsWith('-');
+    if (operand && !own && !open.includes(word)) found.push(word);
     // `name=value`: of a program whose operands are addresses, only of an option that names a file
     const value =
       (values
@@ -210,6 +262,8 @@ function operandTargets({ attached, here, there, alone, values, refers, names, b
   }
   found.push(...after);
   const operands = found.filter((word) => word?.source !== undefined).length;
+  // a word that may be any option is unknown; what the other words name is written all the same
+  if (open.length) return [...open, ...found.filter(Boolean)];
   return alone && operands === 1 ? [null, ...found] : found;
 }
 
@@ -256,7 +310,10 @@ export function shellWrites(text, cwd = null, depth = 0) {
   if (bare.includes('`')) targets.push(unknown('a backtick command substitution'));
   if (BOUND.test(bare))
     targets.push(unknown('a name of the runner written other than to expand it'));
-  const add = (word) => targets.push(word === null ? place('.', from) : placeWord(word, from));
+  const add = (word, removed) => {
+    const target = word === null ? place('.', from) : placeWord(word, from);
+    targets.push(target && removed ? { ...target, removed } : target);
+  };
   const inner = (words) =>
     words.some((word) => word.dynamic)
       ? targets.push(unknown(words.map((word) => word.source).join(' ')))
@@ -267,7 +324,8 @@ export function shellWrites(text, cwd = null, depth = 0) {
       if (word.redirect?.includes('>') && !duplicate) add(word);
     }
     if (unplaced) targets.push(unknown(unplaced));
-    else if (Object.hasOwn(WRITERS, name)) operandTargets(WRITERS[name], rest).forEach(add);
+    else if (Object.hasOwn(WRITERS, name))
+      operandTargets(WRITERS[name], rest).forEach((word) => add(word, name === 'rm'));
     else if (name === 'eval' && !credentials(name, rest)) inner(rest);
     // `trap - EXIT` sets none
     else if (name === 'trap')
@@ -280,9 +338,14 @@ export function shellWrites(text, cwd = null, depth = 0) {
     else if (SHELL_WORD.test(name)) {
       const run = shellInvocation(rest, name);
       if (run.body) inner([run.body]);
-      else if (run.file) targets.push(unknown(`the script ${run.file.source}, which is not read`));
+      else if (run.file)
+        targets.push({
+          ...unknown(`the script ${run.file.source}, which is not read`),
+          command: name,
+        });
       else targets.push(unknown(run.problem ?? `what ${name} reads as commands`));
-    } else if (!quiet(name, rest)) targets.push(unknown(`what \`${name}\` writes`));
+    } else if (!quiet(name, rest))
+      targets.push({ ...unknown(`what \`${name}\` writes`), command: name });
   }
   return targets.filter(Boolean);
 }
@@ -415,4 +478,129 @@ export function stale(targets, path) {
   return hit.unknown !== undefined
     ? `a write to ${hit.unknown}, which this check cannot place, may have replaced it`
     : `a write to ${hit.path || 'the checkout'} may have replaced it`;
+}
+
+/**
+ * The run texts reviewed by hand, by sha256: every computed target of each lies outside the
+ * checkout. An edit to the text ends the review.
+ *  1. ci.yml "Secret scan": `tee "$SCAN_LOG"`, the `mktemp` file under `$RUNNER_TEMP`.
+ *  2. backup-drill-monthly.yml "Run the full drill": `"${dir}/…"`, `dir` being
+ *     `"${RUNNER_TEMP}/backup-drill"`, assigned once in the same text.
+ *  3. backup-drill-monthly.yml "Remove anything the drill left": `rm -rf -- "${dir:?}"`, the
+ *     same `dir`, assigned once in the same text.
+ */
+export const REVIEWED_TEXTS = new Set([
+  'sha256:7d74b40b62548c6ae58e97165b4ebd77bc6792ad4a7d8c85ec296ef373c1e48a',
+  'sha256:5564580934f1389438d3f794a35676840ae13fedb65aaee631d8ce15ebb3e923',
+  'sha256:d220007d3ebea96beeb855d11e9fece19f6a9eee19d8482da65323bbc15e9ac1',
+]);
+/**
+ * The computed inputs reviewed by hand, as `<file>: <action> <input>=<text>`: each names an
+ * output a step of the same file sets to a path under `$RUNNER_TEMP`. The review is of that
+ * step too, by the sha256 of it as parsed: it stands once among the steps before the one that
+ * uses it (renamed, removed or moved after it, the expression is empty and the action writes
+ * its default place). PR #1154 r1 F2, what sets each value:
+ *  1. install-ci-tool `pin`: `node scripts/ci-tool-download.mjs key` prints it. The step is
+ *     held, the script is NOT: what that script prints is not proven here (a listed program).
+ *  2. restore-trivy-db `where`: its two reviewed `echo` lines (the reader's `ENV_FILE_LINES`).
+ *  3. ci.yml `trivy-db` uses that local action, so the value is the action's: the digest holds
+ *     the calling step, the action's whole `outputs` mapping and the one step of the action
+ *     that mapping names for the output (`where`), which stands once in it.
+ */
+export const REVIEWED_INPUTS = new Map([
+  [
+    '.github/actions/install-ci-tool/action.yml: actions/cache path=${{ steps.pin.outputs.archive }}',
+    'sha256:5e087b3d5f6d05f40cb8a7d1c94edfc70d6b65959417e779a7c3c921c8818188',
+  ],
+  [
+    '.github/actions/restore-trivy-db/action.yml: actions/download-artifact path=${{ steps.where.outputs.archive }}',
+    'sha256:a47b481968bc472fae1d8eecafe4c5e83f8c14bb4b831a7b6c8d998581bb855c',
+  ],
+  [
+    '.github/workflows/ci.yml: aquasecurity/trivy-action cache-dir=${{ steps.trivy-db.outputs.dir }}',
+    'sha256:663fba543cc6d0c8d21592999ac3ffcce94bbb08dc97a9a7599b3d1bdde9e551',
+  ],
+]);
+/**
+ * All a step may write inside the checkout: these paths and what lies below them. None is a
+ * file of the repository or holds one (the test holds the inventory to that), and no program a
+ * step starts reads a `written` one as its configuration. Of a `removed` one only the deletion
+ * is reviewed (`rm`): a step writes nothing into it.
+ *  - `.economic-coverage`: the coverage shards the merge job downloads and reports on.
+ *  - `results.sarif`: the report of the secret scan (ci.yml, `--report-path`); no step reads it.
+ *  - `apps/web/.next`: the web build's output, which git ignores. ci.yml deletes an older one
+ *    before `pnpm build` (whose own writes are not proven here), so that the coverage check
+ *    reads the manifest of this build. The server a later step starts loads it: no write.
+ */
+export const OUTPUTS = new Map([
+  ['.economic-coverage', 'written'],
+  ['results.sarif', 'written'],
+  ['apps/web/.next', 'removed'],
+]);
+/** Every command name that has a contract here: it writes nothing, or its operands are read. */
+export const CONTRACTS = new Set([...QUIET, ...Object.keys(WRITERS), 'eval', 'trap']);
+
+/**
+ * The shell reader's rule: why a step of `file` may not write what it writes. A target this
+ * cannot place is refused unless its text or its input is reviewed; a path of the checkout is
+ * refused unless it is a reviewed output. So nothing a later step of the job runs, uses,
+ * builds, mounts or reads as configuration, named or not, was put there by a step. `before`:
+ * the steps of the same list before this one. `judged(name)`: whether the reader reads the
+ * command `name`, which the model has no contract for, by a grammar of its own (PR #1154 r1 F1:
+ * an exact reviewed line, a verb table, a file of the inventory). A program it lists by name
+ * alone is none: its operands are read by nobody, so it has a contract here or is refused.
+ * `action(path)`: the parsed file of the local action in the directory `path`, or null.
+ */
+export function writeProblems(
+  given,
+  file,
+  { local, before = [], judged = () => false, action = () => null } = {},
+) {
+  // the shell reader still reads `${{ env.NAME }}` as one computed word here, as its own rules
+  // do (`scriptProblems`): the model refuses every expression, and proving the value from the
+  // YAML for both readers is the next change (PM decision 2, its own PR)
+  const step =
+    record(given) && typeof given.run === 'string'
+      ? { ...given, run: given.run.replace(/\$\{\{ env\.\w+ \}\}/g, '$__workflow_env_expression') }
+      : given;
+  const OUTPUT = /^\$\{\{ steps\.([\w-]+)\.outputs\.([\w-]+) \}\}$/;
+  const producer = (value) => {
+    const [, id, output] = OUTPUT.exec(value) ?? [];
+    const named = before.filter((earlier) => record(earlier) && earlier.id === id);
+    if (named.length !== 1) return null;
+    if (!String(named[0].uses ?? '').startsWith('./')) return sha256(JSON.stringify(named[0]));
+    // F2: a local action hands on what its own `outputs` mapping names
+    const read = action(String(named[0].uses).slice(2));
+    const outputs = record(read?.outputs) ? read.outputs : {};
+    const from = Object.hasOwn(outputs, output) && OUTPUT.exec(outputs[output]?.value)?.[1];
+    const steps = Array.isArray(read?.runs?.steps) ? read.runs.steps : [];
+    const sets = steps.filter((inner) => record(inner) && inner.id === from);
+    return from && sets.length === 1 ? sha256(JSON.stringify([named[0], outputs, sets[0]])) : null;
+  };
+  const reviewed = new Set(
+    record(step) && REVIEWED_TEXTS.has(sha256(String(step.run)))
+      ? stepWrites(step, local).map((target) => target.unknown)
+      : Object.entries(record(step?.with) ? step.with : {})
+          .filter(([key, value]) => {
+            const input = `${file}: ${String(step.uses).split('@')[0]} ${key}=${value}`;
+            return REVIEWED_INPUTS.has(input) && REVIEWED_INPUTS.get(input) === producer(value);
+          })
+          .map(([, value]) => String(value)),
+  );
+  const problems = new Set();
+  const output = (path, removed) =>
+    [...OUTPUTS].some(
+      ([reviewed, how]) =>
+        (path === reviewed || path.startsWith(`${reviewed}/`)) && (how === 'written' || removed),
+    );
+  for (const { unknown: text, path, command, removed } of stepWrites(step, local))
+    if (command !== undefined && judged(command)) continue;
+    else if (text !== undefined) {
+      if (!reviewed.has(text))
+        problems.add(`may write ${text}, which this check cannot tell from the checkout`);
+    } else if (!output(path, removed))
+      problems.add(
+        `writes ${path || 'the checkout'}: a step writes into the checkout only the outputs reviewed in OUTPUTS`,
+      );
+  return [...problems];
 }
