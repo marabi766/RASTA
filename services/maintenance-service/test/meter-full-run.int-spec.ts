@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { EventEnvelope } from '@rasta/contracts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Prisma } from '../src/generated/prisma';
+import { MeterInventoryAuthorityRefusal, type EventEnvelope } from '@rasta/contracts';
 import { MeterFullRun, MeterFullRunRefusal } from '../src/maintenance/meter-full-run';
 import { lockUsageMeter } from '../src/maintenance/usage-meter';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
@@ -29,6 +32,8 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
   });
   const command = (value: unknown = inventory([])) =>
     new MeterFullRun(prisma, {
+      withQuarantineClear: async (runId, boundary, fn) =>
+        fn({ runId, boundary, clear: true, assertHeld: async () => undefined }),
       withSealedInventory: async (_runId, fn) => fn(value),
     });
   function latch() {
@@ -58,6 +63,10 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     await owner.client.$executeRawUnsafe(
       `CREATE TRIGGER usage_meter_insert_fence BEFORE INSERT ON "${schema}".asset_usage_meter
        FOR EACH ROW EXECUTE FUNCTION public.set_usage_meter_source()`,
+    );
+    await owner.client.$executeRawUnsafe(
+      `CREATE TRIGGER usage_meter_mode_fixed BEFORE UPDATE OF meter_source ON "${schema}".asset_usage_meter
+       FOR EACH ROW EXECUTE FUNCTION public.usage_meter_mode_fixed()`,
     );
     const role = decodeURIComponent(runtimeUrl.username).replaceAll('"', '""');
     await owner.client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`);
@@ -204,17 +213,154 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     });
     expect(rows[0].organizationId).toBeNull();
   });
+  it.each([
+    undefined,
+    {},
+    { runId, boundary: 'STALE', clear: true, assertHeld: async () => undefined },
+    { runId, boundary: 'TEST_OWNER_SEAL', clear: false, assertHeld: async () => undefined },
+    { runId, boundary: 'TEST_OWNER_SEAL', clear: true },
+    {
+      runId,
+      boundary: 'TEST_OWNER_SEAL',
+      clear: true,
+      assertHeld: async () => {
+        throw new Error('expired source lock');
+      },
+    },
+  ])('refuses missing, stale or unresolved quarantine proof: %j', async (proof) => {
+    const c = new MeterFullRun(prisma, {
+      withSealedInventory: async (_runId, fn) => fn(inventory([])),
+      withQuarantineClear: async (_runId, _boundary, fn) => fn(proof),
+    });
+    await expect(c.activate(runId, actor, [])).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+    expect(await c.status(runId, actor)).toBeNull();
+    expect(await eventRows()).toHaveLength(0);
+  });
+  it('keeps a definite inventory authority refusal named before the callback', async () => {
+    const c = new MeterFullRun(prisma, {
+      withSealedInventory: async (_runId, fn) => fn(inventory([])),
+      withQuarantineClear: async () => {
+        throw new MeterInventoryAuthorityRefusal('SOURCE_DRIFT_QUARANTINED');
+      },
+    });
+    await expect(c.activate(runId, actor, [])).rejects.toEqual(
+      new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED'),
+    );
+    expect(await c.status(runId, actor)).toBeNull();
+    expect(await eventRows()).toHaveLength(0);
+  });
+  it.each(['lock wait', 'pool', 'connection', 'lost tx1 response'])(
+    'classifies pre-callback %s without claiming quarantine',
+    async (failure) => {
+      const authority = {
+        withSealedInventory: async <T>(_runId: string, fn: (value: unknown) => Promise<T>) =>
+          fn(inventory([])),
+      };
+      // Deliberately model an older deployed adapter at the runtime boundary.
+      const old = new MeterFullRun(
+        prisma,
+        authority as import('../src/maintenance/meter-full-run').MeterInventoryAuthority,
+      );
+      await expect(old.activate(runId, actor, [])).rejects.toThrow('SOURCE_DRIFT_QUARANTINED');
+      const unreadable = new MeterFullRun(prisma, {
+        ...authority,
+        withQuarantineClear: async () => {
+          throw new Error(failure);
+        },
+      });
+      await expect(unreadable.activate(runId, actor, [])).rejects.toThrow(
+        'SOURCE_CLEARANCE_UNCONFIRMED',
+      );
+      expect(await eventRows()).toHaveLength(0);
+    },
+  );
+  it.each(['inventory', 'quarantine'])(
+    'keeps %s authority abandonment unconfirmed while maintenance is still running',
+    async (layer) => {
+      const entered = latch(),
+        finish = latch();
+      const enqueue = MaintenanceRepository.prototype.enqueueEvent;
+      const pause = jest
+        .spyOn(MaintenanceRepository.prototype, 'enqueueEvent')
+        .mockImplementationOnce(async function (this: MaintenanceRepository, tx, input) {
+          const result = await enqueue.call(this, tx, input);
+          entered.release();
+          await finish.ready;
+          return result;
+        });
+      let pending: Promise<unknown> | undefined;
+      const abandon = async (action: Promise<unknown>): Promise<never> => {
+        pending = action;
+        await Promise.race([entered.ready, action]);
+        throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+      };
+      const c = new MeterFullRun(prisma, {
+        withSealedInventory: (_runId, fn) => {
+          const action = fn(inventory([]));
+          return layer === 'inventory' ? abandon(action) : action;
+        },
+        withQuarantineClear: (key, boundary, fn) => {
+          const action = fn({
+            runId: key,
+            boundary,
+            clear: true,
+            assertHeld: async () => undefined,
+          });
+          return layer === 'quarantine' ? abandon(action) : action;
+        },
+      });
+      try {
+        await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
+      } finally {
+        finish.release();
+        await Promise.allSettled(pending ? [pending] : []);
+        pause.mockRestore();
+      }
+      expect(await c.status(runId, actor)).toMatchObject({ runId });
+      expect(await eventRows()).toHaveLength(1);
+    },
+  );
+  it('checks known run refusals before arming the source token', async () => {
+    let value: unknown = inventory([]);
+    const hold = jest.fn(async () => {
+      throw new Error('must not arm');
+    });
+    const c = new MeterFullRun(prisma, {
+      withSealedInventory: async (_run, fn) => fn(value),
+      withQuarantineClear: hold,
+    });
+    const assetId = id('AST');
+    value = inventory([
+      { assetId, organizationId: org.a },
+      { assetId, organizationId: org.a },
+    ]);
+    await expect(c.activate(runId, actor, [])).rejects.toThrow('INVENTORY_CONFLICT');
+    value = inventory([{ assetId, organizationId: org.a }]);
+    await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_INCOMPLETE');
+    value = inventory([]);
+    await command().activate(runId, actor, []);
+    await expect(c.activate(id('OTHER'), actor, [])).rejects.toThrow('FULL_RUN_CONFLICT');
+    const fail = jest.spyOn(prisma, 'transaction').mockRejectedValueOnce(new Error('pool wait'));
+    try {
+      await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_PRECOMMIT_FAILED');
+    } finally {
+      fail.mockRestore();
+    }
+    expect(hold).not.toHaveBeenCalled();
+  });
   it('requires authority even at gauge zero; refuses partial, duplicate and omitted local/orphan inventory', async () => {
     await expect(new MeterFullRun(prisma).activate(runId, actor, [])).rejects.toThrow(
       'AUTHORITATIVE_INVENTORY_REQUIRED',
     );
     await expect(
       command({ ...inventory([]), complete: false }).activate(runId, actor, []),
-    ).rejects.toThrow();
+    ).rejects.toThrow('SOURCE_INVENTORY_MALFORMED');
     await expect(
       asActor({ organizationId: org.a }, () => command().activate(runId, actor, [])),
     ).rejects.toThrow('OPERATOR_CONTEXT_REQUIRED');
     const falseSuccess = new MeterFullRun(prisma, {
+      withQuarantineClear: async (runId, boundary, fn) =>
+        fn({ runId, boundary, clear: true, assertHeld: async () => undefined }),
       withSealedInventory: async <T>() => runId as unknown as T,
     });
     await expect(falseSuccess.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
@@ -240,10 +386,13 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       data: { meterSource: 'LEDGER' },
     });
     const transaction = prisma.transaction.bind(prisma);
-    const lost = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
-      await transaction(fn, options);
-      throw new Error('lost commit');
-    });
+    const lost = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementationOnce(transaction)
+      .mockImplementationOnce(async (fn, options) => {
+        await transaction(fn, options);
+        throw new Error('lost commit');
+      });
     try {
       await expect(c.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
     } finally {
@@ -255,6 +404,8 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       c.activate(runId, actor, [{ assetId, reason: 'HISTORY_UNKNOWN' }]),
     ).rejects.toThrow('ALREADY_ACTIVE_INVENTORY_DRIFT');
     const releaseLost = new MeterFullRun(prisma, {
+      withQuarantineClear: async (runId, boundary, fn) =>
+        fn({ runId, boundary, clear: true, assertHeld: async () => undefined }),
       withSealedInventory: async (_runId, fn) => {
         await fn(inventory([{ assetId, organizationId: org.a }]));
         throw new Error('owner release lost');
@@ -263,6 +414,53 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     await expect(releaseLost.activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
     expect(await eventRows()).toHaveLength(1);
   });
+  it.each(
+    ['write', 'replay'].flatMap((phase) =>
+      [
+        new MeterFullRunRefusal('FULL_RUN_CONFLICT'),
+        new Prisma.PrismaClientKnownRequestError('lost response', {
+          code: 'P2034',
+          clientVersion: 'test',
+        }),
+      ].map((error) => ({ phase, error })),
+    ),
+  )('keeps post-callback $phase $error unconfirmed', async ({ phase, error }) => {
+    if (phase === 'replay') await command().activate(runId, actor, []);
+    expect(await command().status(runId, actor)).toEqual(
+      phase === 'write' ? null : expect.anything(),
+    );
+    const transaction = prisma.transaction.bind(prisma);
+    const spy = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementationOnce(transaction)
+      .mockImplementationOnce(async (fn, options) => {
+        await transaction(fn, options);
+        throw error;
+      });
+    try {
+      await expect(command().activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await eventRows()).toHaveLength(1);
+    expect(await command().activate(runId, actor, [])).toBe(runId);
+  });
+  it.each([null, { ...inventory([]), extra: true }])(
+    'names malformed source inventory before any transaction: %j',
+    async (value) => {
+      const transaction = jest.spyOn(prisma, 'transaction');
+      try {
+        await expect(command(value).activate(runId, actor, [])).rejects.toEqual(
+          new MeterFullRunRefusal('SOURCE_INVENTORY_MALFORMED'),
+        );
+        expect(transaction).not.toHaveBeenCalled();
+      } finally {
+        transaction.mockRestore();
+      }
+      expect(await eventRows()).toHaveLength(0);
+    },
+  );
   it('measures the hot gate under eight concurrent folds and an exclusive activation waiter', async () => {
     const assets = Array.from({ length: 8 }, () => ({ assetId: id('AST'), organizationId: org.a }));
     const finish = latch();
@@ -331,6 +529,11 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     let source = inventory([]);
     const requestedRuns: string[] = [];
     const authority = {
+      withQuarantineClear: async <T>(
+        runId: string,
+        boundary: string,
+        fn: (proof: unknown) => Promise<T>,
+      ): Promise<T> => fn({ runId, boundary, clear: true, assertHeld: async () => undefined }),
       withSealedInventory: async <T>(
         key: string,
         fn: (value: unknown) => Promise<T>,
@@ -395,7 +598,112 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
       VALUES (${id('AST')}, ${org.b}, ${new Date()})`).rejects.toThrow('FULL_RUN_GATE_MISSING');
     await expect(command().status(runId, actor)).rejects.toThrow('FULL_RUN_GATE_MISSING');
   });
-  it('reports definite pool/statement/callback-timeout failures as named precommit refusals', async () => {
+  it('pins gate/refusal lookup against a hostile caller search_path and temp shadows', async () => {
+    await owner.transaction(async (tx) => {
+      await tx.$executeRaw`CREATE TEMP TABLE meter_full_run(id boolean, run_id text) ON COMMIT DROP`;
+      await tx.$executeRaw`INSERT INTO pg_temp.meter_full_run VALUES(true, 'FAKE_ACTIVE')`;
+      await tx.$executeRaw`SELECT set_config('search_path', ${`pg_temp, "${schema}", public`}, true)`;
+      const [row] = await tx.$queryRaw<{ meter_source: string }[]>`
+        INSERT INTO asset_usage_meter(asset_id, organization_id, updated_at)
+        VALUES (${id('AST')}, ${org.a}, ${new Date()}) RETURNING meter_source`;
+      expect(row.meter_source).toBe('LEGACY');
+    });
+  });
+  it('allows idempotent modes and LEGACY to LEDGER, refuses regression by direct SQL', async () => {
+    const assetId = id('AST');
+    await bootstrap(assetId);
+    for (const mode of ['LEGACY', 'LEDGER', 'LEDGER'])
+      await prisma.client
+        .$executeRaw`UPDATE asset_usage_meter SET meter_source = ${mode} WHERE asset_id = ${assetId}`;
+    await expect(prisma.client.$executeRaw`UPDATE asset_usage_meter SET meter_source = 'LEGACY'
+      WHERE asset_id = ${assetId}`).rejects.toThrow('USAGE_METER_MODE_REGRESSION');
+    expect((await bootstrap(assetId)).meter_source).toBe('LEDGER');
+  });
+  it('pins mode operators against a hostile scratch-schema search_path', async () => {
+    const assetId = id('AST');
+    await bootstrap(assetId);
+    await prisma.client
+      .$executeRaw`UPDATE asset_usage_meter SET meter_source = 'LEDGER' WHERE asset_id = ${assetId}`;
+    await expect(
+      owner.transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`CREATE FUNCTION "${schema}".mode_equal(text, text) RETURNS boolean
+        LANGUAGE sql AS 'SELECT true'`);
+        await tx.$executeRawUnsafe(`CREATE OPERATOR "${schema}".= (LEFTARG = text, RIGHTARG = text,
+        FUNCTION = "${schema}".mode_equal)`);
+        await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+        // Prove the caller operator is hostile before exercising the migrated function.
+        const [probe] = await tx.$queryRaw<
+          { equal: boolean }[]
+        >`SELECT 'LEDGER'::text = 'LEGACY'::text AS equal`;
+        expect(probe.equal).toBe(true);
+        await tx.$executeRaw`UPDATE asset_usage_meter SET meter_source = 'LEGACY' WHERE asset_id = ${assetId}`;
+      }),
+    ).rejects.toThrow('USAGE_METER_MODE_REGRESSION');
+    expect((await bootstrap(assetId)).meter_source).toBe('LEDGER');
+  });
+  it.each(['marker', 'meter'])(
+    'refuses mode-path down with an active %s in the scratch schema',
+    async (active) => {
+      if (active === 'marker') await command().activate(runId, actor, []);
+      else {
+        const assetId = id('AST');
+        await bootstrap(assetId);
+        await prisma.client
+          .$executeRaw`UPDATE asset_usage_meter SET meter_source = 'LEDGER' WHERE asset_id = ${assetId}`;
+      }
+      const down = readFileSync(
+        join(
+          __dirname,
+          '../prisma/migrations/20261114090000_usage_meter_mode_search_path/down.sql',
+        ),
+        'utf8',
+      );
+      const guard = down.match(/DO \$\$ BEGIN[\s\S]*?END \$\$;/)?.[0];
+      expect(guard).toBeDefined();
+      await expect(
+        owner.transaction(async (tx) => {
+          await tx.$executeRaw`SELECT set_config('search_path', ${`"${schema}", pg_catalog, pg_temp`}, true)`;
+          await tx.$executeRawUnsafe(guard!);
+        }),
+      ).rejects.toThrow('ACTIVE_METER_MODE_ROLLBACK_REFUSED');
+    },
+  );
+  it('reports real Prisma callback expiration as a precommit refusal', async () => {
+    const transaction = prisma.transaction.bind(prisma);
+    let expired: unknown;
+    const timeout = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementationOnce(transaction)
+      .mockImplementationOnce(async (fn) => {
+        try {
+          return await transaction(fn, { timeoutMs: 100 });
+        } catch (error) {
+          expired = error;
+          throw error;
+        }
+      });
+    const enqueue = jest
+      .spyOn(MaintenanceRepository.prototype, 'enqueueEvent')
+      .mockImplementationOnce(async (tx) => {
+        await tx.$executeRaw`SELECT pg_sleep(0.4)`;
+        // The callback has not returned when Prisma expires its transaction.
+        await tx.$executeRaw`SELECT 1`;
+        return 'unreachable';
+      });
+    try {
+      await expect(command().activate(runId, actor, [])).rejects.toThrow(
+        'FULL_RUN_PRECOMMIT_FAILED',
+      );
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(expired).toMatchObject({ code: 'P2028' });
+    } finally {
+      timeout.mockRestore();
+      enqueue.mockRestore();
+    }
+    expect(await command().status(runId, actor)).toBeNull();
+    expect(await eventRows()).toHaveLength(0);
+  });
+  it('reports definite pool and statement failures as named precommit refusals', async () => {
     const pool = jest.spyOn(prisma, 'transaction').mockRejectedValueOnce(new Error('pool wait'));
     await expect(command().activate(runId, actor, [])).rejects.toBeInstanceOf(MeterFullRunRefusal);
     pool.mockRestore();
@@ -423,12 +731,15 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
   });
   it('rollback after enqueue leaves no marker, inventory or audit event; missing fence never defaults', async () => {
     const transaction = prisma.transaction.bind(prisma);
-    const fail = jest.spyOn(prisma, 'transaction').mockImplementationOnce((fn, options) =>
-      transaction(async (tx) => {
-        await fn(tx);
-        throw new Error('rollback');
-      }, options),
-    );
+    const fail = jest
+      .spyOn(prisma, 'transaction')
+      .mockImplementationOnce(transaction)
+      .mockImplementationOnce((fn, options) =>
+        transaction(async (tx) => {
+          await fn(tx);
+          throw new Error('rollback');
+        }, options),
+      );
     try {
       await expect(command().activate(runId, actor, [])).rejects.toThrow('FULL_RUN_UNCONFIRMED');
     } finally {

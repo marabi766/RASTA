@@ -511,7 +511,7 @@ const TABLES_CLASSIFIED = {
     'tender_receipt_link',
     'tender_receipt_pending',
   ],
-  fleet: ['asset_transfer_fence', 'asset_transfer_release'],
+  fleet: ['asset_transfer_fence', 'asset_transfer_release', 'meter_inventory_seal_asset'],
   maintenance: ['asset_transfer_fence', 'asset_transfer_release'],
 };
 

@@ -4495,6 +4495,11 @@ export const EXPECTED = {
     // or database; the migrator owns rasta_fleet.
     connectAs: 'migrator',
     tables: [
+      'meter_drift_overflow',
+      'meter_drift_quarantine',
+      'meter_drift_capacity',
+      'meter_inventory_seal_asset',
+      'meter_inventory_seal',
       'asset_ref',
       'assignment',
       'availability_window',
@@ -4504,8 +4509,31 @@ export const EXPECTED = {
       'processed_event',
       'usage_record',
     ],
-    triggers: [],
+    triggers: [
+      'meter_activation_holder_guard',
+      'meter_drift_evidence_identity',
+      'meter_drift_capacity_guard',
+      'meter_drift_capacity_no_truncate',
+      'meter_drift_overflow_guard',
+      'meter_drift_overflow_no_truncate',
+      'meter_drift_quarantine_guard',
+      'meter_drift_quarantine_no_truncate',
+      'meter_inventory_seal_asset_fixed',
+      'meter_inventory_seal_asset_no_truncate',
+      'meter_inventory_creation_fence',
+      'meter_inventory_seal_fixed',
+      'meter_inventory_seal_no_truncate',
+    ],
+    functions: [
+      'meter_activation_holder_guard',
+      'meter_drift_quarantine_guard',
+      'meter_drift_evidence_guard',
+      'meter_inventory_creation_fence',
+      'meter_inventory_seal_fixed',
+      'meter_inventory_seal_asset_fixed',
+    ],
     constraints: [
+      'source_drift_evidence_size',
       'ck_assignment_period',
       'ck_availability_period',
       'ck_driver_status_reason',
@@ -4520,7 +4548,12 @@ export const EXPECTED = {
     ],
     // Added by 20261005130000_availability_window_one_live (review #225 r1):
     // one live window per machine, a partial index only the migration holds.
-    indexes: ['ux_availability_window_live', 'usage_record_asset_id_period_end_id_idx'],
+    indexes: [
+      'ux_availability_window_live',
+      'usage_record_asset_id_period_end_id_idx',
+      'meter_drift_overflow_oldest',
+      'meter_drift_quarantine_run',
+    ],
   },
   maintenance: {
     // D-045: the runtime role owns nothing and cannot create the scratch schema
@@ -4597,8 +4630,8 @@ export const EXPECTED = {
       'processed_event',
       'repair_order',
     ],
-    triggers: ['usage_meter_insert_fence'],
-    functions: ['set_usage_meter_source'],
+    triggers: ['usage_meter_insert_fence', 'usage_meter_mode_fixed'],
+    functions: ['set_usage_meter_source', 'usage_meter_mode_fixed'],
     indexes: ['asset_usage_entry_asset_id_period_end_idx', 'asset_usage_entry_organization_id_idx'],
     constraints: [
       'ck_cost_provenance',

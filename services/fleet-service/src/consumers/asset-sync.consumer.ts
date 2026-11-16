@@ -2,6 +2,7 @@ import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } fro
 import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   HANDLER_MESSAGE_MAX,
+  EventHandlingUnconfirmedError,
   UnprocessableEventError,
   createSystemContext,
   deadLetterHeaders,
@@ -463,7 +464,7 @@ type InsuranceOutcome =
   | { readonly kind: 'PARK'; readonly reason: ParkReason };
 
 /** Why an event is (still) parked: the source ahead, or no answer from it. */
-type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER';
+type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER' | 'DECISION_FAILED';
 
 /**
  * What one re-verification of a parked event did. `STOPPED`: the shutdown began
@@ -471,7 +472,7 @@ type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER';
  * as it was, due, for the next run anywhere (#270 r1).
  */
 export type ParkedOutcome =
-  'GONE' | 'NOT_DUE' | 'APPLIED' | 'DROPPED' | 'KEPT' | 'DEAD_LETTERED' | 'STOPPED';
+  'GONE' | 'NOT_DUE' | 'APPLIED' | 'DROPPED' | 'KEPT' | 'DEAD_LETTERED' | 'QUARANTINED' | 'STOPPED';
 
 /** Where INSURANCE_RECORDED is published (ASSET_SYNC_TOPICS); a parked event without a delivery is dead-lettered as from here. */
 const INSURANCE_TOPIC = 'rasta.insurance.v1';
@@ -956,6 +957,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
         envelope.eventName === CONSUMED_EVENTS.ASSET_CREATED
         ? { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs }
         : { maxWaitMs: this.transactionMaxWaitMs },
+      envelope.eventId,
     );
 
     // Committed: the sweep, outside this handler, decides what the transfer made
@@ -969,7 +971,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
    * the configured age ago, oldest first. Each is re-verified at the source; one
    * still unverified after the maximum attempts is dead-lettered as
    * `PARKED_VERIFICATION_EXHAUSTED`. Exposed so a test can run it without the
-   * timer.
+   * timer. Fence refusals commit quarantine evidence and removal together,
+   * return `QUARANTINED`, and retain the original processed marker.
    */
   async sweepParked(): Promise<Record<ParkedOutcome, number>> {
     const counts: Record<ParkedOutcome, number> = {
@@ -979,6 +982,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       DROPPED: 0,
       KEPT: 0,
       DEAD_LETTERED: 0,
+      QUARANTINED: 0,
       STOPPED: 0,
     };
     const due = await this.repository.listDueParkedInsurance(
@@ -1031,10 +1035,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       do {
         this.sweepAgain = false;
         const counts = await this.sweepParked();
-        if (counts.APPLIED + counts.DROPPED + counts.DEAD_LETTERED > 0) {
+        if (counts.APPLIED + counts.DROPPED + counts.DEAD_LETTERED + counts.QUARANTINED > 0) {
           this.logger.log(
             `Parked insurance sweep: ${counts.APPLIED} applied, ${counts.DROPPED} dropped, ` +
-              `${counts.KEPT} still parked, ${counts.DEAD_LETTERED} dead-lettered`,
+              `${counts.KEPT} still parked, ${counts.DEAD_LETTERED} dead-lettered, ` +
+              `${counts.QUARANTINED} quarantined`,
           );
         }
       } while (this.sweepAgain && !this.sweepStopped);
@@ -1156,7 +1161,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
     }
 
     let lettered: { sourceTopic: string; attempts: number; last: ParkReason } | undefined;
-    const outcome = await this.repository.transaction(
+    const decision = this.repository.transaction(
       async (tx: ExtendedPrismaClient): Promise<ParkedOutcome> => {
         await this.repository.lockAssetRef(tx, assetId);
         const row = await this.repository.findParkedInsurance(
@@ -1221,6 +1226,13 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
 
         const attempts = await this.repository.recordParkedAttempt(tx, eventId, decided.reason);
         if (attempts >= this.parking.maxAttempts) {
+          if (row.refusalSeen)
+            await this.repository.persistDriftHold(
+              eventId,
+              assetId,
+              'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
+              tx,
+            );
           // One transaction: the dead letter is published exactly when the row
           // and the marker are gone (r9).
           await this.repository.enqueueDeadLetter(
@@ -1235,9 +1247,85 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
         return 'KEPT';
       },
       { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs },
+      eventId,
+      {
+        lock: (tx) => this.repository.lockAssetRef(tx, assetId),
+        discard: async (tx) => {
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          // Retain the processed marker: this terminal outcome cannot be replayed.
+        },
+      },
     );
+    const outcome = await decision.catch(async (error: unknown): Promise<ParkedOutcome> => {
+      lettered = undefined; // This instance has no confirmed exhaustion commit yet.
+      if (
+        error instanceof UnprocessableEventError &&
+        (error.reason === DLQ_REASONS.SOURCE_OWNER_DRIFT ||
+          error.reason === DLQ_REASONS.SOURCE_INVENTORY_SEALED ||
+          error.reason === DLQ_REASONS.SOURCE_DRIFT_QUARANTINE_FULL)
+      )
+        return 'QUARANTINED'; // Raised only after evidence + removal committed.
+      if (this.sweepStopped) return 'STOPPED';
+      // The decision rolled back (or its response was lost). Persist progress
+      // separately, under the same asset lock and observed attempt version.
+      const failed = await this.repository.transaction(async (tx) => {
+        await this.repository.lockAssetRef(tx, assetId);
+        const row = await this.repository.findParkedInsurance(
+          tx,
+          eventId,
+          this.parking.minAgeSeconds,
+        );
+        if (!row || row.attempts !== read.row.attempts) return null;
+        const attempts = await this.repository.recordParkedAttempt(
+          tx,
+          eventId,
+          'DECISION_FAILED',
+          error instanceof EventHandlingUnconfirmedError && !!error.evidencePolicy,
+        );
+        return { row, attempts };
+      });
+      if (this.sweepStopped) return 'STOPPED';
+      if (!failed || failed.attempts < this.parking.maxAttempts) return 'KEPT';
+      if (
+        !(error instanceof UnprocessableEventError) &&
+        (failed.row.refusalSeen ||
+          (error instanceof EventHandlingUnconfirmedError && error.evidencePolicy))
+      )
+        await this.repository.persistDriftHold(
+          eventId,
+          assetId,
+          error instanceof EventHandlingUnconfirmedError && error.evidencePolicy
+            ? 'SOURCE_REFUSAL_UNCONFIRMED'
+            : 'SOURCE_INFRASTRUCTURE_DURING_REFUSAL',
+        );
+      if (this.sweepStopped) return 'STOPPED';
+      // Even if terminal cleanup fails, the attempt above remains durable and
+      // this row leaves the head of the least-recently-tried order.
+      return this.repository.transaction(async (tx): Promise<ParkedOutcome> => {
+        await this.repository.lockAssetRef(tx, assetId);
+        const row = await this.repository.findParkedInsurance(
+          tx,
+          eventId,
+          this.parking.minAgeSeconds,
+        );
+        if (!row || row.attempts !== failed.attempts) return 'GONE';
+        await this.repository.enqueueDeadLetter(
+          tx,
+          this.parkedDeadLetter(row, row.attempts, 'DECISION_FAILED'),
+        );
+        await this.repository.deleteParkedInsurance(tx, eventId);
+        await this.repository.unmarkEventProcessed(tx, eventId, CONSUMER_NAME);
+        lettered = {
+          sourceTopic: row.sourceTopic,
+          attempts: row.attempts,
+          last: 'DECISION_FAILED',
+        };
+        return 'DEAD_LETTERED';
+      });
+    });
 
-    if (lettered) {
+    if (this.sweepStopped) return 'STOPPED';
+    if (outcome === 'DEAD_LETTERED' && lettered) {
       // Counted once committed: the relay publishes what the outbox holds.
       dlqMessagesTotal.inc({
         service: this.dlqMetricService,

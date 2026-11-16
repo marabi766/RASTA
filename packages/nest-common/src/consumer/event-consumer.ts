@@ -25,7 +25,12 @@ import {
   type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
-import { dlqMessagesTotal, consumerCrashesTotal, consumerExpected } from '@rasta/observability';
+import {
+  dlqMessagesTotal,
+  consumerCrashesTotal,
+  consumerExpected,
+  consumerHandlingFailuresTotal,
+} from '@rasta/observability';
 import { consumerFailures } from './consumer-health';
 import { fatalShutdown } from '../lifecycle/fatal-shutdown';
 import { createSystemContext, runWithContext } from '../context/request-context';
@@ -35,6 +40,7 @@ import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connect
 import { kafkaShutdownDeadline } from '../kafka/bounded-disconnect';
 import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
 import { WorkerAbandonedError } from '../worker-boundary';
+import { clientFailureCode } from '../database/client-failure';
 
 /**
  * The consuming half of the outbox pattern (ADR-021).
@@ -115,6 +121,8 @@ export interface EventConsumerOptions extends KafkaConnectionOptions {
   /** In-process attempts before dead-lettering. */
   maxRetries?: number;
   retryBackoffMs?: number;
+  /** Group-wide rebalance wait; opt in only for bounded long handlers. */
+  rebalanceTimeoutMs?: number;
   /** Start at the beginning of the topic when the group has no committed
    *  offset. True for projectors that need the full history. */
   fromBeginning?: boolean;
@@ -241,6 +249,35 @@ export class UnprocessableEventError extends Error {
   }
 }
 
+/** Code-only diagnostics: no foreign message, stack, query or metadata survives. */
+export function handlingFailureCause(error: unknown): Error {
+  try {
+    const code =
+      error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined;
+    return new Error(
+      typeof code === 'string' && /^P20[0-3][0-9]$/.test(code) ? code : clientFailureCode(error),
+    );
+  } catch {
+    return new Error('unknown');
+  }
+}
+
+/** Ambiguous handling: bounded retry, then DLQ for reconciliation, never a success claim. */
+export class EventHandlingUnconfirmedError extends Error {
+  constructor(
+    message: string,
+    cause?: unknown,
+    readonly evidencePolicy?: {
+      attempts: number;
+      backoffMs: number;
+      persist: (lastError?: unknown) => Promise<void>;
+    },
+  ) {
+    // Driver messages/stacks can contain SQL and tenant values. Keep only a closed SDK code.
+    super(message, { cause: handlingFailureCause(cause) });
+  }
+}
+
 /**
  * Thrown out of kafkajs's `eachMessage` for a message a stopping consumer gives
  * up on: before its handler runs, instead of a further attempt or the pause
@@ -311,6 +348,8 @@ export const DEFAULT_BACKOFF_MS = 500;
  * does between attempts.
  */
 export const CONSUMER_SESSION_TIMEOUT_MS = 60_000;
+/** KafkaJS default; longer evidence windows must opt in per consumer. */
+export const CONSUMER_REBALANCE_TIMEOUT_MS = 60_000;
 
 /**
  * One run of the consumer, from a `start()` to its stop. A message keeps the
@@ -481,6 +520,7 @@ export class EventConsumer {
       // 30s heartbeat window on a cold cache; 60s avoids a rebalance storm
       // that would only make the backlog worse.
       sessionTimeout: CONSUMER_SESSION_TIMEOUT_MS,
+      rebalanceTimeout: this.options.rebalanceTimeoutMs ?? CONSUMER_REBALANCE_TIMEOUT_MS,
       allowAutoTopicCreation: false,
     });
 
@@ -679,8 +719,9 @@ export class EventConsumer {
       return;
     }
 
-    const maxRetries = this.options.maxRetries ?? DEFAULT_MAX_RETRIES;
-    const backoff = this.options.retryBackoffMs ?? DEFAULT_BACKOFF_MS;
+    let maxRetries = this.options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    let backoff = this.options.retryBackoffMs ?? DEFAULT_BACKOFF_MS;
+    let evidencePolicy: EventHandlingUnconfirmedError['evidencePolicy'];
 
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       // Once stopping, no attempt starts — the first included — and the pause
@@ -726,6 +767,32 @@ export class EventConsumer {
         const event = `${envelope.eventName} ${logField(envelope.eventId)}`;
         const message = handlerMessage(error);
 
+        if (error instanceof EventHandlingUnconfirmedError && error.evidencePolicy) {
+          // The evidence window starts at its first refusal, even after ordinary retries.
+          if (!evidencePolicy)
+            maxRetries = Math.max(maxRetries, attempt + error.evidencePolicy.attempts - 1);
+          evidencePolicy = error.evidencePolicy;
+          backoff = Math.max(backoff, evidencePolicy.backoffMs);
+        }
+        if (
+          attempt === maxRetries &&
+          evidencePolicy &&
+          !(error instanceof UnprocessableEventError)
+        ) {
+          // A failed evidence commit propagates, leaving the offset uncommitted.
+          await evidencePolicy.persist(error);
+          this.abandonIfPastDeadline(run, { topic, partition, offset });
+          if (!this.options.deadLetterTopic) throw error;
+        }
+        if (error instanceof EventHandlingUnconfirmedError) {
+          this.logger.error(
+            `Handling unconfirmed ${event}: ${message}; cause=${(error.cause as Error).message}`,
+          );
+          consumerHandlingFailuresTotal.inc({ service: this.options.clientId, topic });
+          if (attempt === maxRetries && !this.options.deadLetterTopic) throw error;
+          // Fall through to bounded retries/DLQ. A successful DLQ publish accounts
+          // for this delivery even when quarantine/commit cannot be confirmed.
+        }
         if (error instanceof UnprocessableEventError) {
           this.logger.error(`Handler refused ${event} (${error.reason}): ${message}`);
           await this.deadLetter(
@@ -758,7 +825,7 @@ export class EventConsumer {
         this.logger.warn(`Attempt ${attempt}/${maxRetries} failed for ${event}: ${message}`);
         // The member stays in its group across the pause (#240 r12).
         beat?.();
-        await this.pause(run, backoff * attempt);
+        await this.pause(run, evidencePolicy ? backoff : backoff * attempt);
         beat?.();
       }
     }

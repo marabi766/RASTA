@@ -334,18 +334,23 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
     // Attempt 2 reaches the maximum. The transaction dies after the dead letter
     // was enqueued (a lost connection, an expired transaction): all of it rolls
     // back — no dead letter to publish, the row and the marker stay.
+    // The separate failure attempt survives even when terminal cleanup also fails.
     await age(envelope.eventId);
     const crash = jest
       .spyOn(repository, 'unmarkEventProcessed')
-      .mockRejectedValueOnce(new Error('connection lost'));
+      .mockRejectedValue(new Error('connection lost'));
     expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 0 });
-    expect(crash).toHaveBeenCalledTimes(1);
+    expect(crash).toHaveBeenCalledTimes(2);
     crash.mockRestore();
-    expect(await parked(envelope.eventId)).toMatchObject({ attempts: 1 });
+    expect(await parked(envelope.eventId)).toMatchObject({
+      attempts: 2,
+      reason: 'DECISION_FAILED',
+    });
     expect(await marked(envelope.eventId)).toBe(true);
     expect(await deadLetterRows(envelope.eventId)).toHaveLength(0);
     expect(await relayDeadLetters(envelope.eventId)).toHaveLength(0);
 
+    await age(envelope.eventId);
     // Committed: the row and the marker are gone with the dead letter enqueued.
     expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 1 });
     expect(await parked(envelope.eventId)).toBeNull();
@@ -368,7 +373,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
       'x-dlq-original-topic': 'rasta.insurance.v1',
       'x-dlq-original-partition': '3',
       'x-dlq-original-offset': '40',
-      'x-dlq-attempts': '2',
+      'x-dlq-attempts': '3',
     });
     const body = JSON.parse(JSON.stringify(letter.payload)) as EventEnvelope;
     expect(body).toMatchObject({ eventId: envelope.eventId, payload: { policyId } });

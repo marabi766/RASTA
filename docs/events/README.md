@@ -200,6 +200,14 @@ Cause معاینه را می‌گذارد و فقط `MAINTENANCE_COMPLETED` آن
 | `USAGE_RECORDED`        | UsageRecord        | **maintenance (محرک سرویس)** · asset · economic (پاداش) · analytics | `usageRecordId`, `assetId`, `organizationId`, `driverId`, `assignmentId`, `periodStart`, `periodEnd`, `hours`, `kilometres`, `hourMeter`, `odometer`, `source` |
 | `AVAILABILITY_CHANGED`  | AvailabilityWindow | construction · analytics                                            | `assetId`, `organizationId`, `available`, `reason`, `from`, `to`                                                                                               |
 
+`FLEET_METER_INVENTORY_SEALED` v1 is a global operator event on `rasta.fleet.v1`,
+aggregate `MeterInventorySeal`, platform partition key `meter-inventory-seal`.
+Its strict payload is `{ runId, operatorId, inventoryDigest, sourceBoundary,
+assetCount }`: no tenant or per-asset inventory. It is staged atomically with the
+immutable fleet source seal. Audit verifies producer/topic/version, run,
+correlation and actor before retaining these five scalar fields. The source
+primitive is not exposed by a production endpoint or CLI yet.
+
 **کلید پارتیشن چهار رویداد asset-scoped (`ASSET_ASSIGNED`، `ASSIGNMENT_ENDED`،
 `USAGE_RECORDED`، `AVAILABILITY_CHANGED`) `assetId` است، نه `aggregateId`.**
 استثنای آگاهانه‌ای بر قاعده § «کلید پارتیشن». هر مصرف‌کننده درباره **یک دستگاه**

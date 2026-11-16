@@ -19,6 +19,7 @@ describe('fleet event contracts', () => {
       'DRIVER_REGISTERED',
       'DRIVER_STATUS_CHANGED',
       'DRIVER_UPDATED',
+      'FLEET_METER_INVENTORY_SEALED',
       'USAGE_RECORDED',
     ]);
   });
@@ -150,8 +151,31 @@ describe('fleet event contracts', () => {
     });
   });
 
+  it('global source-seal evidence refuses tenant fields', () => {
+    const payload = {
+      runId: 'RUN_1',
+      operatorId: 'USR_OPERATOR',
+      inventoryDigest: 'a'.repeat(64),
+      sourceBoundary: 'SOURCE_SEAL',
+      assetCount: 2,
+    };
+    expect(() =>
+      validateFleetPayload(FLEET_EVENTS.FLEET_METER_INVENTORY_SEALED, payload),
+    ).not.toThrow();
+    expect(() =>
+      validateFleetPayload(FLEET_EVENTS.FLEET_METER_INVENTORY_SEALED, {
+        ...payload,
+        organizationId: 'ORG_OTHER',
+      }),
+    ).toThrow();
+  });
+
   describe('tenant context', () => {
-    it.each(Object.values(FLEET_EVENTS))('%s carries organizationId in the payload', (name) => {
+    it.each(
+      Object.values(FLEET_EVENTS).filter(
+        (name) => name !== FLEET_EVENTS.FLEET_METER_INVENTORY_SEALED,
+      ),
+    )('%s carries organizationId in the payload', (name) => {
       // The envelope carries `tenantId` too, but a consumer building a local
       // replica reads the payload. Both agreeing is what makes the replica
       // placeable in an organization.

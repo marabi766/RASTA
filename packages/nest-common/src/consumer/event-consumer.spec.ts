@@ -1,4 +1,13 @@
-import { EventConsumer, UnprocessableEventError, subscribedTopics } from './event-consumer';
+import {
+  EventConsumer,
+  CONSUMER_SESSION_TIMEOUT_MS,
+  CONSUMER_REBALANCE_TIMEOUT_MS,
+  EventHandlingUnconfirmedError,
+  handlingFailureCause,
+  UnprocessableEventError,
+  subscribedTopics,
+} from './event-consumer';
+import { FakeKafkaConsumer, FakeDlqProducer } from './__tests__/fake-kafka';
 import { RastaError } from '../errors/rasta-error';
 import type {
   ConsumerLogger,
@@ -7,7 +16,7 @@ import type {
   EventHandler,
 } from './event-consumer';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
-import { dlqMessagesTotal, registry } from '@rasta/observability';
+import { consumerHandlingFailuresTotal, dlqMessagesTotal, registry } from '@rasta/observability';
 
 /**
  * The delivery-metadata contract added for ADR-053 AUD-001.
@@ -82,6 +91,190 @@ describe('EventConsumer delivery metadata', () => {
     return (consumer as unknown as PrivateHandle).handleMessage(topic, partition, value, undefined);
   }
 
+  it('bounds unconfirmed handling, logs only the cause code, and moves the partition after DLQ', async () => {
+    const failure = new EventHandlingUnconfirmedError(
+      'SOURCE_WRITE_UNCONFIRMED',
+      Object.assign(new Error('SELECT secret_owner FROM private_query'), { code: 'P2010' }),
+    );
+    const handler = jest.fn().mockRejectedValue(failure);
+    const logger = { ...silentLogger, error: jest.fn() };
+    const consumer = new EventConsumer(
+      { ...options, maxRetries: 3, retryBackoffMs: 1, deadLetterTopic: 'test.dlq' },
+      handler,
+      logger,
+    );
+    const pause = jest.spyOn(
+      consumer as unknown as { pause(run: unknown, ms: number): Promise<void> },
+      'pause',
+    );
+    const send = jest.fn().mockResolvedValue(undefined);
+    (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
+    const labels = { service: options.clientId, topic: 'rasta.asset.v1' };
+    const count = async () =>
+      (await consumerHandlingFailuresTotal.get()).values.find(
+        (v) => v.labels.service === labels.service && v.labels.topic === labels.topic,
+      )?.value ?? 0;
+    const before = await count();
+    await deliver(consumer, labels.topic, 0, envelopeBytes());
+    expect(handler).toHaveBeenCalledTimes(3);
+    expect(pause.mock.calls.map((call) => call[1])).toEqual([1, 2]);
+    expect(send.mock.calls[0][0].messages[0].headers).toMatchObject({
+      'x-dlq-reason': 'MAX_RETRIES_EXCEEDED',
+      'x-dlq-attempts': '3',
+    });
+    expect(await count()).toBe(before + 3);
+    expect(logger.error.mock.calls.flat().join(' ')).toContain('cause=P2010');
+    expect(JSON.stringify([failure.cause, logger.error.mock.calls, send.mock.calls])).not.toMatch(
+      /secret_owner|private_query/,
+    );
+    handler.mockResolvedValue(undefined);
+    await deliver(consumer, labels.topic, 0, envelopeBytes({ eventId: 'NEXT_EVENT' }));
+    expect(handler).toHaveBeenCalledTimes(4);
+  });
+  it.each(['test.dlq', undefined])(
+    'keeps a seen refusal through a different final error before DLQ %s',
+    async (deadLetterTopic) => {
+      const persist = jest.fn().mockResolvedValue(undefined);
+      const finalError = new Error('ordinary final failure');
+      const handler = jest
+        .fn()
+        .mockRejectedValue(finalError)
+        .mockRejectedValueOnce(
+          new EventHandlingUnconfirmedError('REFUSAL', undefined, {
+            attempts: 8,
+            backoffMs: 10_000,
+            persist,
+          }),
+        );
+      const consumer = new EventConsumer(
+        { ...options, maxRetries: 3, retryBackoffMs: 0, deadLetterTopic },
+        handler,
+        silentLogger,
+      );
+      const send = jest.fn().mockImplementation(async () => {
+        expect(persist).toHaveBeenCalledWith(finalError);
+      });
+      (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
+      jest
+        .spyOn(consumer as unknown as { pause(run: unknown, ms: number): Promise<void> }, 'pause')
+        .mockResolvedValue(undefined);
+      if (deadLetterTopic) await deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes());
+      else
+        await expect(deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes())).rejects.toBe(
+          finalError,
+        );
+      expect(persist).toHaveBeenCalledWith(finalError);
+      expect(handler).toHaveBeenCalledTimes(8);
+      expect(send).toHaveBeenCalledTimes(deadLetterTopic ? 1 : 0);
+    },
+  );
+
+  it('keeps every non-opted-in consumer at the KafkaJS 60s default', async () => {
+    const kafka = new FakeKafkaConsumer();
+    const factory = jest.fn(() => kafka);
+    const consumer = new EventConsumer(options, async () => undefined, silentLogger);
+    (consumer as unknown as { kafka: unknown }).kafka = { consumer: factory };
+    try {
+      await consumer.start();
+      expect(factory).toHaveBeenCalledWith(expect.objectContaining({ rebalanceTimeout: 60_000 }));
+    } finally {
+      await consumer.stop();
+    }
+  });
+
+  it('sets opt-in rebalance above the full evidence/transaction budget and heartbeats through all pauses', async () => {
+    jest.useFakeTimers();
+    const kafka = new FakeKafkaConsumer(),
+      producer = new FakeDlqProducer();
+    const persist = jest.fn().mockResolvedValue(undefined);
+    const consumer = new EventConsumer(
+      { ...options, deadLetterTopic: 'test.dlq', rebalanceTimeoutMs: 300_000 },
+      async () => {
+        throw new EventHandlingUnconfirmedError('REFUSAL', undefined, {
+          attempts: 8,
+          backoffMs: 10_000,
+          persist,
+        });
+      },
+      silentLogger,
+    );
+    const factory = jest.fn(() => kafka);
+    (consumer as unknown as { kafka: unknown }).kafka = {
+      consumer: factory,
+      producer: () => producer,
+    };
+    try {
+      await consumer.start();
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionTimeout: 60_000,
+          rebalanceTimeout: 300_000,
+        }),
+      );
+      expect(CONSUMER_REBALANCE_TIMEOUT_MS).toBe(60_000);
+      const heartbeat = jest.fn().mockResolvedValue(undefined);
+      const dispatch = consumer as unknown as {
+        handleMessage(
+          topic: string,
+          partition: number,
+          value: Buffer,
+          headers: undefined,
+          offset: string,
+          key: null,
+          heartbeat: () => Promise<void>,
+        ): Promise<void>;
+      };
+      const pending = dispatch.handleMessage(
+        'rasta.asset.v1',
+        0,
+        envelopeBytes(),
+        undefined,
+        '0',
+        null,
+        heartbeat,
+      );
+      await jest.advanceTimersByTimeAsync(70_000);
+      await pending;
+      expect(heartbeat).toHaveBeenCalledTimes(14);
+      expect(10_000).toBeLessThan(CONSUMER_SESSION_TIMEOUT_MS);
+      expect(producer.sent).toHaveLength(1);
+    } finally {
+      await consumer.stop();
+      jest.useRealTimers();
+    }
+  });
+
+  it('rethrows unconfirmed handling without a configured DLQ', async () => {
+    const failure = new EventHandlingUnconfirmedError('SOURCE_WRITE_UNCONFIRMED');
+    const send = jest.fn();
+    const consumer = new EventConsumer(
+      { ...options, maxRetries: 1 },
+      async () => {
+        throw failure;
+      },
+      silentLogger,
+    );
+    (consumer as unknown as { dlqProducer: { send: typeof send } }).dlqProducer = { send };
+    await expect(deliver(consumer, 'rasta.asset.v1', 0, envelopeBytes())).rejects.toBe(failure);
+    expect(send).not.toHaveBeenCalled();
+  });
+  it.each([
+    Object.defineProperty({}, 'code', {
+      get() {
+        throw new Error('private getter');
+      },
+    }),
+    new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('private proxy');
+        },
+      },
+    ),
+  ])('sanitizes foreign access failures to unknown', (foreign) => {
+    expect(handlingFailureCause(foreign).message).toBe('unknown');
+  });
   it('gives the handler the topic and partition the broker reported', async () => {
     const seen: EventDelivery[] = [];
     const consumer = new EventConsumer(

@@ -14,7 +14,8 @@
  *     a field whose header is missing, is a disagreement too (refused, not
  *     repaired);
  *   - its reason is one a replay can change (`PRODUCER_NOT_ALLOWED`,
- *     `SOURCE_UNCONFIRMED` and `BACKFILL_REQUIRED` are not: the same claim gets
+ *     `SOURCE_UNCONFIRMED`, `BACKFILL_REQUIRED`, `SOURCE_OWNER_DRIFT` and
+ *     `SOURCE_INVENTORY_SEALED` are not: the same claim gets
  *     the same answer);
  *   - it is not a `NEVER_AUTO_REPLAY` event, nor from a
  *     `NEVER_AUTO_REPLAY_TOPICS` topic (or its `.retry`) whatever its name —
@@ -329,6 +330,9 @@ export function assess(record, { dlq, topology, topics, contracts }) {
     DLQ_REASONS.PRODUCER_NOT_ALLOWED,
     DLQ_REASONS.SOURCE_UNCONFIRMED,
     DLQ_REASONS.BACKFILL_REQUIRED,
+    DLQ_REASONS.SOURCE_OWNER_DRIFT,
+    DLQ_REASONS.SOURCE_DRIFT_QUARANTINE_FULL,
+    DLQ_REASONS.SOURCE_INVENTORY_SEALED,
   ];
   if (unfixable.includes(summary.reason)) return refuse('REASON_NOT_REPLAYABLE');
   if (NEVER_AUTO_REPLAY.has(envelope.eventName)) return refuse('NEVER_AUTO_REPLAY');

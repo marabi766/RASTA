@@ -1,6 +1,12 @@
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
-import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import {
+  RastaError,
+  EventHandlingUnconfirmedError,
+  EventConsumer,
+  runWithContext,
+  type RequestContext,
+} from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
@@ -340,10 +346,81 @@ describe('the ownership generation only rises (#240 r12)', () => {
           );
         const took = Date.now() - started;
 
-        expect(outcome).toBeInstanceOf(Error);
-        expect(String((outcome as Error).message)).toMatch(/transaction|maxWait|time/i);
+        expect(outcome).toMatchObject({ code: 'P2028' });
+        expect(outcome).not.toBeInstanceOf(EventHandlingUnconfirmedError);
         expect(took).toBeGreaterThanOrEqual(250);
         expect(took).toBeLessThan(1_500);
+      } finally {
+        await pool.release();
+        await pool.close();
+      }
+    }, 30_000);
+
+    it('ordinary pool maxWait reaches DLQ within the ordinary budget without HOLD or counter bump', async () => {
+      const assetId = await machineOfA();
+      const pool = await contended(300);
+      const before = await prisma.client.$queryRaw`SELECT overflow_count FROM meter_drift_capacity`;
+      const holds = await prisma.client
+        .$queryRaw`SELECT event_id FROM meter_drift_overflow WHERE reason = 'SOURCE_DRIFT_HOLD'`;
+      const failures: unknown[] = [];
+      const transport = new EventConsumer(
+        {
+          brokers: ['localhost:9092'],
+          clientId: 'pool-proof',
+          groupId: 'pool-proof',
+          topics: ['rasta.asset.v1'],
+          deadLetterTopic: 'test.dlq',
+          maxRetries: 3,
+          retryBackoffMs: 10,
+        },
+        async (envelope) => {
+          try {
+            await pool.tinyConsumer.handle(envelope);
+          } catch (error) {
+            failures.push(error);
+            throw error;
+          }
+        },
+        { log: () => undefined, warn: () => undefined, error: () => undefined },
+      );
+      const dispatch = transport as unknown as {
+        dlqProducer: { send: jest.Mock };
+        handleMessage(
+          topic: string,
+          partition: number,
+          value: Buffer,
+          headers: undefined,
+        ): Promise<void>;
+      };
+      const send = jest.fn().mockResolvedValue(undefined);
+      dispatch.dlqProducer = { send };
+      try {
+        const started = Date.now();
+        await dispatch.handleMessage(
+          'rasta.asset.v1',
+          0,
+          Buffer.from(
+            JSON.stringify(
+              event('ASSET_UPDATED', A, { assetId, organizationId: A, changedFields: ['name'] }),
+            ),
+          ),
+          undefined,
+        );
+        expect(Date.now() - started).toBeLessThan(3000);
+        expect(failures).toHaveLength(3);
+        for (const error of failures) expect(error).toMatchObject({ code: 'P2028' });
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0][0].messages[0].headers).toMatchObject({
+          'x-dlq-attempts': '3',
+          'x-dlq-reason': 'MAX_RETRIES_EXCEEDED',
+        });
+        expect(
+          await prisma.client.$queryRaw`SELECT overflow_count FROM meter_drift_capacity`,
+        ).toEqual(before);
+        expect(
+          await prisma.client
+            .$queryRaw`SELECT event_id FROM meter_drift_overflow WHERE reason = 'SOURCE_DRIFT_HOLD'`,
+        ).toEqual(holds);
       } finally {
         await pool.release();
         await pool.close();

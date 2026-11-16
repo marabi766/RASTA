@@ -1,0 +1,257 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import {
+  FLEET_METER_INVENTORY_SEALED,
+  MeterInventoryAuthorityRefusal,
+  fleetMeterInventorySealedPayloadV1,
+  meterReconcileOperatorSchema,
+} from '@rasta/contracts';
+import {
+  createSystemContext,
+  runUnscoped,
+  runWithContext,
+  tryGetContext,
+} from '@rasta/nest-common';
+import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
+import { FLEET_TOPIC } from '../config/env';
+import { FleetRepository } from './fleet.repository';
+import { Prisma } from '../generated/prisma';
+
+const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+const assetsSchema = z
+  .array(z.object({ assetId: identifier, organizationId: identifier }).strict())
+  .max(20_000);
+export interface FleetMeterInventory {
+  complete: true;
+  scope: 'ALL_PHYSICAL_ASSETS';
+  boundary: string;
+  assets: z.infer<typeof assetsSchema>;
+}
+export class FleetMeterInventoryRefusal extends MeterInventoryAuthorityRefusal {}
+
+/** Durable source fence, with no activation or release path in this slice. */
+export class FleetMeterInventorySeal {
+  constructor(private readonly prisma: PrismaService) {}
+
+  /** Existing trusted authority channel: proof is a live lock, never a reusable snapshot. */
+  async withQuarantineClear<T>(
+    runId: string,
+    boundary: string,
+    commit: (proof: {
+      runId: string;
+      boundary: string;
+      clear: true;
+      assertHeld: () => Promise<void>;
+    }) => Promise<T>,
+    isDefiniteRefusal: (error: unknown) => boolean = () => false,
+  ): Promise<T> {
+    if (tryGetContext()) throw new FleetMeterInventoryRefusal('OPERATOR_CONTEXT_REQUIRED');
+    identifier.parse(runId);
+    const token = randomUUID();
+    const lockGate = async (tx: ExtendedPrismaClient): Promise<void> => {
+      const [gate] = await tx.$queryRaw<
+        { run_id: string | null; boundary: string | null; isolation: string }[]
+      >`SELECT run_id, boundary, current_setting('transaction_isolation') AS isolation,
+        set_config('rasta.meter_activation_token', ${token}, true) AS holder
+        FROM meter_inventory_seal WHERE id = true FOR UPDATE`;
+      if (
+        !gate ||
+        gate.isolation !== 'read committed' ||
+        gate.run_id !== runId ||
+        gate.boundary !== boundary
+      )
+        throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+    };
+    return runUnscoped('platform activation hold; no tenant-visible quarantine data', async () => {
+      // Commit the barrier BEFORE entering maintenance. Connection loss/timeout must
+      // never let quarantine writers slip into an activation still committing remotely.
+      await this.prisma.transaction(async (tx) => {
+        await lockGate(tx);
+        const [capacity] = await tx.$queryRaw<{ token: string | null }[]>`
+          SELECT activation_token AS token FROM meter_drift_capacity WHERE id = true FOR UPDATE`;
+        const [state] = await tx.$queryRaw<{ blocked: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM meter_drift_quarantine WHERE run_id = ${runId})
+            OR EXISTS(SELECT 1 FROM meter_drift_capacity WHERE overflow_count > 0) AS blocked`;
+        if (!capacity || capacity.token !== null || !state || state.blocked)
+          throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+        await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = ${token}::uuid WHERE id = true`;
+      });
+      let entered = false;
+      let refused = false;
+      try {
+        return await this.prisma.transaction(
+          async (tx) => {
+            await lockGate(tx);
+            let held = true;
+            const assertHeld = async (): Promise<void> => {
+              if (!held) throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+              const [capacity] = await tx.$queryRaw<{ token: string | null }[]>`
+            SELECT activation_token AS token FROM meter_drift_capacity WHERE id = true FOR SHARE`;
+              if (!capacity || capacity.token !== token)
+                throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+            };
+            try {
+              await assertHeld();
+              entered = true;
+              let result: T;
+              try {
+                result = await commit({ runId, boundary, clear: true, assertHeld });
+              } catch (error) {
+                refused = isDefiniteRefusal(error);
+                throw error;
+              }
+              // Confirmed success releases here; proven refusals release after rollback.
+              // An ambiguous outcome retains the barrier for operator recovery.
+              const released =
+                await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL
+            WHERE id = true AND activation_token = ${token}::uuid`;
+              if (released !== 1) throw new FleetMeterInventoryRefusal('SOURCE_DRIFT_QUARANTINED');
+              return result;
+            } finally {
+              held = false;
+            }
+          },
+          { timeoutMs: 30_000 },
+        );
+      } catch (error) {
+        // No callback, or an explicitly proven rollback: release only our token.
+        // A lost/expired callback response remains fail-closed.
+        if (!entered || refused)
+          await this.prisma.transaction(async (tx) => {
+            await lockGate(tx);
+            await tx.$executeRaw`UPDATE meter_drift_capacity SET activation_token = NULL
+              WHERE id = true AND activation_token = ${token}::uuid`;
+          });
+        throw error;
+      }
+    });
+  }
+
+  async seal(runId: string, operatorId: string): Promise<FleetMeterInventory> {
+    if (tryGetContext()) throw new FleetMeterInventoryRefusal('OPERATOR_CONTEXT_REQUIRED');
+    identifier.parse(runId);
+    meterReconcileOperatorSchema.parse(operatorId);
+    return runWithContext(
+      createSystemContext({
+        correlationId: runId,
+        userId: operatorId,
+        callerService: 'fleet-service',
+      }),
+      async () =>
+        runUnscoped(
+          'global operator source seal; all physical fleet identities across historical owners, never tenant-facing',
+          async () => {
+            let callbackReturned = false;
+            try {
+              return await this.prisma.transaction(
+                async (tx) => {
+                  // A sealed gate is immutable: replay needs no source or gate row locks.
+                  let [gate] = await tx.$queryRaw<
+                    {
+                      run_id: string | null;
+                      operator_id: string | null;
+                      inventory: unknown;
+                      boundary: string | null;
+                      isolation_level: string;
+                    }[]
+                  >`
+              SELECT run_id, operator_id, inventory, boundary, current_setting('transaction_isolation') AS isolation_level
+              FROM meter_inventory_seal WHERE id = true`;
+                  if (!gate) throw new FleetMeterInventoryRefusal('SOURCE_FENCE_MISSING');
+                  if (gate.isolation_level !== 'read committed')
+                    throw new FleetMeterInventoryRefusal('SOURCE_FENCE_REQUIRES_READ_COMMITTED');
+                  if (gate.run_id === null) {
+                    // Never queue behind a reverse-order multi-table writer. Release all acquired
+                    // locks on refusal, then retry the SAME run after draining source writers.
+                    await tx.$executeRaw`LOCK TABLE asset_ref, usage_record, assignment, availability_window,
+              asset_transfer_fence, asset_transfer_release, insurance_pending_verification,
+              meter_inventory_seal_asset IN SHARE MODE NOWAIT`;
+                    [gate] = await tx.$queryRaw<(typeof gate)[]>`
+              SELECT run_id, operator_id, inventory, boundary, current_setting('transaction_isolation') AS isolation_level
+              FROM meter_inventory_seal WHERE id = true FOR UPDATE NOWAIT`;
+                    if (!gate) throw new FleetMeterInventoryRefusal('SOURCE_FENCE_MISSING');
+                  }
+                  if (gate.run_id !== null) {
+                    if (gate.run_id !== runId || gate.operator_id !== operatorId)
+                      throw new FleetMeterInventoryRefusal('SOURCE_SEAL_CONFLICT');
+                    const stored = assetsSchema.safeParse(gate.inventory);
+                    if (!stored.success)
+                      throw new FleetMeterInventoryRefusal('SOURCE_SEAL_INVALID');
+                    const assets = stored.data;
+                    const digest = createHash('sha256')
+                      .update(JSON.stringify(assets))
+                      .digest('hex');
+                    const expectedBoundary = `fleet:${runId}:${digest}`;
+                    if (gate.boundary !== expectedBoundary)
+                      throw new FleetMeterInventoryRefusal('SOURCE_SEAL_INVALID');
+                    callbackReturned = true;
+                    return {
+                      complete: true,
+                      scope: 'ALL_PHYSICAL_ASSETS',
+                      boundary: gate.boundary,
+                      assets,
+                    };
+                  }
+                  const rows = await tx.$queryRaw<
+                    { assetId: string; organizationId: string | null }[]
+                  >`
+              WITH identities AS (
+                SELECT id AS asset_id, organization_id FROM asset_ref
+                UNION SELECT asset_id, organization_id FROM usage_record
+                UNION SELECT asset_id, organization_id FROM assignment
+                UNION SELECT asset_id, organization_id FROM availability_window
+                UNION SELECT asset_id, organization_id FROM asset_transfer_fence
+                UNION SELECT asset_id, organization_id FROM asset_transfer_release
+                UNION SELECT asset_id, organization_id FROM insurance_pending_verification
+              ) SELECT i.asset_id AS "assetId", COALESCE(max(a.organization_id),
+                CASE WHEN count(DISTINCT i.organization_id) = 1 THEN min(i.organization_id) END) AS "organizationId"
+              FROM identities i LEFT JOIN asset_ref a ON a.id = i.asset_id
+              GROUP BY i.asset_id ORDER BY i.asset_id COLLATE "C" LIMIT 20001`;
+                  if (rows.length > 20_000)
+                    throw new FleetMeterInventoryRefusal('SOURCE_INVENTORY_TOO_LARGE');
+                  if (rows.some((r) => r.organizationId === null))
+                    throw new FleetMeterInventoryRefusal('SOURCE_OWNER_UNCONFIRMED');
+                  const source = assetsSchema.safeParse(rows);
+                  if (!source.success)
+                    throw new FleetMeterInventoryRefusal('SOURCE_INVENTORY_MALFORMED');
+                  const assets = source.data;
+                  const digest = createHash('sha256').update(JSON.stringify(assets)).digest('hex');
+                  const boundary = `fleet:${runId}:${digest}`;
+                  await new FleetRepository(this.prisma).enqueueEvent(tx, {
+                    organizationId: null,
+                    aggregateType: 'MeterInventorySeal',
+                    aggregateId: runId,
+                    eventName: FLEET_METER_INVENTORY_SEALED,
+                    eventVersion: 1,
+                    topic: FLEET_TOPIC,
+                    payload: fleetMeterInventorySealedPayloadV1.parse({
+                      runId,
+                      operatorId,
+                      inventoryDigest: digest,
+                      sourceBoundary: boundary,
+                      assetCount: assets.length,
+                    }),
+                  });
+                  await tx.$executeRaw`UPDATE meter_inventory_seal SET run_id = ${runId}, operator_id = ${operatorId},
+              inventory = ${JSON.stringify(assets)}::jsonb, boundary = ${boundary} WHERE id = true`;
+                  callbackReturned = true;
+                  return { complete: true, scope: 'ALL_PHYSICAL_ASSETS', boundary, assets };
+                },
+                { timeoutMs: 30_000 },
+              );
+            } catch (error) {
+              if (callbackReturned) throw new Error('SOURCE_SEAL_UNCONFIRMED');
+              if (error instanceof FleetMeterInventoryRefusal) throw error;
+              if (
+                error instanceof Prisma.PrismaClientKnownRequestError &&
+                (error.code === 'P2034' || ['55P03', '40P01'].includes(String(error.meta?.code)))
+              )
+                throw new FleetMeterInventoryRefusal('SOURCE_WRITERS_ACTIVE');
+              // Prisma cannot commit before our callback returns (including replay).
+              throw new FleetMeterInventoryRefusal('SOURCE_SEAL_PRECOMMIT_FAILED');
+            }
+          },
+        ),
+    );
+  }
+}

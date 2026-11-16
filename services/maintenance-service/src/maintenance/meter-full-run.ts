@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   MAINTENANCE_METER_FULL_RUN_ACTIVATED,
+  MeterInventoryAuthorityRefusal,
   MAINTENANCE_METER_FULL_RUN_ACTIVATED_VERSION,
   maintenanceMeterFullRunPayloadV1,
   meterReconcileOperatorSchema,
@@ -47,8 +48,94 @@ const refusalsSchema = z
 export interface MeterInventoryAuthority {
   // A run must re-serve its original durable seal, never enumerate a fresh one.
   withSealedInventory<T>(runId: string, commit: (inventory: unknown) => Promise<T>): Promise<T>;
+  /** MUST durably bar quarantine writes through callback settlement, even on lock/connection loss. */
+  withQuarantineClear<T>(
+    runId: string,
+    boundary: string,
+    commit: (proof: unknown) => Promise<T>,
+    isDefiniteRefusal?: (error: unknown) => boolean,
+  ): Promise<T>;
 }
 export class MeterFullRunRefusal extends Error {}
+
+/** Same reviewed authority boundary; the proof is valid only while its owner lock is held. */
+function quarantineClearAuthority(
+  authority: MeterInventoryAuthority,
+  observe: <T>(action: Promise<T>) => Promise<T>,
+): {
+  withSealedInventory<T>(
+    runId: string,
+    commit: (
+      inventory: z.infer<typeof inventorySchema>,
+      assertHeld: () => Promise<void>,
+      preflight?: boolean,
+    ) => Promise<T>,
+  ): Promise<T>;
+} {
+  return {
+    withSealedInventory: (runId, commit) =>
+      authority.withSealedInventory(runId, (value) =>
+        observe(
+          (async () => {
+            const parsed = inventorySchema.safeParse(value);
+            if (!parsed.success) throw new MeterFullRunRefusal('SOURCE_INVENTORY_MALFORMED');
+            const inventory = parsed.data;
+            if (typeof authority.withQuarantineClear !== 'function')
+              throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+            // Reuse the locked local checks before the source arms tx1.
+            await commit(inventory, async () => undefined, true);
+            let entered = false;
+            return authority
+              .withQuarantineClear(
+                runId,
+                inventory.boundary,
+                (proof) => {
+                  const clear = z
+                    .object({
+                      runId: identifier,
+                      boundary: z.string(),
+                      clear: z.literal(true),
+                      assertHeld: z.custom<() => Promise<void>>(
+                        (value) => typeof value === 'function',
+                      ),
+                    })
+                    .strict()
+                    .safeParse(proof);
+                  if (
+                    !clear.success ||
+                    clear.data.runId !== runId ||
+                    clear.data.boundary !== inventory.boundary
+                  )
+                    throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+                  entered = true;
+                  return observe(
+                    commit(inventory, async () => {
+                      try {
+                        await clear.data.assertHeld();
+                      } catch {
+                        throw new MeterFullRunRefusal('SOURCE_DRIFT_QUARANTINED');
+                      }
+                    }),
+                  );
+                },
+                (error) => error instanceof MeterFullRunRefusal,
+              )
+              .catch((error: unknown) => {
+                if (
+                  !entered &&
+                  error instanceof MeterInventoryAuthorityRefusal &&
+                  error.code === 'SOURCE_DRIFT_QUARANTINED'
+                )
+                  throw new MeterFullRunRefusal(error.code);
+                if (!entered && !(error instanceof MeterFullRunRefusal))
+                  throw new Error('SOURCE_CLEARANCE_UNCONFIRMED');
+                throw error;
+              });
+          })(),
+        ),
+      ),
+  };
+}
 
 export interface MeterFullRunStatus {
   runId: string;
@@ -95,9 +182,19 @@ export class MeterFullRun {
     const refusals = refusalsSchema.parse(explicitRefusals);
     if (!this.authority) throw new MeterFullRunRefusal('AUTHORITATIVE_INVENTORY_REQUIRED');
     let confirmed = false;
-    return this.authority
-      .withSealedInventory(runId, async (value) => {
-        const inventory = inventorySchema.parse(value);
+    const pending = new Set<Promise<unknown>>();
+    const observe = <T>(action: Promise<T>): Promise<T> => {
+      pending.add(action);
+      const settled = (): void => {
+        pending.delete(action);
+      };
+      // An authority may lose its response before a callback settles. Keep every
+      // result observed, and never turn that in-flight write into a refusal.
+      void action.then(settled, settled);
+      return action;
+    };
+    return quarantineClearAuthority(this.authority, observe)
+      .withSealedInventory(runId, async (inventory, assertHeld, preflight = false) => {
         const assets = [...inventory.assets].sort((a, b) =>
           a.assetId < b.assetId ? -1 : a.assetId > b.assetId ? 1 : 0,
         );
@@ -140,6 +237,7 @@ export class MeterFullRun {
                       >`
                 SELECT run_id, inventory_digest, operator_id FROM meter_full_run WHERE id = true FOR UPDATE`;
                       if (!gate) throw new MeterFullRunRefusal('FULL_RUN_GATE_MISSING');
+                      await assertHeld();
                       if (gate.run_id !== null) {
                         if (gate.run_id !== runId || gate.operator_id !== operatorId)
                           throw new MeterFullRunRefusal('FULL_RUN_CONFLICT');
@@ -161,6 +259,7 @@ export class MeterFullRun {
                   (SELECT 1 FROM inventory i WHERE i.outcome <> 'REFUSED' AND NOT EXISTS
                     (SELECT 1 FROM asset_usage_meter m WHERE m.asset_id = i."assetId" AND m.meter_source = 'LEDGER')) AS invalid`;
                       if (check.invalid) throw new MeterFullRunRefusal('FULL_RUN_INCOMPLETE');
+                      if (preflight) return runId;
                       await tx.$executeRaw`
                 INSERT INTO meter_full_run_asset(asset_id, organization_id, outcome, refusal)
                 SELECT "assetId", "organizationId", outcome, refusal FROM jsonb_to_recordset(${JSON.stringify(outcomes)}::jsonb)
@@ -183,6 +282,7 @@ export class MeterFullRun {
                           refusedCount: refused.size,
                         }),
                       });
+                      await assertHeld();
                       await tx.$executeRaw`UPDATE meter_full_run SET run_id = ${runId}, operator_id = ${operatorId},
                 inventory_digest = ${digest}, source_boundary = ${inventory.boundary}, activated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
                 WHERE id = true`;
@@ -192,26 +292,27 @@ export class MeterFullRun {
                     { timeoutMs: 30_000 },
                   );
                 } catch (error) {
+                  if (callbackReturned) throw new Error('FULL_RUN_UNCONFIRMED');
                   if (error instanceof MeterFullRunRefusal) throw error;
                   // Prisma cannot commit until our callback returns. Pool acquisition,
                   // statement errors and callback timeouts therefore prove refusal.
-                  if (!callbackReturned) throw new MeterFullRunRefusal('FULL_RUN_PRECOMMIT_FAILED');
-                  throw new Error('FULL_RUN_UNCONFIRMED');
+                  throw new MeterFullRunRefusal('FULL_RUN_PRECOMMIT_FAILED');
                 }
               },
             ),
         );
-        confirmed = true;
+        if (!preflight) confirmed = true;
         return appliedRun;
       })
       .then(
         (result) => {
-          if (!confirmed || result !== runId) throw new Error('FULL_RUN_UNCONFIRMED');
+          if (!confirmed || pending.size > 0 || result !== runId)
+            throw new Error('FULL_RUN_UNCONFIRMED');
           return result;
         },
         (error: unknown) => {
           // An owner fence/release error cannot erase a confirmed maintenance commit.
-          if (confirmed) throw new Error('FULL_RUN_UNCONFIRMED');
+          if (confirmed || pending.size > 0) throw new Error('FULL_RUN_UNCONFIRMED');
           throw error;
         },
       );

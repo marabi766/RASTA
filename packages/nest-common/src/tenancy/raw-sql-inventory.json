@@ -1282,29 +1282,8 @@
   },
   {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
-    "line": 1015,
-    "hash": "50d40cf945f194bdad9cf2420c8db438fd7e7adc6385555868c6e2506c6c95a8",
-    "occurrence": 0,
-    "decision": "platform-wide: insurance projection retry queue is a consumer-wide worklist keyed by source event or global asset; verified source controls final effect"
-  },
-  {
-    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 1053,
     "hash": "f3ca666feb4c4c55d5973f38bb00ace297b2eedb86ba3b55a83f86f2a4649d5c",
-    "occurrence": 0,
-    "decision": "platform-wide: insurance projection retry queue is a consumer-wide worklist keyed by source event or global asset; verified source controls final effect"
-  },
-  {
-    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
-    "line": 1071,
-    "hash": "9d5bebbaeb8b3dfe3e41b03356a9cf505ec3efce8bb20b8b72d64ff14331b975",
-    "occurrence": 0,
-    "decision": "platform-wide: insurance projection retry queue is a consumer-wide worklist keyed by source event or global asset; verified source controls final effect"
-  },
-  {
-    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
-    "line": 1095,
-    "hash": "118b03c64c0e2c7c3dab3411f30d2aa527e84aa07a27865c1e6dfbe15b9e8fb5",
     "occurrence": 0,
     "decision": "platform-wide: insurance projection retry queue is a consumer-wide worklist keyed by source event or global asset; verified source controls final effect"
   },
@@ -1342,6 +1321,41 @@
     "hash": "c57c92764d58b19d856c8670edf25e361e5e074ffa5b6b3cb18005b11e120b44",
     "occurrence": 0,
     "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 53,
+    "hash": "f3de2ed5b8f127467ab43c8c108898a6e93e8d328a101dd002f63aa853689b8a",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 70,
+    "hash": "19099147206fc506b6c576189f863bce18557f8ad7451d229d4dac5aeca4e51a",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 73,
+    "hash": "da1123b7c0889f43eac4972adf44f79c7782928f567fc81151f324f9abe7e402",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 95,
+    "hash": "d294b434b1e406d3d1aeb0ccf53a2337f818143ac5766b5571f4ac4be623ebe9",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 132,
+    "hash": "96dc57af4217d6b5ff78aca07d302a0b002da0f692ab2daf9b56d63159b07179",
+    "occurrence": 0,
+    "decision": "platform-wide: operator-only fleet source inventory and durable creation fence across physical assets and historical owners; no tenant-facing reads"
   },
   {
     "file": "services/fleet-service/src/prisma/prisma.service.ts",
@@ -3144,49 +3158,49 @@
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 52,
+    "line": 57,
     "hash": "535e7f3addffbb783f60820ec184f39357068ac54e9378ab420798929e465ad6",
     "occurrence": 0,
     "decision": "platform-wide: insertUsageEntry explicitly binds the validated envelope organization into each immutable quantity fact; no implicit tenant default"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 65,
+    "line": 70,
     "hash": "e5b93ed147ab653a54492de8490748cdc139c705e617e57664344f6f101f6194",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 93,
+    "line": 98,
     "hash": "2a15ae9f18702fdcf26e3ec40708c2b8d4e6f2515db312c071b3c6d1746f01d0",
     "occurrence": 0,
     "decision": "platform-wide: physical asset meter across historical owners; INSERT trigger determines mode under gate; never used for authorization"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 98,
+    "line": 103,
     "hash": "42e58ec22ca7ccd7e84c65c16d236ef49b063c66d0c9f04ac61d5566d98c2625",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 123,
+    "line": 128,
     "hash": "1e7f1260f602881d5c4413e6808c4ccbef71c3a98486ed631c76da8afb951a91",
     "occurrence": 0,
     "decision": "platform-wide: ADR-073 physical meter spans asset owners; asset-scoped lock, recomputation or update never authorizes or returns tenant facts to users"
   },
   {
     "file": "services/maintenance-service/src/maintenance/usage-meter.ts",
-    "line": 157,
+    "line": 162,
     "hash": "9685de3810212cfc8dad2935f95a7772a83e5a7b3d66dc2a66126c1bc1589742",
     "occurrence": 0,
     "decision": "platform-wide: calculateLegacyMeter computes numeric constants from the already locked physical meter; no database rows read"
   },
   {
     "file": "services/maintenance-service/src/maintenance/meter-reconcile.ts",
-    "line": 241,
+    "line": 387,
     "hash": "82bbdc127540f299a36cd166966b2a85dfd702a94122b6a0d970dfb0d6ce5373",
     "occurrence": 0,
     "decision": "has bound organization predicate"
@@ -3214,7 +3228,7 @@
   },
   {
     "file": "services/maintenance-service/src/maintenance/meter-reconcile.ts",
-    "line": 268,
+    "line": 323,
     "hash": "1601ab0120aeb71d6a1bf0bd8d7057fac5fd9200e9bfbcce10b7f610019c9b17",
     "occurrence": 0,
     "decision": "platform-wide: verified physical asset meter cutover under shared lock spans historical owners; tenant partition checked before source read"
@@ -3253,5 +3267,117 @@
     "hash": "0f27964faf72269df41699294b9bda7e15cd1ff98086989f211601a40e559465",
     "occurrence": 0,
     "decision": "platform-wide: operator-only sealed physical inventory and activation under exclusive rollout fence; source spans historical owners, no tenant-facing output or authorization"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 32,
+    "hash": "0e2449d8a34003295589628136d16990f15278486a46b6d0898512c23f2117b1",
+    "occurrence": 0,
+    "decision": "platform-wide: savepoint boundary rolls back all refused consumer effects before durable drift evidence commits"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 38,
+    "hash": "fd49d7e5abf50aa1b6c22c933cf128d1de28f07d5613c32cc526ae1a96a781ed",
+    "occurrence": 0,
+    "decision": "platform-wide: savepoint boundary rolls back all refused consumer effects before durable drift evidence commits"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 40,
+    "hash": "c4f56417e43508496ca48c9b0c51728b1c82d893346a2908039bafd815a41a52",
+    "occurrence": 0,
+    "decision": "platform-wide: bounded event-id quarantine records both owners only for platform activation hold; no tenant API"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 50,
+    "hash": "610ddc005bbbed497a27b968548bc1de348bbf39889f59d206cf63798b3c3345",
+    "occurrence": 0,
+    "decision": "platform-wide: locks the global source seal across refusal rollback or activation; never returns owner evidence to a tenant; transaction-local holder UUID binds exact arm/release transitions; no tenant reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 67,
+    "hash": "f0da4f5ff017f2a68333e9d0d2f1a08fd4e7188f920898d20a3ab04352574432",
+    "occurrence": 0,
+    "decision": "platform-wide: verifies the durable activation token in the singleton capacity gate under sealed source authority; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 73,
+    "hash": "79e325a0839ed6fd546e30e9d06f2a6fdede84f63ed7377627d251abad4398c4",
+    "occurrence": 0,
+    "decision": "platform-wide: durably arms or releases the activation barrier under sealed-run operator authority; blocks drift on transaction loss"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 81,
+    "hash": "1ce203053673e96a9fe4c6e1c8678b95dfec5a7372f26ac74696e20e81f45047",
+    "occurrence": 0,
+    "decision": "platform-wide: verifies the durable activation token in the singleton capacity gate under sealed source authority; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 92,
+    "hash": "e8e1e32ef788395750691c907e8195264589678b356e3f78098d22beba95d48a",
+    "occurrence": 0,
+    "decision": "platform-wide: durably arms or releases the activation barrier under sealed-run operator authority; blocks drift on transaction loss"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 68,
+    "hash": "0ef395e3a9273ec9560cd1d4e8340816db297902eb986edf6fb20a7ea2715cf6",
+    "occurrence": 0,
+    "decision": "platform-wide: checks bounded overflow and whether replay changed the first owner, under source/capacity locks; only a boolean reaches the owner-free metric, no tenant-facing evidence"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 70,
+    "hash": "9efdd4ec5e0b7fc85543483234c1fdcdfb3bff3551de86c5d0c18d15021f8671",
+    "occurrence": 0,
+    "decision": "platform-wide: detects bounded durable overflow or its permanent activation hold under source/capacity locks; no tenant-facing evidence"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/meter-inventory.ts",
+    "line": 119,
+    "hash": "723f63f9b47e17435d5db8aaef36b6c9289928bd90c5499b9829d46f8c5e495d",
+    "occurrence": 0,
+    "decision": "platform-wide: releases only the exact activation token under the source seal after a proven-unused callback; no tenant-facing reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 1181,
+    "hash": "ba2803215c7b7c30e31de594c222901adf28912e536818cf172db2878fa14383",
+    "occurrence": 0,
+    "decision": "platform-wide: least-recently-tried insurance sweep spans tenants with bounded batches; each decision rechecks under its asset lock"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 39,
+    "hash": "fe1e0f5c4a76c38a63222112542542527d1e880a8729bd3af23e8bcf5e2671d1",
+    "occurrence": 0,
+    "decision": "platform-wide: nonblocking singleton seal gate before any tenant effect; lock contention becomes bounded activation retry"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/drift-quarantine.ts",
+    "line": 125,
+    "hash": "ea0dc0618d4308a6f165a858c08fe2d12f401da0afc102c3d9f9f3f225fada36",
+    "occurrence": 0,
+    "decision": "platform-wide: bounded idempotent hashed event HOLD; closed cause in run_id, no owner or tenant reads"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 1141,
+    "hash": "4027f8227f7c8aa050ca5fc64076cb9a631f88e75ffb6641106f52dd29f704ce",
+    "occurrence": 0,
+    "decision": "platform-wide: parked-event attempt metadata and durable refusal history under the asset lock; original event identity/tenant/envelope preserved"
+  },
+  {
+    "file": "services/fleet-service/src/fleet/fleet.repository.ts",
+    "line": 1224,
+    "hash": "3c82e0806a896b55c01b043d4fe8c3eb2874520cf7d63d6a5ffa972dcb0efdc5",
+    "occurrence": 0,
+    "decision": "platform-wide: parked-event attempt metadata and durable refusal history under the asset lock; original event identity/tenant/envelope preserved"
   }
 ]

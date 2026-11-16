@@ -27,6 +27,25 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// Global operator source inventory, immutable once sealed. Not tenant-facing.
+model MeterInventorySeal {
+  id         Boolean @id
+  runId      String? @map("run_id")
+  operatorId String? @map("operator_id")
+  inventory  Json?
+  boundary   String?
+
+  @@map("meter_inventory_seal")
+}
+
+/// Immutable indexed pairs backing the global operator seal, never tenant-facing.
+model MeterInventorySealAsset {
+  assetId        String @id @map("asset_id")
+  organizationId String @map("organization_id")
+
+  @@map("meter_inventory_seal_asset")
+}
+
 // -----------------------------------------------------------------------------
 // Driver
 // -----------------------------------------------------------------------------

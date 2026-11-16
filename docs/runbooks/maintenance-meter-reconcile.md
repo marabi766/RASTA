@@ -87,6 +87,8 @@ recomputes the same set; it does not add deltas again. Existing LEDGER assets
 are never demoted by refusal. APPLIED is reported only after confirmed commit;
 APPLY_UNCONFIRMED means a lost transaction result may have committed: inspect
 and rerun verification, never assume LEGACY or an untouched counter.
+Unknown pool/statement failures before the callback returns are definite
+`APPLY_PRECOMMIT_FAILED` refusals; known refusals retain their named code.
 announceForAsset runs in tenant context after commit. ANNOUNCEMENT_UNCONFIRMED
 preserves the confirmed meter and can be retried by apply or the normal scan;
 previous announcements are not retracted. Review L < M with maintenance staff.
@@ -200,5 +202,225 @@ The singleton share lock remains held until each inserting fold commits,
 including `ON CONFLICT` on an existing meter. The concurrent-fold race test
 records a bounded synthetic measurement, not a production throughput guarantee
 or starvation proof. Schedule eventual activation in a maintenance window with
-usage consumers paused/drained; resume only after status confirms the marker.
+usage consumers and reconcile/preview runs paused/drained; resume only after status confirms the marker.
 Active schema-down refuses to remove this database fence.
+
+### Fleet source seal (operator primitive; activation remains disabled)
+
+`FleetMeterInventorySeal.seal(runId, operatorId)` enumerates all physical asset
+identities in fleet's replica, usage, assignments, availability, transfer fences,
+transfer releases and pending insurance, including historical owners and orphans.
+It refuses ambiguous ownership or more than 20,000 assets. One transaction takes
+SHARE locks on all seven source tables, locks the singleton gate, persists the
+inventory and boundary, and enqueues `FLEET_METER_INVENTORY_SEALED` on
+`rasta.fleet.v1` (platform stream `meter-inventory-seal`). The global audit carries
+only the digest, boundary, count, run and configured operator, never the inventory.
+
+The durable database fence covers INSERT and UPDATE from old images, direct SQL,
+replication and future writers on these seven tables. Once sealed, new physical
+asset identities refuse `SOURCE_INVENTORY_SEALED`; existing identities may continue
+writing. Missing gates and non-READ-COMMITTED writes refuse. The cutover must pause
+and drain creation, transfer and refresh writers before sealing (PM option 1),
+including asset-sync originals, `.retry` refreshes and late creation reconciliation.
+This deliberately blocks future creation
+until a later reviewed protocol can coordinate reopening with maintenance; this
+slice provides no release, expiry or automatic activation. Schema-down refuses an
+active source seal. Do not operate this primitive in production yet.
+
+The fence binds the asset/organization pair through indexed, immutable
+`meter_inventory_seal_asset` rows. Owner updates and inserts under another owner
+refuse `SOURCE_OWNER_DRIFT`, including a replica INSERT for a known orphan.
+Historical rows, including foreign-owner parked insurance, may update non-identity
+fields. An UPDATE preserving both the asset key and organization is allowed;
+INSERTs and every identity change must match the sealed pair. The parked sweep
+can count attempts and mark rows due without changing their accepted identity.
+Sealing refuses immediately with `SOURCE_WRITERS_ACTIVE` when a source writer
+holds conflicting locks; drain writers and retry the same run. Replay takes no
+source-table locks. The operator transaction must use READ COMMITTED.
+The owner-fence migration refuses an already-active legacy seal as
+`SOURCE_SEAL_UPGRADE_REFUSED`: its ownership may already have drifted. Active down
+refuses `SEALED_SOURCE_ROLLBACK_REFUSED`; no automatic repair or reopening exists.
+
+Before applying or rolling back `20261113220000_meter_inventory_owner_fence`,
+pause all fleet source writers (consumers, parked sweep, API commands and seeds),
+seal/replay operators, seal-membership writers (`meter_inventory_seal_asset`),
+status readers and other sessions touching `meter_inventory_seal`, including
+autovacuum and concurrent migration/maintenance
+sessions; wait for every lock holder to drain. Its existing ACCESS EXCLUSIVE NOWAIT
+gate lock conflicts with every table lock, including plain SELECT and FOR SHARE. Keep that applied
+migration unchanged to preserve recorded checksums; a later migration cannot fix
+its earlier lock acquisition. A refusal aborts the entire transaction: retry only
+after draining, never bypass the lock. The identity-update follow-up instead waits
+up to `lock_timeout = '5s'` for the gate; timeout still aborts atomically. Use the
+same drain procedure for that migration: INSERTs and UPDATEs on all seven source
+tables (`asset_ref`, `usage_record`, `assignment`, `availability_window`,
+`asset_transfer_fence`, `asset_transfer_release`, `insurance_pending_verification`) queue
+for up to 5s, including the parked sweep and consumers. Seal/replay/status
+operators and seal-membership writers also queue. Allow for request timeouts
+and consumer retries if accepting that pause instead of draining.
+
+Malformed source rows refuse `SOURCE_INVENTORY_MALFORMED`; malformed stored inventory
+refuses `SOURCE_SEAL_INVALID`. Pool, statement and callback failures proven before
+commit refuse `SOURCE_SEAL_PRECOMMIT_FAILED`. Ambiguous or post-callback failures
+remain `SOURCE_SEAL_UNCONFIRMED`; no failure implies success. The mode trigger pins
+`search_path` to `pg_catalog, pg_temp`; its down migration refuses an active full
+run or any LEDGER meter (`ACTIVE_METER_MODE_ROLLBACK_REFUSED`).
+
+Replay the SAME run and operator after `SOURCE_SEAL_UNCONFIRMED`: it re-serves the
+immutable pair inventory after a lost commit response. A different run
+or operator refuses `SOURCE_SEAL_CONFLICT`. Ambient request/service contexts are
+refused. Operator identity is configured and self-asserted, as for per-asset apply.
+A REST authority adapter, durable pre-activation per-asset progress/refusals,
+reconciliation/reporting and the explicit activation CLI remain separate work.
+Fleet sealing proves its own source inventory; it does not attest an undrained
+asset-service stream. That cross-service completeness check remains required
+before wiring the production authority.
+
+### Post-seal drift: terminal consumer classification (FU-352 first slice)
+
+The asset-sync replica write maps the database's exact `SOURCE_OWNER_DRIFT` and
+`SOURCE_INVENTORY_SEALED` statement refusals to terminal `UnprocessableEventError`.
+Creation (including a known orphan), transfer and authoritative refresh all use
+this write. The transaction rolls back its processed marker, replica changes and
+outbox; the consumer sends the original event to `rasta.fleet.v1.dlq` with that
+specific reason after one attempt. The replay tool refuses both reasons as
+`REASON_NOT_REPLAYABLE`; an independently delivered `.retry` event meeting the
+same fence also refuses immediately. Commit-response failures are not classified
+by this statement-only mapper.
+
+The fleet-owned `meter_drift_quarantine` now retains terminal drift from creation,
+transfer, refresh, `.retry`, insurance parking and the parked sweep. It stores the
+event ID, asset, sealed owner (null for an unknown asset), named owner, reason,
+sealed run and database first-seen time. Identifier evidence is bounded to 256
+UTF-8 bytes per field; oversized evidence refuses persistence and enters bounded retry/DLQ handling. Entries are immutable and idempotent per
+event ID, asset, reason and run; conflicting reuse refuses `SOURCE_DRIFT_EVENT_CONFLICT`.
+The first named owner stays fixed; changed-owner redelivery increments `rasta_drift_evidence_owner_changes_total` only after confirmed commit, without owner labels. All entries are
+unresolved until the separate operator reconciliation slice exists.
+
+Atomicity uses a savepoint: fleet takes the seal's share lock before the event's
+savepoint, rolls back every refused effect (including marker/outbox) to that
+savepoint, then commits only quarantine evidence. The lock survives that rollback.
+The sweep also takes its asset lock before the savepoint, so competing sweeps
+remain serialized through refusal cleanup. For sweep APPLY refusals, quarantine
+evidence and parked-row removal commit
+together; the named outcome is `QUARANTINED`. The original processed marker stays,
+and later sweeps do not ask the source again for that row. Failed removal rolls
+back the evidence too.
+The terminal drift reason is raised only after confirmed quarantine commit.
+Non-fence statement failures use normal bounded retries and `MAX_RETRIES_EXCEEDED`.
+Lost commit responses are `SOURCE_WRITE_UNCONFIRMED`; failed quarantine persistence
+remains unresolved. Both use bounded backoff, an error log with a code-only cause,
+and `rasta_consumer_handling_failures_total`, then the existing exhaustion DLQ.
+Acknowledgement follows confirmed DLQ publication; replay must reconcile the marker
+or evidence first, since an unconfirmed write may have committed. Missing DLQ
+configuration or a failed send propagates instead of acknowledging without evidence.
+The global durable cap is 10,000 entries, serialized under `meter_drift_capacity`;
+identical replay is checked before the activation token and cap. Overflow refuses
+`SOURCE_DRIFT_QUARANTINE_FULL`; no eviction.
+Missing capacity, stale transaction isolation or wrong-run inserts also refuse.
+An exhaustion DLQ is transport evidence, not proof that fleet quarantine is clear.
+Production activation stays unwired pending the separate durable-hold, token
+recovery and evidence-reconciliation obligations (FU-355).
+
+`MeterFullRun.activate` requires `withQuarantineClear` on the existing trusted
+`MeterInventoryAuthority`, including replay. Fleet's clearance primitive takes the
+exclusive seal lock, checks READ COMMITTED, the exact run/boundary, readable
+capacity and zero unresolved entries, and first commits a durable activation token under those locks. It then holds
+the exclusive seal lock through the activation
+callback's settlement. Quarantine inserts refuse `SOURCE_ACTIVATION_HELD` while
+that token exists, even if the live transaction times out or loses its connection.
+Known local preconditions are checked before arming the token. A callback that never
+started, or a proven maintenance refusal, releases its own token in a separate
+transaction. An uncertain outcome retains the token for operator recovery. Maintenance also requires a live `assertHeld` capability inside its transaction
+and before its final marker write. An expired callback/transaction refuses.
+The proof is scoped to that callback; it cannot be cached
+or reused as a certificate snapshot. Missing, stale, malformed or unreadable
+proof refuses `SOURCE_DRIFT_QUARANTINED`. Infrastructure failure before proof delivery
+reports `SOURCE_CLEARANCE_UNCONFIRMED`, including a lost tx1 response. Both lock orders are covered against
+PostgreSQL: earlier drift is quarantined before activation reads; earlier
+activation excludes drift until its callback settles. The REST channel is not
+wired: a future reviewed adapter must preserve this lock-through-commit contract,
+including failure and cancellation, before production activation is permitted.
+No cross-service table access or new trust path is introduced.
+
+Drain consumers, sweeps, seal/replay/status operators and membership writers before
+applying/downing `20261114120000_meter_drift_quarantine`; its gate lock waits at
+most 5s. Down refuses an active seal or any retained evidence with
+`ACTIVE_DRIFT_QUARANTINE_ROLLBACK_REFUSED`. Operator reconciliation/clearing, REST
+authority, activation CLI, durable progress and versioned reopening remain next.
+FU-353 (#1136 r1 L1/L2/L3) was completed in #1141.
+
+Per-asset apply refuses oversized snapshots as `SNAPSHOT_NOT_AUDITABLE` and invalid
+post-lock audit payloads as `CUTOVER_AUDIT_INVALID`; neither is an ambiguous commit.
+
+Overflow evidence is platform-only: inspect `meter_drift_overflow` and
+`meter_drift_capacity.overflow_count` through the fleet operator database channel,
+never a tenant endpoint. `SOURCE_DRIFT_QUARANTINE_FULL` is terminal only after its
+row commits; Kafka then publishes the envelope to DLQ. The quarantine retains
+10,000 fixed rows; overflow retains the latest 10,000 rows, one per event id,
+evicting oldest rows under the capacity lock in the same commit as their replacement.
+Identifiers remain byte-bounded. The permanent counter saturates at bigint maximum
+and bars activation even after an overflow row is evicted. This counts admissions,
+including redelivery after eviction, not lifetime distinct events. Export evidence
+before its bounded window rolls; clearing and reconciliation remain deferred.
+
+The sweep orders due rows by least recently tried. A failed decision records an
+attempt and backoff in its own transaction, checking the observed attempt version
+under the asset lock. Only attempt metadata may advance with a missing gate;
+identity and envelope changes still refuse. Exhaustion uses `PARKED_VERIFICATION_EXHAUSTED`; failed terminal
+cleanup cannot roll back the separately committed attempt.
+
+Retention alarm: `RastaConsumerLag` fires for nonzero lag sustained for 5 minutes.
+Require that threshold to remain below one quarter of the **shortest effective**
+source/retry topic retention, and recover or export evidence before retention expires.
+Verify deployed broker/topic overrides; offset lag alone does not measure record age.
+
+Activation contention and failed quarantine persistence use at least eight attempts,
+with seven pauses of at least 10 seconds (70 seconds, beyond tx2's 30-second limit
+plus tx1/pool/release time). Seal contention refuses immediately and retries.
+Exhaustion first commits a `SOURCE_DRIFT_HOLD` in bounded platform overflow:
+`event_id = HOLD:<SHA-256(event id)>`, `asset_id = SHA-256(asset id or event id)`;
+no owner values are copied. The permanent overflow counter bars activation.
+A failed hold commit rethrows without acknowledging or publishing to DLQ.
+This consumer handles each partition serially: `INSPECTION_FAILED` and
+`INSURANCE_EXPIRED` on that partition share the bounded wait; reordering safety
+events would require a separately reviewed consumer design. A definite authority
+`SOURCE_DRIFT_QUARANTINED` remains named; infrastructure stays unconfirmed.
+
+Only seal-query `55P03`/NOWAIT, `SOURCE_FENCE_MISSING`, refused callbacks and
+failures to commit their evidence enter this window. Ordinary pool maxWait
+(`P2028`), connection (`P1001`), lock and statement timeouts retain their original
+error and ordinary retry budget: without a refusal, no HOLD or counter bump.
+A missing seal row sends **every event**, including `INSPECTION_FAILED`, through
+at least 70 seconds, a HOLD and the DLQ. Worst-case partition pause is
+**70 seconds × backlog**, plus transaction and DLQ time.
+
+A refusal policy is retained within one live delivery. Parked rows try to latch
+`reason = SOURCE_REFUSAL_SEEN`; this survives restarts only if that write commits.
+Known gaps: redelivery loses the live policy, a held seal can block the parked
+latch, and a concurrent attempt-version mismatch can discard the observed refusal.
+Later ordinary exhaustion on these paths can publish to DLQ without a HOLD.
+HOLD `run_id` currently stores a cause code (`SOURCE_REFUSAL_UNCONFIRMED` or
+`SOURCE_INFRASTRUCTURE_DURING_REFUSAL`), which can collide with operator run IDs;
+only the first cause for an event is retained. Durable history and cause separation
+remain follow-ups.
+
+Only fleet asset-sync opts into an extended KafkaJS `rebalanceTimeout`, computed
+from its startup-checked transaction budget, seven extra attempts, a HOLD and
+seven 10-second pauses, rounded up to a minute (300 seconds at defaults).
+Other EventConsumer groups use the KafkaJS default 60 seconds. A rebalance during
+asset-sync's window can stall **all partitions in that group**, including unrelated
+inspection events. The 60-second session timeout is unchanged; heartbeats bracket
+attempts, pauses and upstream calls. The below-279-second handler budget excludes
+DLQ publication: producer retries (eight) and the default 30-second request timeout
+can exceed the remaining margin. Completion within the rebalance timeout is not
+guaranteed; outages, deploys and crashes can redeliver.
+
+The capacity token guard accepts only NULL-to-holder and matching-holder-to-NULL
+transitions with an unchanged overflow count. The authority supplies the exact
+holder UUID through transaction-local `rasta.meter_activation_token`; a bare runtime
+UPDATE, token replacement, mismatched holder or reused pooled transaction refuses.
+This is an internal holder protocol, not a new authorization boundary: arbitrary
+runtime SQL that deliberately supplies the matching token can invoke the protocol.
+Ambiguous activation outcomes retain the token. Operator reconciliation/clearing,
+REST authority wiring, CLI, durable progress and reopening remain future work.

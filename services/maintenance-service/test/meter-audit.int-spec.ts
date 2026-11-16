@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { canonicalMeterCertificate, type EventEnvelope } from '@rasta/contracts';
+import { UsageMeterRefusal } from '../src/maintenance/usage-meter';
 import { MeterReconcile } from '../src/maintenance/meter-reconcile';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { cleanup, id, newPrisma, seedAsset, seedMeter, tenants } from './helpers';
@@ -81,7 +82,8 @@ describe('meter transition audit boundary', () => {
       .update(canonicalMeterCertificate(f.certificate))
       .digest('hex');
     expect(await f.command.reportAsset(org.a, f.assetId, new Date(), true)).toMatchObject({
-      refusal: 'SOURCE_READ_FAILED',
+      outcome: 'REFUSED',
+      refusal: 'SNAPSHOT_NOT_AUDITABLE',
     });
     expect(await f.rows()).toHaveLength(0);
     expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
@@ -94,16 +96,35 @@ describe('meter transition audit boundary', () => {
     });
     expect(await f.rows()).toHaveLength(1);
   });
-  it('lost commit response replays without another transition', async () => {
+  it('invalid post-lock audit state is a proven refusal, with no staged transition', async () => {
+    const f = await fixture();
+    await prisma.client.assetUsageMeter.update({
+      where: { assetId: f.assetId },
+      data: { lastUsageRecordId: 'x'.repeat(65) },
+    });
+    expect(await f.command.reportAsset(org.a, f.assetId, new Date(), true)).toMatchObject({
+      outcome: 'REFUSED',
+      refusal: 'CUTOVER_AUDIT_INVALID',
+    });
+    expect(await f.rows()).toHaveLength(0);
+    expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
+    expect((await repository.findMeter(f.assetId))!.hourMeter.toString()).toBe('100');
+  });
+  it.each([
+    new Error('lost commit response'),
+    new UsageMeterRefusal('ENTRY_CONFLICT'),
+    new Error('SOURCE_LEDGER_MISMATCH'),
+  ])('lost commit response (%s) replays without another transition', async (error) => {
     const f = await fixture();
     const transaction = prisma.transaction.bind(prisma);
     const lost = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
       await transaction(fn, options);
-      throw new Error('lost commit response');
+      throw error;
     });
     try {
       expect(await f.command.reportAsset(org.a, f.assetId, new Date(), true)).toMatchObject({
         outcome: 'UNCONFIRMED',
+        refusal: 'APPLY_UNCONFIRMED',
       });
     } finally {
       lost.mockRestore();
@@ -132,6 +153,32 @@ describe('meter transition audit boundary', () => {
       rollback.mockRestore();
     }
     expect(inTransaction).toBe(1);
+    expect(await f.rows()).toHaveLength(0);
+    expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
+    expect((await repository.findMeter(f.assetId))!.hourMeter.toString()).toBe('100');
+  });
+  it.each(['statement', 'pool'])('refuses pre-callback %s failure', async (failure) => {
+    const f = await fixture();
+    const enqueue = MaintenanceRepository.prototype.enqueueEvent;
+    const fault =
+      failure === 'pool'
+        ? jest.spyOn(prisma, 'transaction').mockRejectedValueOnce(new Error('pool wait'))
+        : jest
+            .spyOn(MaintenanceRepository.prototype, 'enqueueEvent')
+            .mockImplementationOnce(async function (this: MaintenanceRepository, tx, input) {
+              await enqueue.call(this, tx, input);
+              await tx.$executeRaw`SELECT 1 / 0`;
+              throw new Error('unreachable');
+            });
+    try {
+      expect(await f.command.reportAsset(org.a, f.assetId, new Date(), true)).toMatchObject({
+        outcome: 'REFUSED',
+        refusal: 'APPLY_PRECOMMIT_FAILED',
+        sourceComplete: false,
+      });
+    } finally {
+      fault.mockRestore();
+    }
     expect(await f.rows()).toHaveLength(0);
     expect((await repository.findMeter(f.assetId))!.meterSource).toBe('LEGACY');
     expect((await repository.findMeter(f.assetId))!.hourMeter.toString()).toBe('100');

@@ -1656,6 +1656,42 @@ export const REVIEWED_LITERALS = [
 ];
 export const REVIEWED_FUNCTIONS = [
   {
+    service: 'fleet-service',
+    name: 'meter_drift_evidence_guard',
+    sha256: '9506b9030af2324f03ee0cb46fe07d0fc80aafcd0930eac00964a8f516bddefe',
+    why: 'Clock-free monotonic capacity guard and locked first-owner replay canonicalization; trusted TG_TABLE_SCHEMA is identifier-quoted, no EXECUTE or timestamp conversion.',
+  },
+  {
+    service: 'fleet-service',
+    name: 'meter_drift_quarantine_guard',
+    sha256: '517100e61d8b67db49d492541accbc2a6d1c93caf994388b03d705216c7b0975',
+    why: 'Clock-free bounded append-only quarantine and durable activation barrier; trusted TG_TABLE_SCHEMA is identifier-quoted in schema-local set_config; no EXECUTE, expiry or timestamp conversion.',
+  },
+  {
+    service: 'fleet-service',
+    name: 'meter_inventory_creation_fence',
+    sha256: 'ebbe03e0f2ceda9a861f72c5cf2ebd7848873c0e8448eb49584a6bc2c3496b5d',
+    why: 'Clock-free indexed asset/owner fence; exact attempt-metadata-only updates remain possible with a missing gate; other unchanged UPDATE identities require the gate; schema-local set_config quotes trusted TG_TABLE_SCHEMA; assetId is a JSON data key, never SQL; no EXECUTE.',
+  },
+  {
+    service: 'fleet-service',
+    name: 'meter_inventory_seal_fixed',
+    sha256: 'cf25c8340aa7daa17fec3cab7d0b3819cfd2138d867522fad43f247964f2b196',
+    why: 'Clock-free atomic membership replacement from NEW.inventory; trusted quoted schema path; JSON keys are data, no EXECUTE.',
+  },
+  {
+    service: 'fleet-service',
+    name: 'meter_inventory_seal_asset_fixed',
+    sha256: 'cade9c93ed72039f534588aea23341b1c365703e2e380506f0943c89da26a927',
+    why: 'Clock-free immutable membership guard; trusted quoted schema path and gate row lock; no EXECUTE.',
+  },
+  {
+    service: 'maintenance-service',
+    name: 'set_usage_meter_source',
+    sha256: '3a874722030f2d13b1053711c34c1d1094445c5fd93d751492c29e123b547b3f',
+    why: 'Clock-free meter_source assignment; schema-local set_config quotes trusted TG_TABLE_SCHEMA; header pins catalog/temp and restores caller path; no EXECUTE.',
+  },
+  {
     service: 'construction-service',
     name: 'bid_guard',
     sha256: 'a6dcf942e2d423831d7ec99110948148b66e8a8c6596eb0eb1b9ddc611e03b0d',

@@ -194,6 +194,14 @@ export const consumerCrashesTotal = new Counter({
   registers: [registry],
 });
 
+/** Closed outcome only; no event ids, owners, query text or error-message labels. */
+export const consumerHandlingFailuresTotal = new Counter({
+  name: 'rasta_consumer_handling_failures_total',
+  help: 'Unconfirmed handling attempts entering bounded retry or DLQ reconciliation',
+  labelNames: ['service', 'topic'] as const,
+  registers: [registry],
+});
+
 /** Only constructed (enabled), declared consumer groups export this gate. */
 export const consumerExpected = new Gauge({
   name: 'rasta_consumer_expected',
@@ -215,6 +223,12 @@ export const eventValidationFailuresTotal = new Counter({
   name: 'rasta_event_validation_failures_total',
   help: 'Events that failed schema validation',
   labelNames: ['service', 'topic', 'event_name', 'phase'] as const,
+  registers: [registry],
+});
+
+export const driftEvidenceOwnerChangesTotal = new Counter({
+  name: 'rasta_drift_evidence_owner_changes_total',
+  help: 'Committed drift evidence duplicates with a changed live owner',
   registers: [registry],
 });
 

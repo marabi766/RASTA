@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
+  handlingFailureCause,
   allocateStreamSeqSql,
   buildOutboxRow,
   createSystemContext,
@@ -17,6 +18,14 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { SERVICE_NAME } from '../config/env';
 import { Prisma } from '../generated/prisma';
 import type { InsuranceCover } from './dispatch-blocks';
+import { sourceFenceRefusal } from './source-fence-refusal';
+import {
+  quarantineTransaction,
+  persistSourceDriftHold,
+  type SourceHoldCause,
+  SourceDriftRefusal,
+  type SourceDriftCleanup,
+} from './drift-quarantine';
 import type {
   AvailabilityQuery,
   ListAssignmentsQuery,
@@ -50,8 +59,31 @@ export class FleetRepository {
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
     options?: { timeoutMs?: number; maxWaitMs?: number },
+    sourceEventId?: string,
+    sourceDriftCleanup?: SourceDriftCleanup,
   ): Promise<T> {
+    if (sourceEventId)
+      return quarantineTransaction(
+        (work) => this.prisma.transaction(work, options),
+        sourceEventId,
+        fn,
+        sourceDriftCleanup,
+      );
     return this.prisma.transaction(fn, options);
+  }
+
+  persistDriftHold(
+    eventId: string,
+    assetId: string,
+    cause: SourceHoldCause,
+    tx?: ExtendedPrismaClient,
+  ): Promise<void> {
+    return persistSourceDriftHold(
+      (work) => (tx ? work(tx) : this.prisma.transaction(work)),
+      eventId,
+      assetId,
+      cause,
+    );
   }
 
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {
@@ -1020,18 +1052,27 @@ export class FleetRepository {
     const patch = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
 
     return runUnscoped('asset reference replica is platform-wide, written from events', () =>
-      tx.assetRef.upsert({
-        where: { id },
-        create: {
-          id,
-          organizationId: data.organizationId,
-          status: data.status ?? 'REGISTERED',
-          ...patch,
-          sourceEvent,
-          syncedAt: new Date(),
-        },
-        update: { ...patch, sourceEvent, syncedAt: new Date() },
-      }),
+      tx.assetRef
+        .upsert({
+          where: { id },
+          create: {
+            id,
+            organizationId: data.organizationId,
+            status: data.status ?? 'REGISTERED',
+            ...patch,
+            sourceEvent,
+            syncedAt: new Date(),
+          },
+          update: { ...patch, sourceEvent, syncedAt: new Date() },
+        })
+        .catch((error: unknown) => {
+          // Shared by ordinary creation/transfer, authoritative refresh and the parked sweep.
+          // The transaction still rejects: marker, effects and outbox roll back together.
+          const refusal = sourceFenceRefusal(error);
+          throw refusal
+            ? new SourceDriftRefusal(refusal.reason, id, data.organizationId)
+            : new Error('SOURCE_WRITE_FAILED', { cause: handlingFailureCause(error) });
+        }),
     );
   }
 
@@ -1059,20 +1100,27 @@ export class FleetRepository {
     // Awaited inside the context: a Prisma query is lazy and would otherwise run
     // after the context closed (test/helpers.ts `asActor`).
     await runWithContext(context, async () => {
-      await tx.insurancePendingVerification.create({
-        data: {
-          eventId: row.eventId,
-          assetId: row.assetId,
-          // Stated, and held by the guard to the context's tenant: the same one.
-          organizationId: row.organizationId,
-          envelope: row.envelope as Prisma.InputJsonValue,
-          messageKey: row.messageKey,
-          sourceTopic: row.sourceTopic,
-          sourcePartition: row.sourcePartition,
-          sourceOffset: row.sourceOffset,
-          reason: row.reason,
-        },
-      });
+      await tx.insurancePendingVerification
+        .create({
+          data: {
+            eventId: row.eventId,
+            assetId: row.assetId,
+            // Stated, and held by the guard to the context's tenant: the same one.
+            organizationId: row.organizationId,
+            envelope: row.envelope as Prisma.InputJsonValue,
+            messageKey: row.messageKey,
+            sourceTopic: row.sourceTopic,
+            sourcePartition: row.sourcePartition,
+            sourceOffset: row.sourceOffset,
+            reason: row.reason,
+          },
+        })
+        .catch((error: unknown) => {
+          const refusal = sourceFenceRefusal(error);
+          throw refusal
+            ? new SourceDriftRefusal(refusal.reason, row.assetId, row.organizationId)
+            : new Error('SOURCE_WRITE_FAILED', { cause: handlingFailureCause(error) });
+        });
     });
   }
 
@@ -1093,6 +1141,7 @@ export class FleetRepository {
         tx.$queryRaw<RawParkedInsurance[]>`
           SELECT event_id, asset_id, organization_id, envelope, message_key, source_topic,
                  source_partition, source_offset, reason, attempts,
+                 reason = 'SOURCE_REFUSAL_SEEN' AS refusal_seen,
                  (COALESCE(next_attempt_at <= now(), false)
                   OR (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
                       AND (last_attempt_at IS NULL
@@ -1113,6 +1162,7 @@ export class FleetRepository {
           sourceOffset: row.source_offset,
           reason: row.reason,
           attempts: row.attempts,
+          refusalSeen: row.refusal_seen,
           due: row.due,
         }
       : null;
@@ -1136,8 +1186,8 @@ export class FleetRepository {
 
   /**
    * The sweep's batch: made due by a transfer, or parked and last tried at least
-   * `minAgeSeconds` ago, by the database's clock. Those a transfer made due
-   * first, then the oldest.
+   * `minAgeSeconds` ago, by the database's clock. Least recently tried first,
+   * so transfers cannot keep a failing prefix ahead of another tenant.
    */
   async listDueParkedInsurance(
     minAgeSeconds: number,
@@ -1152,7 +1202,7 @@ export class FleetRepository {
               OR (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
                   AND (last_attempt_at IS NULL
                        OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int)))
-           ORDER BY next_attempt_at IS NULL, first_seen_at, event_id
+           ORDER BY last_attempt_at NULLS FIRST, first_seen_at, event_id
            LIMIT ${limit}`,
     );
     return rows.map((row) => ({ eventId: row.event_id, assetId: row.asset_id }));
@@ -1166,6 +1216,7 @@ export class FleetRepository {
     tx: ExtendedPrismaClient,
     eventId: string,
     reason: string,
+    refusalSeen = false,
   ): Promise<number> {
     const rows = await runUnscoped(
       'a parked insurance event is decided by machine, whichever tenant parked it',
@@ -1173,7 +1224,8 @@ export class FleetRepository {
         tx.$queryRaw<{ attempts: number }[]>`
           UPDATE insurance_pending_verification
              SET attempts = attempts + 1, last_attempt_at = now(), next_attempt_at = NULL,
-                 reason = ${reason}
+                 reason = CASE WHEN reason = 'SOURCE_REFUSAL_SEEN' OR ${refusalSeen}
+                   THEN 'SOURCE_REFUSAL_SEEN' ELSE ${reason} END
            WHERE event_id = ${eventId}
           RETURNING attempts`,
     );
@@ -1275,6 +1327,7 @@ export interface ParkedInsurance {
   sourceOffset: string | null;
   reason: string;
   attempts: number;
+  refusalSeen: boolean;
   /** Whether the sweep may try it now (see `findParkedInsurance`). */
   due: boolean;
 }
@@ -1290,6 +1343,7 @@ interface RawParkedInsurance {
   source_offset: string | null;
   reason: string;
   attempts: number;
+  refusal_seen: boolean;
   due: boolean;
 }
 

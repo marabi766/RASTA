@@ -183,6 +183,28 @@ const reviewedClockTemplates: readonly {
   template: string;
   expressions: string | null;
 }[] = [
+  // FU-347: fixed source-enumeration probes; expiry is never used for eligibility.
+  {
+    file: 'services/fleet-service/test/meter-inventory.int-spec.ts',
+    template: '17b56026d6577c8422e250cbb52aaddaad8dc38ca82742c517f8a2afdded1bf5',
+    expressions: 'b8c36742bb6ac728ed6afb3b1299584fbae770161b4caa1b169a2d7d872fd946',
+  },
+  {
+    file: 'services/fleet-service/test/meter-inventory.int-spec.ts',
+    template: 'bf77c2896555320aac0263fbe36fab009542523115f75cd5a33856dea4822e89',
+    expressions: '6e1a34a99a485b681ccc57cb1dd36e436805edbc01ff45a5f26779105170437a',
+  },
+  // FU-356: private liveness fixtures use DB time minus one second, with bound event IDs.
+  {
+    file: 'services/fleet-service/test/meter-inventory.int-spec.ts',
+    template: 'ba6669eb47505d8ba9fcced4687d44ccfdeae5e1ff27c99c834256369f0becf3',
+    expressions: 'c1d9fb302a5b858730f0ac7656872d2a5edd9f4952204457e7f12691769ad780',
+  },
+  {
+    file: 'services/fleet-service/test/meter-inventory.int-spec.ts',
+    template: '1f3bda7aade7427544a72b6b30833ff3507e4d2417eeed4e2631e798c784e535',
+    expressions: 'deb0df59aeb84b4549d6ed060ee3c21343e20772c2c72bb71531cfd7dba3a8d2',
+  },
   // FU-170: isolated deadline probes; table choice and fixed expired instant are bound.
   {
     file: 'services/identity-service/test/timestamp-deadlines.int-spec.ts',

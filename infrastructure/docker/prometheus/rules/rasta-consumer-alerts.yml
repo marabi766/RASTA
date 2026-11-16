@@ -59,7 +59,9 @@ groups:
         annotations:
           summary: Consumer {{ $labels.group }} has persistent lag on {{ $labels.topic }}
           description: The enabled expected consumer has lagged for five minutes. Inspect
-            all assigned partitions; never skip or shift an offset.
+            all assigned partitions; never skip or shift an offset. Keep this five-minute
+            threshold below one quarter of the shortest effective source/retry topic
+            retention, including deployed overrides; recover before retention expires.
           runbook: docs/runbooks/consumer-crash-loop.md
       - alert: RastaConsumerOffsetsMissing
         expr: ( ( (rasta:consumer_expected:enabled unless on (group, topic)
