@@ -415,6 +415,46 @@ describe('full-run marker / first-meter serialization (real PostgreSQL)', () => 
     expect(await eventRows()).toHaveLength(1);
   });
   it.each(
+    ['inactive', 'replay'].flatMap((phase) =>
+      [
+        new Error('lost preflight commit response'),
+        new Prisma.PrismaClientKnownRequestError('preflight commit failed', {
+          code: 'P2034',
+          clientVersion: 'test',
+        }),
+      ].map((error) => ({ phase, error })),
+    ),
+  )(
+    'refuses read-only $phase preflight commit failures before arming',
+    async ({ phase, error }) => {
+      if (phase === 'replay') await command().activate(runId, actor, []);
+      const clearance = jest.fn();
+      const c = new MeterFullRun(prisma, {
+        withQuarantineClear: async (heldRun, boundary, fn) => {
+          clearance();
+          return fn({ runId: heldRun, boundary, clear: true, assertHeld: async () => undefined });
+        },
+        withSealedInventory: async (_heldRun, fn) => fn(inventory([])),
+      });
+      const transaction = prisma.transaction.bind(prisma);
+      const spy = jest.spyOn(prisma, 'transaction').mockImplementationOnce(async (fn, options) => {
+        await transaction(fn, options);
+        throw error;
+      });
+      try {
+        await expect(c.activate(runId, actor, [])).rejects.toEqual(
+          new MeterFullRunRefusal('FULL_RUN_PRECOMMIT_FAILED'),
+        );
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(clearance).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await c.status(runId, actor)).toEqual(phase === 'replay' ? expect.anything() : null);
+      expect(await eventRows()).toHaveLength(phase === 'replay' ? 1 : 0);
+    },
+  );
+  it.each(
     ['write', 'replay'].flatMap((phase) =>
       [
         new MeterFullRunRefusal('FULL_RUN_CONFLICT'),
