@@ -1,4 +1,4 @@
-import { normalizeRoute } from './metrics';
+import { driftEvidenceOwnerChangesTotal, normalizeRoute, registry } from './metrics';
 
 /**
  * Route normalisation is what keeps Prometheus from being taken down by this
@@ -39,5 +39,40 @@ describe('normalizeRoute', () => {
 
   it('does not mistake a hyphenated route segment for an id', () => {
     expect(normalizeRoute('/v1/maintenance-requests/due')).toBe('/v1/maintenance-requests/due');
+  });
+});
+
+describe('driftEvidenceOwnerChangesTotal', () => {
+  const metricName = 'rasta_drift_evidence_owner_changes_total';
+
+  it('counts two redelivery occurrences on the single fleet-service series with a compatible inc spy', async () => {
+    const before = await registry.getSingleMetric(metricName)?.get();
+    const beforeValue =
+      before?.values.find(({ labels }) => labels.service === 'fleet-service')?.value ?? 0;
+    const increment = jest.spyOn(driftEvidenceOwnerChangesTotal, 'inc');
+    try {
+      driftEvidenceOwnerChangesTotal.inc();
+      driftEvidenceOwnerChangesTotal.inc();
+
+      expect(increment).toHaveBeenCalledTimes(2);
+      expect(increment).toHaveBeenNthCalledWith(1);
+      expect(increment).toHaveBeenNthCalledWith(2);
+      const after = await registry.getSingleMetric(metricName)?.get();
+      expect(after?.type).toBe('counter');
+      expect(after?.values).toEqual([
+        { value: beforeValue + 2, labels: { service: 'fleet-service' } },
+      ]);
+      expect(await registry.getSingleMetricAsString(metricName)).toContain(
+        `${metricName}{service="fleet-service"} ${beforeValue + 2}`,
+      );
+    } finally {
+      increment.mockRestore();
+    }
+  });
+
+  it('exports HELP describing committed occurrences rather than unique events', async () => {
+    expect(await registry.getSingleMetricAsString(metricName)).toContain(
+      `# HELP ${metricName} Committed drift evidence redelivery occurrences with a changed live owner (not unique events)`,
+    );
   });
 });
