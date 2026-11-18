@@ -292,7 +292,9 @@ export class MeterFullRun {
                     { timeoutMs: 30_000 },
                   );
                 } catch (error) {
-                  if (callbackReturned) throw new Error('FULL_RUN_UNCONFIRMED');
+                  // Preflight only reads, including an already-active replay;
+                  // its COMMIT failure cannot leave this activation applied.
+                  if (callbackReturned && !preflight) throw new Error('FULL_RUN_UNCONFIRMED');
                   if (error instanceof MeterFullRunRefusal) throw error;
                   // Prisma cannot commit until our callback returns. Pool acquisition,
                   // statement errors and callback timeouts therefore prove refusal.
