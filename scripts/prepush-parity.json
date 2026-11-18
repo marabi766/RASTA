@@ -192,7 +192,7 @@
         "verify": "sha256:495ba8369ba7025adb292298f9856de9452cd6d956fa875992adb3e9be321d28"
       }
     },
-    "pnpm-workspace.yaml": "684806e1022996c3e17312726df6f87a29f5a4264fef3b53f333927a692609ed",
+    "pnpm-workspace.yaml": "f6fb1dcf96b2e682e46de212b242168702bc520bc15a880438ddfb507e0a14cc",
     ".npmrc": "cc4bfd2fb3d4673444a53190a9b275eba6b6af6156ced60728582829895cf9ef"
   },
   "steps": [
