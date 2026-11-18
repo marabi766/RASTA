@@ -85,6 +85,7 @@ describe('TENDER_AWARDED drafts a contract', () => {
       projectId: award.projectId,
       winningBidId: award.winningBidId,
       contractorOrganizationId: award.winnerOrganizationId,
+      awardedAt: new Date(award.awardedAt),
       amountMinor: 7_250_000_000n,
       status: 'DRAFT',
       version: 1,
