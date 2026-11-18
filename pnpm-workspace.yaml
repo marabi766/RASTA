@@ -180,3 +180,8 @@ trustPolicyExclude:
 # every workspace resolves.
 patchedDependencies:
   zod@4.6.7: patches/zod@4.6.7.patch
+  # GHSA-fc5q-39xc-vjpf — backport the literal fallback while the registry has
+  # no fixed release for either locked major. CI checks the installed parsers
+  # before discounting this version-only report for development dependencies.
+  picomatch@2.3.2: patches/picomatch@2.3.2.patch
+  picomatch@4.0.7: patches/picomatch@4.0.7.patch

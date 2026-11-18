@@ -31,6 +31,8 @@ overrides:
   body-parser@<2.4.0: 2.4.0
 
 patchedDependencies:
+  picomatch@2.3.2: 9a1e7b0f52f9d013d5c8ae4caba180177c85323fc7cfb3edd9f93a47a2704fb9
+  picomatch@4.0.7: 7e7d60ecf7d84b986a243d52497561386a7d7db67a72a96d95ebdb538dbfcf50
   zod@4.6.7: 63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37
 
 importers:
@@ -10789,7 +10791,7 @@ snapshots:
   anymatch@3.1.3:
     dependencies:
       normalize-path: 3.0.0
-      picomatch: 2.3.2
+      picomatch: 2.3.2(patch_hash=9a1e7b0f52f9d013d5c8ae4caba180177c85323fc7cfb3edd9f93a47a2704fb9)
 
   append-field@1.0.0: {}
 
@@ -11625,9 +11627,9 @@ snapshots:
     dependencies:
       bser: 2.1.1
 
-  fdir@6.5.0(picomatch@4.0.7):
+  fdir@6.5.0(picomatch@4.0.7(patch_hash=7e7d60ecf7d84b986a243d52497561386a7d7db67a72a96d95ebdb538dbfcf50)):
     optionalDependencies:
-      picomatch: 4.0.7
+      picomatch: 4.0.7(patch_hash=7e7d60ecf7d84b986a243d52497561386a7d7db67a72a96d95ebdb538dbfcf50)
 
   fetch-blob@3.2.0:
     dependencies:
@@ -12455,7 +12457,7 @@ snapshots:
       chalk: 4.1.2
       ci-info: 3.9.0
       graceful-fs: 4.2.11
-      picomatch: 2.3.2
+      picomatch: 2.3.2(patch_hash=9a1e7b0f52f9d013d5c8ae4caba180177c85323fc7cfb3edd9f93a47a2704fb9)
 
   jest-validate@29.7.0:
     dependencies:
@@ -12731,7 +12733,7 @@ snapshots:
   micromatch@4.0.8:
     dependencies:
       braces: 3.0.3
-      picomatch: 2.3.2
+      picomatch: 2.3.2(patch_hash=9a1e7b0f52f9d013d5c8ae4caba180177c85323fc7cfb3edd9f93a47a2704fb9)
 
   mime-db@1.52.0: {}
 
@@ -13031,9 +13033,9 @@ snapshots:
 
   picocolors@1.1.1: {}
 
-  picomatch@2.3.2: {}
+  picomatch@2.3.2(patch_hash=9a1e7b0f52f9d013d5c8ae4caba180177c85323fc7cfb3edd9f93a47a2704fb9): {}
 
-  picomatch@4.0.7: {}
+  picomatch@4.0.7(patch_hash=7e7d60ecf7d84b986a243d52497561386a7d7db67a72a96d95ebdb538dbfcf50): {}
 
   pino-abstract-transport@2.0.0:
     dependencies:
@@ -13692,8 +13694,8 @@ snapshots:
 
   tinyglobby@0.2.17:
     dependencies:
-      fdir: 6.5.0(picomatch@4.0.7)
-      picomatch: 4.0.7
+      fdir: 6.5.0(picomatch@4.0.7(patch_hash=7e7d60ecf7d84b986a243d52497561386a7d7db67a72a96d95ebdb538dbfcf50))
+      picomatch: 4.0.7(patch_hash=7e7d60ecf7d84b986a243d52497561386a7d7db67a72a96d95ebdb538dbfcf50)
 
   tmpl@1.0.5: {}
 
@@ -13731,7 +13733,7 @@ snapshots:
   ts-loader@9.6.2(typescript@5.9.3)(webpack@5.112.2(@swc/core@1.16.1(@swc/helpers@0.5.23))(esbuild@0.28.2)(lightningcss@1.32.0)(postcss@8.5.28)(sharp@0.35.5(@types/node@22.20.1))):
     dependencies:
       chalk: 4.1.2
-      picomatch: 4.0.7
+      picomatch: 4.0.7(patch_hash=7e7d60ecf7d84b986a243d52497561386a7d7db67a72a96d95ebdb538dbfcf50)
       source-map: 0.7.6
       typescript: 5.9.3
       webpack: 5.112.2(@swc/core@1.16.1(@swc/helpers@0.5.23))(esbuild@0.28.2)(lightningcss@1.32.0)(postcss@8.5.28)(sharp@0.35.5(@types/node@22.20.1))

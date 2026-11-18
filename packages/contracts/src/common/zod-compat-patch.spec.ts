@@ -38,6 +38,7 @@ import {
 const ROOT = join(__dirname, '../../../..');
 const workspaceYaml = readFileSync(join(ROOT, 'pnpm-workspace.yaml'), 'utf8');
 const lockfile = readFileSync(join(ROOT, 'pnpm-lock.yaml'), 'utf8');
+const patchSection = /^patchedDependencies:[ \t]*\n((?:[ \t]+[^\n]*\n)*)/m;
 const VERSION = /^catalog:\s*\n\s+zod:\s*(\S+)/m.exec(workspaceYaml)?.[1];
 const PATCH = `patches/zod@${VERSION}.patch`;
 /** One marker per restored rule, plus the switch's declaration in each patched module, per build (ESM `.js`, CommonJS `.cjs`). */
@@ -144,9 +145,8 @@ afterAll(releaseStockZod);
 describe('zod is patched to zod 3’s run order, off by default (Codex PR-444 r2 F1, r3 F3, D-078)', () => {
   it('the catalog’s zod is the patched version, with every rule in both builds', () => {
     expect(VERSION).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(workspaceYaml).toMatch(
-      new RegExp(`^patchedDependencies:\\s*\\n\\s+zod@${VERSION}: ${PATCH}\\s*$`, 'm'),
-    );
+    const workspacePatches = patchSection.exec(workspaceYaml)?.[1] ?? '';
+    expect(workspacePatches.split('\n')).toContain(`  zod@${VERSION}: ${PATCH}`);
     const patch = readFileSync(join(ROOT, PATCH), 'utf8');
     const added = patch.split('\n').filter((line) => line.startsWith('+') && line.includes(MARKER));
     expect(added).toHaveLength(PER_BUILD * 2);
@@ -176,9 +176,12 @@ describe('zod is patched to zod 3’s run order, off by default (Codex PR-444 r2
   });
 
   it('the lockfile resolves zod only as the patched copy', () => {
-    const hash = new RegExp(`^patchedDependencies:\\s*\\n\\s+zod@${VERSION}: (\\w+)`, 'm').exec(
-      lockfile,
-    )?.[1];
+    const lockfilePatches = patchSection.exec(lockfile)?.[1] ?? '';
+    const prefix = `  zod@${VERSION}: `;
+    const hash = lockfilePatches
+      .split('\n')
+      .find((line) => line.startsWith(prefix))
+      ?.slice(prefix.length);
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
     const resolved = [...lockfile.matchAll(/\bzod@(\d+\.\d+\.\d+)(\(patch_hash=(\w+)\))?/g)];
     const unpatched = resolved.filter(

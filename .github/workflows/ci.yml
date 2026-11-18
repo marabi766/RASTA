@@ -686,7 +686,11 @@ jobs:
         # High and critical fail. The repo holds no production secrets, but it
         # does hold the ledger, so a known-exploitable transitive dependency is
         # not something to merge past.
-        run: pnpm audit --audit-level=high
+        # The development exception covers only the version-only report for
+        # the two locally patched copies. Production audit has no exception.
+        run: |
+          pnpm audit --prod --audit-level=high
+          node scripts/check-picomatch-backport.mjs
 
       - name: Pre-pull Semgrep (retries transient registry errors)
         run: |
