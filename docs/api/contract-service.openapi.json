@@ -1,6 +1,165 @@
 {
   "openapi": "3.0.0",
   "paths": {
+    "/v1/deduction-rules/changes": {
+      "post": {
+        "description": "Authorized employer writers only. Creates a PENDING_APPROVAL proposal; never changes a rule in force. Independent platform approval is required for both kinds. An authorized replay within the configured idempotency lifetime returns the original receipt.",
+        "operationId": "DeductionRuleController_propose_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": ["CREATE", "RETIRE"]
+                    },
+                    "status": {
+                      "const": "PENDING_APPROVAL"
+                    },
+                    "version": {
+                      "const": 1
+                    },
+                    "proposedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
+                    }
+                  },
+                  "required": ["id", "organizationId", "kind", "status", "version", "proposedAt"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid strict CREATE/RETIRE body or required Idempotency-Key (VALIDATION_FAILED). Names use the canonical 1–200 character deduction name contract; rateBp is an integer 1–10000; base is GROSS. RETIRE reasons are nonblank, at most 500 Unicode characters, without bidi controls. Text must be valid PostgreSQL UTF-8 text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only a person with a platform user id and a configured employer writer role in the selected organization may propose. Empty writer configuration, contractor, platform administrator, auditor and service callers are refused, including mixed roles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The RETIRE rule is unknown, belongs to another organization, or is no longer in force; the same NOT_FOUND response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another pending CREATE owns the same organization/name key, or a pending RETIRE owns the rule (ALREADY_EXISTS). Changed body or verified actor with the same live key is IDEMPOTENCY_KEY_REUSED. An in-flight claim may return CONFLICT with Retry-After: 1; retry after completion returns the original 201 receipt within the configured lifetime.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The verified actor identity pair is unavailable (ACTOR_IDENTITY_UNKNOWN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error; invalid stored receipt or event invariants fail closed without reexecuting the command.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Propose creating or retiring an employer deduction rule",
+        "tags": ["deduction-rules"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v1/contracts": {
       "get": {
         "description": "As the employer: the contracts of the organization the request acts for. As the winning contractor: the contracts awarded to it. Closed by default (S-02). Read by the employer’s organization — the roles of CONTRACT_READER_ROLES (default ORGANIZATION_ADMIN), and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and by the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract that does not exist and a contract of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused. Contracts are created by the system when a tender is awarded; there is no route that creates one (ADR-068).",

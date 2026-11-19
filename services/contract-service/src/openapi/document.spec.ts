@@ -99,6 +99,7 @@ describe('the committed OpenAPI document', () => {
       'POST /v1/contracts/{id}/statements',
       'POST /v1/contracts/{id}/statements/{statementId}/decisions',
       'POST /v1/contracts/{id}/statements/{statementId}/submit',
+      'POST /v1/deduction-rules/changes',
     ]);
     for (const { key, operation } of operations) {
       // A user's bearer token everywhere but the internal routes, which take a service's internal
@@ -112,6 +113,7 @@ describe('the committed OpenAPI document', () => {
       // The routes that create (a policy, an amendment, a milestone, a statement) answer 201;
       // every other 200.
       const created = [
+        'POST /v1/deduction-rules/changes',
         'POST /v1/contract-approval-policies',
         'POST /v1/contracts/{id}/amendments',
         'POST /v1/contracts/{id}/milestones',

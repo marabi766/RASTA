@@ -36,6 +36,7 @@ const cancelled = {
 describe('the contract events', () => {
   it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two, amendments’ and milestones’ seven, statements’ six and the settlement’s two, each with a schema and an aggregate', () => {
     const names = [
+      'DEDUCTION_RULE_CHANGE_PROPOSED',
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
       'CONTRACT_SIGNED',
@@ -70,7 +71,11 @@ describe('the contract events', () => {
     expect(Object.keys(AGGREGATE_OF)).toEqual(names);
     for (const name of names) {
       expect(AGGREGATE_OF[name as keyof typeof AGGREGATE_OF]).toBe(
-        name.startsWith('APPROVAL_POLICY_') ? 'ApprovalPolicy' : AGGREGATE_TYPE,
+        name === 'DEDUCTION_RULE_CHANGE_PROPOSED'
+          ? 'DeductionRuleChange'
+          : name.startsWith('APPROVAL_POLICY_')
+            ? 'ApprovalPolicy'
+            : AGGREGATE_TYPE,
       );
     }
   });
@@ -887,4 +892,36 @@ describe('routing', () => {
   it('refuses an event that names no contract to key it by', () => {
     expect(() => resolvePartitionKey('CONTRACT_DRAFTED', {})).toThrow(/no contractId/);
   });
+});
+
+describe('deduction proposal event privacy and routing', () => {
+  const payload = {
+    changeId: 'DRC_1',
+    organizationId: 'ORG_1',
+    kind: 'CREATE',
+    proposedAt: '2026-11-19T09:00:00.000Z',
+    proposedBy: 'USR_1',
+    version: 1,
+  };
+  it('accepts exactly the six published fields and routes by its real aggregate', () => {
+    expect(validateContractPayload('DEDUCTION_RULE_CHANGE_PROPOSED', payload)).toEqual(payload);
+    expect(AGGREGATE_OF.DEDUCTION_RULE_CHANGE_PROPOSED).toBe('DeductionRuleChange');
+    expect(resolvePartitionKey('DEDUCTION_RULE_CHANGE_PROPOSED', payload).key).toBe(
+      payload.changeId,
+    );
+    expect(() =>
+      resolvePartitionKey('DEDUCTION_RULE_CHANGE_PROPOSED', { contractId: 'CTR_fake' }),
+    ).toThrow();
+  });
+  it.each(['name', 'rateBp', 'base', 'reason', 'issuer', 'subject', 'amount'])(
+    'refuses sensitive extra field %s with a constant error',
+    (field) => {
+      expect(() =>
+        validateContractPayload('DEDUCTION_RULE_CHANGE_PROPOSED', {
+          ...payload,
+          [field]: 'private-sentinel',
+        }),
+      ).toThrow('Invalid deduction proposal event');
+    },
+  );
 });
