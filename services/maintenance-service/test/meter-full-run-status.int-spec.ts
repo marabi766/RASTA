@@ -45,7 +45,7 @@ describe('spawned read-only full-run status (canonical PostgreSQL schemas)', () 
   });
   const prisma = new PrismaService(urls[1]);
   const org = tenants();
-  const runId = id('RUN');
+  const runId = '--apply';
   const operator = 'USR_STATUS_OPERATOR';
   const boundary = 'SYNTHETIC_STATUS_TEST_SEAL';
   const assets = [id('AST'), id('AST')];
@@ -77,7 +77,7 @@ describe('spawned read-only full-run status (canonical PostgreSQL schemas)', () 
     METER_RECONCILE_OPERATOR_ID: operator,
   };
   const cli = async (
-    args = ['--run-id', runId],
+    args = [`--run-id=${runId}`],
     overrides: NodeJS.ProcessEnv = {},
   ): Promise<{ code: number; stdout: string; stderr: string }> => {
     try {
@@ -189,13 +189,16 @@ describe('spawned read-only full-run status (canonical PostgreSQL schemas)', () 
       expect((await owner.stop()).drained).toBe(true);
     }
   });
-  it('returns only null for the legal inactive singleton and exits without starting services', async () => {
-    expect(await cli(undefined, { DATABASE_URL_MAINTENANCE: urls[0] })).toEqual({
-      code: 0,
-      stdout: 'null\n',
-      stderr: '',
-    });
-  });
+  it.each([['--run-id', 'RUN_COMPAT'], ['--run-id=--RUN'], ['--run-id=--'], ['--run-id=--apply']])(
+    'returns only null for the legal inactive singleton with %j',
+    async (...args) => {
+      expect(await cli(args, { DATABASE_URL_MAINTENANCE: urls[0] })).toEqual({
+        code: 0,
+        stdout: 'null\n',
+        stderr: '',
+      });
+    },
+  );
   it('returns exactly persisted bounded evidence across repeated fresh processes', async () => {
     for (let i = 0; i < 2; i++) {
       const result = await cli();
@@ -255,10 +258,16 @@ describe('spawned read-only full-run status (canonical PostgreSQL schemas)', () 
       ['--run-id'],
       ['--run-id', 'bad\n'],
       ['--run-id', runId, '--run-id', runId],
-      ...['--apply', '--activate', '--seal', '--resume', '--unknown'].map((flag) => [
-        '--run-id',
-        runId,
-        flag,
+      ['--run-id='],
+      ['--run-id=RUN=OTHER'],
+      ['--run-id=bad\n'],
+      [`--run-id=${'x'.repeat(65)}`],
+      [`--run-id=${runId}`, `--run-id=${runId}`],
+      [`--run-id=${runId}`, '--run-id', 'RUN'],
+      [`--run-id=${runId}`, 'extra'],
+      ...['--apply', '--activate', '--seal', '--resume', '--unknown'].flatMap((flag) => [
+        [flag],
+        [`--run-id=${runId}`, flag],
       ]),
     ].map((args) => ({ args })),
   )('refuses bad arguments before database/config effects %#', async ({ args }) => {
