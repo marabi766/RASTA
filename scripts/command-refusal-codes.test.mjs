@@ -122,6 +122,7 @@ for (const [entry, exit] of [
   ['services/asset-service/dist/outbox/flush.cli.js', 2],
   ['services/fleet-service/dist/fleet/clear-transferred.cli.js', 2],
   ['services/fleet-service/dist/fleet/drain-check.cli.js', 2],
+  ['services/maintenance-service/dist/maintenance/meter-full-run-status.cli.js', 2],
   ['services/maintenance-service/dist/maintenance/meter-reconcile.cli.js', 2],
   ['services/identity-service/dist/keycloak/projection.cli.js', 2],
   ['services/economic-service/dist/transaction/resolved-dispute-backfill.cli.js', 1],
