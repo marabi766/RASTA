@@ -191,6 +191,18 @@ rollback only to an image honoring the creation fence and refusals.
 After a lost response, use `MeterFullRun.status(runId, operatorId)` without an
 authority to read the stored digest, source boundary, asset count and refusal
 count. It rejects ambient tenant contexts and mismatched run/operator IDs.
+With the maintenance package built and its normal runtime environment configured,
+run `pnpm --filter @rasta/maintenance-service maintenance-meter-full-run-status --run-id RUN_ID`.
+This read-only command requires exactly one run ID (`[A-Za-z0-9_-]`, 1–64 characters;
+ambiguous option-shaped values starting with `--` are refused)
+and `METER_RECONCILE_OPERATOR_ID` under the existing operator schema. The configured
+operator is self-asserted, not identity-service verified. Use runtime credentials;
+migrator credentials are refused. Stdout is only the stored status JSON (capped at
+1 KiB before its newline) or `null`
+(marker inactive), both exit 0; failures exit 2 with safe, withheld diagnostics.
+It starts no HTTP service, relay or consumer and never seals, activates, resumes,
+releases fences or changes data. It does not prove source completeness, delivery
+of audit evidence or global rollout acceptance. No mutation flags are accepted.
 A replay with the same run/operator but a changed seal or refusals returns
 `ALREADY_ACTIVE_INVENTORY_DRIFT`; reconcile the stored evidence instead of
 starting a new run. Definite failures before the Prisma transaction callback
