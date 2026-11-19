@@ -19,7 +19,7 @@ import {
   type EventHandler,
   type OutboxStopOptions,
 } from '@rasta/nest-common';
-import { dlqMessagesTotal } from '@rasta/observability';
+import { dlqMessagesTotal, driftEvidenceOwnerChangesTotal } from '@rasta/observability';
 import {
   UNCONFIGURED_TRANSFER_RECORD_SOURCE,
   type TransferRecordSource,
@@ -566,6 +566,10 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
   }
 
   async onModuleInit(): Promise<void> {
+    // Allocate Fleet's zero baseline before Kafka can deliver its first event,
+    // including broker-disabled startup. Adding zero preserves prior occurrences.
+    driftEvidenceOwnerChangesTotal.inc(0);
+
     // Null in tests and in any run without a broker. The service stays useful
     // without Kafka; the replica simply stops tracking new machines.
     if (!this.consumerFactory) {

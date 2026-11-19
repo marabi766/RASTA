@@ -226,11 +226,20 @@ export const eventValidationFailuresTotal = new Counter({
   registers: [registry],
 });
 
-export const driftEvidenceOwnerChangesTotal = new Counter({
+const driftEvidenceOwnerChangesCounter = new Counter({
   name: 'rasta_drift_evidence_owner_changes_total',
-  help: 'Committed drift evidence duplicates with a changed live owner',
+  help: 'Committed drift evidence redelivery occurrences with a changed live owner (not unique events)',
+  labelNames: ['service'] as const,
   registers: [registry],
 });
+
+/**
+ * Counts owner-changed redeliveries whose transactions are confirmed committed,
+ * including repeated redeliveries of the same event; this is not a unique-event count.
+ * Bound to fleet-service so callers continue to use `.inc()` without labels.
+ */
+export const driftEvidenceOwnerChangesTotal =
+  driftEvidenceOwnerChangesCounter.labels('fleet-service');
 
 export const duplicateEventsTotal = new Counter({
   name: 'rasta_duplicate_events_total',
