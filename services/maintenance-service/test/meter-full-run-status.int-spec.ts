@@ -1,12 +1,17 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { MeterFullRun } from '../src/maintenance/meter-full-run';
 import { lockUsageMeter } from '../src/maintenance/usage-meter';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, databaseUrl, id, seedAsset, seedMeter, tenants } from './helpers';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS inventory shared with repository guards
+const { authoredFiles } = require('../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 const execute = promisify(execFile);
 const service = resolve(__dirname, '..');
@@ -19,9 +24,12 @@ const sources = [
   'src/config/env.ts',
   'src/prisma/prisma.service.ts',
   'prisma/schema.prisma',
-  ...readdirSync(migrations)
-    .filter((name) => name !== 'migration_lock.toml')
-    .map((name) => `prisma/migrations/${name}/migration.sql`),
+  ...authoredFiles(migrations)
+    .filter(
+      (path) =>
+        relative(migrations, path).split('/').length === 2 && path.endsWith('/migration.sql'),
+    )
+    .map((path) => relative(service, path)),
 ];
 const sourceHashes = (): string[] =>
   sources.map((name) =>

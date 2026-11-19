@@ -733,6 +733,10 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'services/fleet-service/src/fleet/clear-transferred.cli.ts': { positionals: [] },
   'services/fleet-service/src/fleet/drain-check.cli.ts': { positionals: [] },
+  'services/maintenance-service/src/maintenance/meter-full-run-status.cli.ts': { positionals: [] },
+  'services/maintenance-service/src/maintenance/meter-full-run-status.args.ts': {
+    accepts: { '--run-id': 'identifier' },
+  },
   'services/maintenance-service/src/maintenance/meter-reconcile.cli.ts': { positionals: [] },
   'services/maintenance-service/src/maintenance/meter-reconcile.args.ts': {
     accepts: { '--dry-run': 'switch', '--apply': 'switch', '--organization-id': 'identifier' },
