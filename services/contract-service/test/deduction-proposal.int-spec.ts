@@ -115,7 +115,7 @@ describe('CON003-2a employer proposal command', () => {
     }
     for (const key of ['DATABASE_URL', 'DATABASE_URL_CONTRACT', 'DATABASE_URL_CONTRACT_MIGRATOR']) {
       const url = new URL(process.env[key] ?? '');
-      expect(url.hostname).toBe('127.0.0.1');
+      expect(['127.0.0.1', 'localhost']).toContain(url.hostname);
       expect(url.port).toBe(new URL(process.env.DATABASE_URL_CONTRACT ?? '').port);
       expect(url.pathname).toBe('/rasta_contract');
     }
