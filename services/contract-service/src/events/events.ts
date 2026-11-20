@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RastaError } from '@rasta/nest-common';
 import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 import { WORKFLOW_KEYS } from '../policy/policy.state-machine';
 
@@ -23,6 +24,7 @@ import { WORKFLOW_KEYS } from '../policy/policy.state-machine';
  */
 
 export const CONTRACT_EVENTS = {
+  DEDUCTION_RULE_CHANGE_PROPOSED: 'DEDUCTION_RULE_CHANGE_PROPOSED',
   CONTRACT_DRAFTED: 'CONTRACT_DRAFTED',
   CONTRACT_SIGNATURE_RECORDED: 'CONTRACT_SIGNATURE_RECORDED',
   CONTRACT_SIGNED: 'CONTRACT_SIGNED',
@@ -666,7 +668,19 @@ export const contractSettledPayload = z
   })
   .strict();
 
+export const deductionRuleChangeProposedPayload = z
+  .object({
+    changeId: id,
+    organizationId: id,
+    kind: z.enum(['CREATE', 'RETIRE']),
+    proposedAt: instant,
+    proposedBy: id,
+    version: z.literal(1),
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
+  DEDUCTION_RULE_CHANGE_PROPOSED: deductionRuleChangeProposedPayload,
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
   CONTRACT_SIGNED: contractSignedPayload,
@@ -711,6 +725,11 @@ export function validateContractPayload<N extends ContractEventName>(
   payload: unknown,
 ): ContractEventPayload<N> {
   const schema = CONTRACT_EVENT_SCHEMAS[eventName];
+  if (eventName === 'DEDUCTION_RULE_CHANGE_PROPOSED') {
+    const proposed = schema.safeParse(payload);
+    if (!proposed.success) throw RastaError.internal('Invalid deduction proposal event');
+    return proposed.data as ContractEventPayload<N>;
+  }
   const parsed = legacyParse(schema, payload);
   if (!parsed.success) {
     throw new Error(

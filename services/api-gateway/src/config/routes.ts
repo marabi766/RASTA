@@ -212,6 +212,7 @@ export const ROUTES: readonly RouteRule[] = [
   // the service enforces authorization, validation, four-eyes approval and the Idempotency-Key.
   { prefix: 'contract-approval-policies', service: 'contract' },
   { prefix: 'contracts', service: 'contract' },
+  { prefix: 'deduction-rules', service: 'contract', requiresIdempotencyKey: true },
   { prefix: 'statements', service: 'contract', requiresIdempotencyKey: true },
 
   // ---- economic ----------------------------------------------------------

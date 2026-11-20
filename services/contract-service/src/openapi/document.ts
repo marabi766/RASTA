@@ -1,3 +1,9 @@
+import { DeductionRuleController } from '../deduction/deduction-rule.controller';
+import {
+  DeductionRuleService,
+  PROPOSE_DEDUCTION_ENDPOINT,
+} from '../deduction/deduction-rule.service';
+import { deductionReceiptSchema, proposeDeductionSchema } from '../deduction/dto';
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
@@ -96,6 +102,7 @@ const cursorPageOf = (item: z.ZodTypeAny) =>
 
 /** Success responses, each with the status the handler actually answers. */
 export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.ZodTypeAny }> = {
+  [PROPOSE_DEDUCTION_ENDPOINT]: { status: '201', schema: deductionReceiptSchema },
   'GET /v1/contracts': { status: '200', schema: cursorPageOf(contractViewSchema) },
   'GET /v1/contracts/{id}': { status: '200', schema: contractViewSchema },
   'POST /v1/contracts/{id}/sign': { status: '200', schema: contractViewSchema },
@@ -141,6 +148,7 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
 
 /** Every command takes a strict body. */
 const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
+  [PROPOSE_DEDUCTION_ENDPOINT]: proposeDeductionSchema,
   'POST /v1/contracts/{id}/sign': signContractSchema,
   'POST /v1/contracts/{id}/cancel': cancelContractSchema,
   'POST /v1/contract-approval-policies': createPolicySchema,
@@ -159,6 +167,7 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
 
 /** The commands that require an `Idempotency-Key` (docs/06 § 6.8). */
 const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
+  PROPOSE_DEDUCTION_ENDPOINT,
   'POST /v1/contracts/{id}/sign',
   'POST /v1/contracts/{id}/cancel',
   'POST /v1/contract-approval-policies',
@@ -268,6 +277,17 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT) while the employer’s signature of an amendment, or the union behind a statement’s approval policy, was being confirmed: nothing was signed or submitted.',
 };
 
+/** Refusals of the employer proposal command; no approval or monetary effect. */
+export const DEDUCTION_ERROR_DESCRIPTIONS: Record<number, string> = {
+  400: 'Invalid strict CREATE/RETIRE body or required Idempotency-Key (VALIDATION_FAILED). Names use the canonical 1–200 character deduction name contract; rateBp is an integer 1–10000; base is GROSS. RETIRE reasons are nonblank, at most 500 Unicode characters, without bidi controls. Text must be valid PostgreSQL UTF-8 text.',
+  401: ERROR_DESCRIPTIONS[401] as string,
+  403: 'Only a person with a platform user id and a configured employer writer role in the selected organization may propose. Empty writer configuration, contractor, platform administrator, auditor and service callers are refused, including mixed roles.',
+  404: 'The RETIRE rule is unknown, belongs to another organization, or is no longer in force; the same NOT_FOUND response.',
+  409: 'Another pending CREATE owns the same organization/name key, or a pending RETIRE owns the rule (ALREADY_EXISTS). Changed body or verified actor with the same live key is IDEMPOTENCY_KEY_REUSED. An in-flight claim may return CONFLICT with Retry-After: 1; retry after completion returns the original 201 receipt within the configured lifetime.',
+  422: 'The verified actor identity pair is unavailable (ACTOR_IDENTITY_UNKNOWN).',
+  500: 'Unexpected server error; invalid stored receipt or event invariants fail closed without reexecuting the command.',
+};
+
 /** The same statuses on the approval-policy routes, which answer for other reasons (Q-70 (7)). */
 export const POLICY_ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.',
@@ -359,6 +379,7 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
  */
 @Module({
   controllers: [
+    DeductionRuleController,
     ContractController,
     AmendmentController,
     MilestoneController,
@@ -367,6 +388,7 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
     PolicyController,
   ],
   providers: [
+    { provide: DeductionRuleService, useValue: {} },
     { provide: ContractService, useValue: {} },
     { provide: AmendmentService, useValue: {} },
     { provide: MilestoneService, useValue: {} },
@@ -444,12 +466,15 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       const descriptions =
         SERVICE_ROUTES[key] === 'users-refused'
           ? INTERNAL_ERROR_DESCRIPTIONS
-          : path.startsWith('/v1/contract-approval-policies')
-            ? POLICY_ERROR_DESCRIPTIONS
-            : ERROR_DESCRIPTIONS;
+          : key === PROPOSE_DEDUCTION_ENDPOINT
+            ? DEDUCTION_ERROR_DESCRIPTIONS
+            : path.startsWith('/v1/contract-approval-policies')
+              ? POLICY_ERROR_DESCRIPTIONS
+              : ERROR_DESCRIPTIONS;
       for (const [status, description] of Object.entries(descriptions)) {
-        // A route with no `{id}` names no existing row, so it cannot answer 404.
-        if (status === '404' && !path.includes('{id}')) continue;
+        // A route without `{id}` normally names no existing row; RETIRE names its target in the body.
+        if (status === '404' && !path.includes('{id}') && key !== PROPOSE_DEDUCTION_ENDPOINT)
+          continue;
         // Only a route with a query or a body can answer 400 (the id is an opaque string).
         if (status === '400' && !query && !body) continue;
         // 409 and 422 are a command's: a read has no state to move and no rule to refuse.

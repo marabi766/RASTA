@@ -496,3 +496,9 @@ describe('the open-tenders and criteria-templates prefixes', () => {
     },
   );
 });
+
+it('routes deduction proposals to contract with gateway idempotency protection and no public grant', () => {
+  const route = resolveRoute('/deduction-rules/changes');
+  expect(route).toMatchObject({ service: 'contract', requiresIdempotencyKey: true });
+  expect(route?.publicReason).toBeUndefined();
+});

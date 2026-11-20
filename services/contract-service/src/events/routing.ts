@@ -18,6 +18,7 @@ export const AGGREGATE_TYPE = 'Contract';
 export const POLICY_AGGREGATE_TYPE = 'ApprovalPolicy';
 
 export const AGGREGATE_OF = {
+  DEDUCTION_RULE_CHANGE_PROPOSED: 'DeductionRuleChange',
   CONTRACT_DRAFTED: AGGREGATE_TYPE,
   CONTRACT_SIGNATURE_RECORDED: AGGREGATE_TYPE,
   CONTRACT_SIGNED: AGGREGATE_TYPE,
@@ -60,8 +61,17 @@ export interface PartitionDecision {
  */
 export function resolvePartitionKey(
   eventName: ContractEventName,
-  payload: { contractId?: string; organizationId?: string; workflowKey?: string },
+  payload: {
+    changeId?: string;
+    contractId?: string;
+    organizationId?: string;
+    workflowKey?: string;
+  },
 ): PartitionDecision {
+  if (eventName === 'DEDUCTION_RULE_CHANGE_PROPOSED') {
+    if (!payload.changeId) throw new Error('A deduction proposal event requires its changeId');
+    return { key: payload.changeId, reason: 'A deduction proposal is its own aggregate stream' };
+  }
   if (AGGREGATE_OF[eventName] === POLICY_AGGREGATE_TYPE) {
     // A policy's events are ordered with the other versions of the same (organization, workflow
     // key): activating version 2 retires version 1, and a consumer reconstructing "which policy
