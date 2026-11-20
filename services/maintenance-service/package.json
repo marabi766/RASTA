@@ -7,6 +7,7 @@
   "scripts": {
     "build": "node ../../scripts/prisma-generate.mjs && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",
     "maintenance-meter-reconcile": "node dist/maintenance/meter-reconcile.cli.js",
+    "maintenance-meter-full-run-status": "node dist/maintenance/meter-full-run-status.cli.js",
     "clean": "rimraf dist .turbo",
     "dev": "prisma generate && node -r @swc-node/register -r ./dev/telemetry.ts --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
