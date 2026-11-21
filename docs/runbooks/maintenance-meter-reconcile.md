@@ -203,6 +203,10 @@ operator is self-asserted, not identity-service verified. Use runtime credential
 migrator credentials are refused. Stdout is only the stored status JSON (capped at
 1 KiB before its newline) or `null`
 (marker inactive), both exit 0; failures exit 2 with safe, withheld diagnostics.
+Preflight also requires confirmed closure of its own short-lived database client
+before constructing the status client. A rejected, malformed or unconfirmed close
+refuses with `runtime-role-unverified`; its internal deadline is 23 seconds with
+the default shutdown budget. A timeout does not prove native connection closure.
 It starts no HTTP service, relay or consumer and never seals, activates, resumes,
 releases fences or changes data. It does not prove source completeness, delivery
 of audit evidence or global rollout acceptance. No mutation flags are accepted.
