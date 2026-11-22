@@ -1678,7 +1678,7 @@ jobs:
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
 
       - &integration_setup_8
         name: Start MinIO and create the document bucket
@@ -1740,10 +1740,8 @@ jobs:
         # machine on Windows cannot, and falls back to the loopback TCP
         # listener `docker-compose.yml` publishes.
         #
-        # Pinned by digest, not by tag: `clamav/clamav:1.5.4` is rebuilt
-        # whenever its base or bundled signature set changes, so a tag means a
-        # different scanner on a different day with no commit to show for it.
-        # Bumping it is a reviewable edit to this line and to the compose file.
+        # Keep the patched ClamAV image on the same immutable digest as
+        # docker-compose.yml. The recipe is in infrastructure/docker/clamav.
         #
         # `--user 100:101` with the entrypoint overridden to `clamd`: the
         # image's own `/init` needs root at start to create /run/clamav and
@@ -1772,7 +1770,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -2322,7 +2320,7 @@ jobs:
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
 
       - name: Start MinIO and create the document bucket
         # document-service's suites are in the tenant isolation step's
@@ -2376,7 +2374,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -2952,7 +2950,7 @@ jobs:
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
 
       - name: Start MinIO and create the document bucket
         # For the document coverage gate. Same images, bucket and private
@@ -3004,7 +3002,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -4079,7 +4077,7 @@ jobs:
             quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
             temporalio/admin-tools:1.26.2@sha256:37e2e33dbd7b86a12fa1daecf48f5b42544956ae503a83bd45460587f25591f2 \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
 
       - name: Start Keycloak with the platform realm
         # A `docker run` rather than a service container, because the realm
@@ -4325,7 +4323,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
 
           for attempt in $(seq 1 60); do
             if docker exec rasta-e2e-clamav clamdscan --ping 1 >/dev/null 2>&1; then
@@ -4927,8 +4925,8 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ci-pull-image.sh \
-            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
-          docker tag clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d \
+            ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f
+          docker tag ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f \
             rasta/clamav-pinned:ci
 
       - name: Install Trivy
