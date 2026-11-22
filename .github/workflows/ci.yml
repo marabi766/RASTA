@@ -1741,7 +1741,7 @@ jobs:
         # listener `docker-compose.yml` publishes.
         #
         # Keep the patched ClamAV image on the same immutable digest as
-        # docker-compose.yml. The recipe is in infrastructure/docker/clamav.
+        # docker-compose.yml. ADR-049 links to the published build recipe.
         #
         # `--user 100:101` with the entrypoint overridden to `clamd`: the
         # image's own `/init` needs root at start to create /run/clamav and
