@@ -1944,9 +1944,10 @@ test('the Alpine releases the DB must cover are those of every scanned image (ad
     ];
     bases.add(froms.at(-1)[1]);
   }
-  const clamav = /clamav\/clamav:[\w.]+@sha256:[0-9a-f]{64}/.exec(
-    workflow.jobs['clamav-signatures'].steps.map((s) => s.run ?? '').join('\n'),
-  );
+  const clamav =
+    /(?:clamav\/clamav|ghcr\.io\/marabi766\/rasta-clamav):[\w.-]+@sha256:[0-9a-f]{64}/.exec(
+      workflow.jobs['clamav-signatures'].steps.map((s) => s.run ?? '').join('\n'),
+    );
   assert.ok(clamav, 'the ClamAV pin');
   bases.add(clamav[0]);
   assert.deepEqual([...bases].sort(), Object.keys(SCANNED_BASES).sort());
