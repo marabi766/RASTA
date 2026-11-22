@@ -1,0 +1,32 @@
+name: Publish ClamAV remediation
+
+on:
+  push:
+    branches: [security/clamav-libxml2-publish]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build and verify the patched image
+        env:
+          IMAGE: ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3
+        run: |
+          docker build --platform linux/amd64 -t "$IMAGE" infrastructure/docker/clamav
+          docker run --rm --entrypoint apk "$IMAGE" info -v libxml2 | grep -Fx libxml2-2.13.9-r3
+          docker run --rm --entrypoint clamd "$IMAGE" --version
+          docker image inspect --format '{{json .Config.Healthcheck}}' "$IMAGE" | jq -e '.Test | length > 0'
+      - name: Publish to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
+          IMAGE: ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+          docker push "$IMAGE"
