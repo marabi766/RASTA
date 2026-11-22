@@ -1,3 +1,8 @@
+import { storageText } from './deduction/dto';
+import { DeductionRuleController } from './deduction/deduction-rule.controller';
+import { DeductionRuleService } from './deduction/deduction-rule.service';
+import { DeductionRuleAccess } from './deduction/deduction-rule.access';
+import { DeductionRuleRepository } from './deduction/deduction-rule.repository';
 import {
   Module,
   type MiddlewareConsumer,
@@ -111,6 +116,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
  */
 @Module({
   controllers: [
+    DeductionRuleController,
     ContractController,
     AmendmentController,
     MilestoneController,
@@ -137,7 +143,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
           level: env.LOG_LEVEL,
           pretty: env.NODE_ENV === 'development',
         });
-        setLogContextProvider(() => toLogContext());
+        setLogContextProvider(contractLogContext);
         return logger;
       },
     },
@@ -158,6 +164,9 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
 
     PrismaOutboxStore,
     EventPublisher,
+    DeductionRuleService,
+    DeductionRuleAccess,
+    DeductionRuleRepository,
     ContractAccess,
     ContractRepository,
     SigningAuthority,
@@ -537,4 +546,13 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // onModuleDestroy, concurrently and by one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
   }
+}
+
+/** Contract-service logging only: never mutate the authenticated request context. */
+export function contractLogContext(): ReturnType<typeof toLogContext> {
+  const context = toLogContext();
+  for (const field of ['userId', 'tenantId'] as const) {
+    if (context[field] !== undefined && !storageText(context[field])) delete context[field];
+  }
+  return context;
 }

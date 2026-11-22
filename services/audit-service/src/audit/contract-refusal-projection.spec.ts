@@ -289,3 +289,18 @@ describe('the contract refusal projection', () => {
     });
   });
 });
+
+it('accepts a deduction proposal as its own successful identifier-only audit event', () => {
+  const event = envelope('DEDUCTION_RULE_CHANGE_PROPOSED', {
+    changeId: 'DRC_1',
+    organizationId: 'ORG_1',
+    kind: 'CREATE',
+    proposedAt: '2026-11-19T09:00:00.000Z',
+    proposedBy: 'USR_1',
+    version: 1,
+  });
+  event.aggregateType = 'DeductionRuleChange';
+  event.aggregateId = 'DRC_1';
+  const record = toAuditEventRecord(event, delivery());
+  expect([record.outcome, record.action]).toEqual(['SUCCESS', 'DEDUCTION_RULE_CHANGE_PROPOSED']);
+});

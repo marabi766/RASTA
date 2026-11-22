@@ -195,7 +195,7 @@ export class DeductionRuleRepository {
       if (messageNames(error, 'ck_deduction_rule_change_rule_in_force')) {
         throw RastaError.notFound('DeductionRule', pendingOn);
       }
-      if (isUniqueViolation(error)) throw RastaError.alreadyExists(CHANGE_RESOURCE, pendingOn);
+      if (isUniqueViolation(error)) throw RastaError.alreadyExists(CHANGE_RESOURCE);
       throw error;
     }
   }

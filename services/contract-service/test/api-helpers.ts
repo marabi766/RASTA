@@ -1,3 +1,4 @@
+import { SettlementReconciliationSweeper } from '../src/settlement/settlement-reconciliation.sweeper';
 import { VersioningType, type INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import {
@@ -55,6 +56,8 @@ export interface TestClaims {
   organizationIds?: string[];
   roles: string[];
   username?: string;
+  /** Explicit tenant-specific roles for asymmetric authorization fixtures. */
+  organizationRoles?: string[];
 }
 
 /**
@@ -210,6 +213,9 @@ export async function startApi(env: Record<string, string> = {}): Promise<ApiHar
     // The settlement consumer is driven directly in statement-settled.int-spec.ts.
     .overrideProvider(SettlementCompletedConsumer)
     .useValue(inert)
+    // No unrelated settlement lookup or fixture mutation may run during an API test.
+    .overrideProvider(SettlementReconciliationSweeper)
+    .useValue(inert)
     .overrideProvider(PolicyReconciliationSweeper)
     .useValue(inert)
     // The HTTP client to organization-service is proven against its contract in
@@ -233,6 +239,7 @@ export async function startApi(env: Record<string, string> = {}): Promise<ApiHar
               issuer: claims.iss ?? process.env.OIDC_ISSUER_URL,
               organizationId: claims.organizationId,
               ...projectedClaims(claims),
+              ...(claims.organizationRoles ? { organizationRoles: claims.organizationRoles } : {}),
               roles: claims.roles,
               username: claims.username,
               expiresAt: Date.now() + 60_000,

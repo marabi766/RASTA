@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { allocateStreamSeqSql, buildOutboxRow, runUnscoped } from '@rasta/nest-common';
+import { allocateStreamSeqSql, buildOutboxRow, runUnscoped, RastaError } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { ID_PREFIXES } from '@rasta/contracts';
+import { eventEnvelopeSchema, ID_PREFIXES } from '@rasta/contracts';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, CONTRACT_TOPIC, type ContractEnv } from '../config/env';
@@ -40,7 +40,7 @@ export class EventPublisher {
     tx: ExtendedPrismaClient,
     input: {
       eventName: N;
-      /** What the event is about: the contract (`routing.ts`). */
+      /** The real aggregate this event is about (`routing.ts`). */
       aggregateId: string;
       organizationId: string;
       payload: unknown;
@@ -79,6 +79,27 @@ export class EventPublisher {
       },
       { producer: SERVICE_NAME, producerVersion: this.env.SERVICE_VERSION },
     );
+
+    if (input.eventName === 'DEDUCTION_RULE_CHANGE_PROPOSED') {
+      const parsed = eventEnvelopeSchema.safeParse(row.payload);
+      const proposal = validateContractPayload('DEDUCTION_RULE_CHANGE_PROPOSED', payload);
+      if (
+        !parsed.success ||
+        parsed.data.aggregateType !== 'DeductionRuleChange' ||
+        parsed.data.aggregateId !== proposal.changeId ||
+        input.aggregateId !== proposal.changeId ||
+        parsed.data.tenantId !== proposal.organizationId ||
+        input.organizationId !== proposal.organizationId ||
+        parsed.data.occurredAt !== proposal.proposedAt ||
+        parsed.data.actor?.type !== 'USER' ||
+        parsed.data.actor.id !== proposal.proposedBy ||
+        row.partitionKey !== proposal.changeId
+      ) {
+        throw RastaError.internal('Invalid deduction proposal event');
+      }
+      // Persist the actual envelope validated above, never a separately constructed copy.
+      row.payload = parsed.data;
+    }
 
     await runUnscoped('the outbox is platform plumbing and carries its own tenant column', () =>
       tx.outboxMessage.create({
