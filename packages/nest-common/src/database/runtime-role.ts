@@ -44,7 +44,12 @@
  */
 
 import { clientFailureCode } from './client-failure';
-import { DemoSeedRefusedError, markRefusal } from '@rasta/config';
+import {
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  DemoSeedRefusedError,
+  markRefusal,
+  outboxShutdownBudgetMs,
+} from '@rasta/config';
 
 /** The one raw-SQL method every generated Prisma client has. */
 export interface RuntimeRoleQueryClient {
@@ -220,10 +225,46 @@ export interface RuntimeRolePreflightClient extends RuntimeRoleQueryClient {
   $disconnect(): PromiseLike<void>;
 }
 
+// Match DatabaseTeardown's default drain budget, without a new public option.
+const PREFLIGHT_CLOSE_TIMEOUT_MS = outboxShutdownBudgetMs({
+  SHUTDOWN_TIMEOUT_MS: DEFAULT_SHUTDOWN_TIMEOUT_MS,
+});
+
+/** One attempt; timeout refuses startup, but does not prove native closure. */
+async function closePreflightClient(client: RuntimeRolePreflightClient): Promise<boolean> {
+  const deadlineAt = Date.now() + PREFLIGHT_CLOSE_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<false>((resolve) => {
+    // Keep this timer REFERENCED: a standalone CLI must not exit 0 while waiting.
+    timer = setTimeout(() => resolve(false), PREFLIGHT_CLOSE_TIMEOUT_MS);
+  });
+  const closed = Promise.resolve()
+    .then(() => {
+      const closing = client.$disconnect();
+      // Promise.resolve alone would accept a malformed, non-thenable result.
+      const then = closing?.then;
+      if (typeof then !== 'function') return false;
+      return new Promise<void>((resolve, reject) => then.call(closing, resolve, reject)).then(
+        () => Date.now() < deadlineAt,
+      );
+    })
+    .then(
+      (confirmed) => confirmed,
+      () => false,
+    );
+  try {
+    // Both handlers stay attached after timeout; late results cannot resume startup.
+    return await Promise.race([closed, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * The startup gate, before Nest builds anything: opens a client on the
  * service's runtime URL (`open`, typically `new PrismaClient({ datasources })`),
- * runs {@link assertRuntimeRole} on it and closes it whatever the outcome.
+ * runs {@link assertRuntimeRole} on it and attempts one bounded close whatever the
+ * outcome. Success requires confirmed cleanup; unconfirmed cleanup refuses startup.
  * Rejects with {@link RuntimeRoleRefusedError} when the connected role could act
  * as an owner — and with {@link RuntimeRoleUnverifiedError} when it cannot ask
  * at all (no connection, a refused login), so nothing starts on a database it
@@ -235,19 +276,27 @@ export async function preflightRuntimeRole(
   options: AssertRuntimeRoleOptions,
 ): Promise<ConnectedRoleFacts> {
   let client: RuntimeRolePreflightClient | undefined;
-  let code: string;
+  let facts: ConnectedRoleFacts | undefined;
+  let failure: Error | undefined;
   try {
     client = open();
-    return await assertRuntimeRole(client, options);
+    facts = await assertRuntimeRole(client, options);
   } catch (error) {
-    if (error instanceof RuntimeRoleRefusedError) throw error;
-    code = clientFailureCode(error);
-  } finally {
-    // A failed close says no more than a failed connection would.
-    await client?.$disconnect().then(undefined, () => undefined);
+    failure =
+      error instanceof RuntimeRoleRefusedError
+        ? error
+        : new RuntimeRoleUnverifiedError(options.runtimeVariable, clientFailureCode(error));
   }
-  // Thrown outside the catch: nothing of the client's error travels with it.
-  throw new RuntimeRoleUnverifiedError(options.runtimeVariable, code);
+  if (client && !(await closePreflightClient(client))) {
+    // Preserve the primary refusal; no driver text/cause/client escapes either path.
+    failure ??= markRefusal(
+      new Error('Runtime role preflight database close UNCONFIRMED; startup refused'),
+      'runtime-role-unverified',
+    );
+  }
+  if (failure) throw failure;
+  if (!facts) throw new RuntimeRoleUnverifiedError(options.runtimeVariable, 'unknown');
+  return facts;
 }
 
 /**

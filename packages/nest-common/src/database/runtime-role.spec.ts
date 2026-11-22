@@ -222,3 +222,126 @@ describe('a demo seed refuses an owner as the seed guard does (Codex round 2 on 
     expect((error as Error).message).not.toMatch(/secret|ECONNREFUSED/);
   });
 });
+
+describe('preflight requires bounded confirmed cleanup', () => {
+  const secret = Object.assign(new Error('postgresql://private:secret@db.invalid/db'), {
+    code: 'P1001',
+  });
+  const disconnect = jest.fn();
+  const open =
+    (mode = 'valid') =>
+    () => ({
+      $queryRawUnsafe: <T>() =>
+        mode === 'connection'
+          ? Promise.reject(secret)
+          : Promise.resolve([{ ...runtime, superuser: mode === 'owner' }] as T),
+      $disconnect: disconnect,
+    });
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+  it.each([
+    'reject',
+    'throw',
+    'undefined',
+    'null',
+    'non-callable',
+    'getter',
+    'then throws',
+    'pending thenable',
+  ])('refuses %s cleanup once with safe unconfirmed diagnostics', async (mode) => {
+    disconnect.mockImplementation(() => {
+      if (mode === 'reject') return Promise.reject(secret);
+      if (mode === 'throw') throw secret;
+      if (mode === 'undefined') return undefined;
+      if (mode === 'null') return null;
+      if (mode === 'non-callable') return { then: 1 };
+      if (mode === 'pending thenable') return { then: () => undefined };
+      if (mode === 'getter')
+        return {
+          get then() {
+            throw secret;
+          },
+        };
+      return {
+        then() {
+          throw secret;
+        },
+      };
+    });
+    const result = preflightRuntimeRole(open(), options).catch((e: unknown) => e);
+    await jest.runAllTimersAsync();
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('close UNCONFIRMED');
+    expect(inspect(error, { showHidden: true, depth: 10 })).not.toMatch(
+      /secret|private|db\.invalid/,
+    );
+    expect((error as Error).cause).toBeUndefined();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+  it.each(['owner', 'connection'])(
+    'preserves primary %s refusal across rejecting, throwing, or pending cleanup',
+    async (mode) => {
+      for (const cleanup of ['reject', 'throw', 'pending']) {
+        disconnect.mockImplementation(() => {
+          if (cleanup === 'throw') throw secret;
+          return cleanup === 'reject' ? Promise.reject(secret) : new Promise(() => undefined);
+        });
+        const result = preflightRuntimeRole(open(mode), options).catch((e: unknown) => e);
+        await jest.runAllTimersAsync();
+        const error = await result;
+        expect(error).toBeInstanceOf(
+          mode === 'owner' ? RuntimeRoleRefusedError : RuntimeRoleUnverifiedError,
+        );
+        if (mode === 'connection') expect((error as RuntimeRoleUnverifiedError).code).toBe('P1001');
+        expect(inspect(error, { showHidden: true, depth: 10 })).not.toMatch(
+          /secret|private|db\.invalid/,
+        );
+        expect(jest.getTimerCount()).toBe(0);
+      }
+    },
+  );
+  it('does not disconnect or claim cleanup when the factory never returns a handle', async () => {
+    const error = await preflightRuntimeRole(() => {
+      throw secret;
+    }, options).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RuntimeRoleUnverifiedError);
+    expect((error as RuntimeRoleUnverifiedError).code).toBe('P1001');
+    expect(disconnect).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+  it.each(['resolve', 'reject'])(
+    'refuses pending cleanup and observes late %s without resuming startup',
+    async (mode) => {
+      let resolve!: () => void;
+      let reject!: (e: Error) => void;
+      disconnect.mockReturnValue(
+        new Promise<void>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        }),
+      );
+      const startup = jest.fn();
+      const result = preflightRuntimeRole(open(), options).then(startup, (e: unknown) => e);
+      await jest.advanceTimersByTimeAsync(22_999);
+      expect(startup).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(1);
+      await jest.advanceTimersByTimeAsync(1);
+      const error = await result;
+      expect((error as Error).message).toContain('close UNCONFIRMED');
+      if (mode === 'resolve') resolve();
+      else reject(secret);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(startup).not.toHaveBeenCalled();
+      expect(disconnect).toHaveBeenCalledTimes(1);
+      expect(jest.getTimerCount()).toBe(0);
+    },
+  );
+  it('keeps demo seed cleanup refusal compatible and sanitized', async () => {
+    disconnect.mockRejectedValue(secret);
+    await expect(assertDemoSeedRuntimeRole(open(), options)).rejects.toThrow(
+      'the role the target database connects as could not be checked',
+    );
+  });
+});
