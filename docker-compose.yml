@@ -335,7 +335,7 @@ services:
   # ClamAV, pinned to an immutable digest (ADR-049, closes Q-18).
   #
   # Built from the pinned Cisco-Talos image with the signed Alpine libxml2
-  # security update in infrastructure/docker/clamav/Dockerfile. Keep the
+  # security update documented in ADR-049. Keep the
   # runtime and CI pins on the same GHCR digest when updating the scanner.
   #
   # The non-`_base` variant, which ships the reviewed CVD set (main, daily,
