@@ -19,7 +19,7 @@ jobs:
           IMAGE: ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3
         run: |
           docker build --platform linux/amd64 -t "$IMAGE" infrastructure/docker/clamav
-          docker run --rm --entrypoint apk "$IMAGE" info -v libxml2 | grep -Fx libxml2-2.13.9-r3
+          docker run --rm --entrypoint apk "$IMAGE" list --installed libxml2 | grep -F "libxml2-2.13.9-r3 "
           docker run --rm --entrypoint clamd "$IMAGE" --version
           docker image inspect --format '{{json .Config.Healthcheck}}' "$IMAGE" | jq -e '.Test | length > 0'
       - name: Publish to GitHub Container Registry
