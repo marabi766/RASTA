@@ -397,7 +397,11 @@ at least 70 seconds, a HOLD and the DLQ. Worst-case partition pause is
 
 Refusals commit hash-only `meter_refusal_history` in the evidence transaction,
 including overflow. On rollback they write history independently of the seal and
-parked-row fences (500 ms transaction, 50 ms pool wait). Live and both parked
+parked-row fences (500 ms transaction, 50 ms pool wait, 400 ms PostgreSQL
+statement timeout). Evidence-policy HOLD and live exhaustion use the same bounds.
+The statement timeout cancels lock waits; Prisma timeout alone cannot do that.
+The conservative return bound includes one final statement after Prisma expiry:
+50 ms pool wait + 500 ms transaction + 400 ms statement = 950 ms. Live and both parked
 exhaustion boundaries check this retained history plus quarantine before
 publishing to DLQ. Read or HOLD failures leave the delivery/parked row unresolved.
 Redelivery, a held-seal latch failure and an attempt-version mismatch cannot erase
@@ -412,11 +416,11 @@ namespaced writer; old plain-cause writers refuse after migration.
 
 Only fleet asset-sync opts into an extended KafkaJS `rebalanceTimeout`, computed
 from its startup-checked transaction budget, seven extra attempts, a HOLD and
-eleven 550 ms history-write bounds, a 550 ms exhaustion callback and seven 10-second pauses, rounded up to a minute (300 seconds at defaults).
+eleven 950 ms history-write bounds, a 950 ms exhaustion callback and seven 10-second pauses, rounded up to a minute (300 seconds at defaults).
 Other EventConsumer groups use the KafkaJS default 60 seconds. A rebalance during
 asset-sync's window can stall **all partitions in that group**, including unrelated
 inspection events. The 60-second session timeout is unchanged; heartbeats bracket
-attempts, pauses and upstream calls. The below-287-second handler budget excludes
+attempts, pauses and upstream calls. The 283.1-second handler budget (286.1 seconds including the startup margin) excludes
 DLQ publication: producer retries (eight) and the default 30-second request timeout
 can exceed the remaining margin. Completion within the rebalance timeout is not
 guaranteed; outages, deploys and crashes can redeliver.

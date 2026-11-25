@@ -1075,6 +1075,8 @@ describe('AssetSyncConsumer', () => {
               maxWaitMs: 400,
             },
             'EVT-CREATED-LATE',
+            undefined,
+            created('ORG-DEH-0003').payload,
           );
         });
       });

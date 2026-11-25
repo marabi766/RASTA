@@ -572,18 +572,18 @@ maintenance شروع می‌شود، نه با supplier.
 
 **آنچه واقعاً پیاده شد:**
 
-| موضوع            | تصمیم                                                                                   |
-| ---------------- | --------------------------------------------------------------------------------------- |
-| موتور            | ClamAV 1.5.4، Sidecar، غیر-root، Rootfs فقط-خواندنی                                     |
-| Image            | `clamav/clamav@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d` |
-| مبدأ Image       | Docker Hub، `clamav/clamav` (Cisco-Talos، رسمی)، نسخهٔ همراهِ پایگاه امضا               |
-| امضاها در Image  | `main.cvd` v63 · `daily.cvd` v28164 · `bytecode.cvd` v339                               |
-| مرز Production   | Unix Domain Socket روی Volume مشترک درون یک Pod (مُد 0660)                              |
-| مرز Local/CI     | TCP فقط روی `127.0.0.1`، و **در Production رد می‌شود** (S-08)                           |
-| چرخهٔ عمر        | ناهمزمان: `PENDING` → Worker → `CLEAN` / `INFECTED` / `FAILED`                          |
-| به‌روزرسانی امضا | freshclam در Container جداگانه، روی Volume ماندگار                                      |
-| تازگی امضا       | سقف ۴۸ ساعت؛ فراتر از آن **اسکن انجام نمی‌شود** و `STALE_SIGNATURES` ثبت می‌شود         |
-| قرنطینه          | شیء نگه داشته می‌شود، هرگز URL صادر نمی‌شود، `VIRUS_DETECTED` منتشر می‌شود              |
+| موضوع            | تصمیم                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| موتور            | ClamAV 1.5.4، Sidecar، غیر-root، Rootfs فقط-خواندنی                                                                       |
+| Image            | `ghcr.io/marabi766/rasta-clamav:1.5.4-libxml2-r3@sha256:808ad5e02e095d24aad9d0a0a4a56eae31bec6f66cc833b4f7c6f80bd3e1305f` |
+| مبدأ Image       | رجیستری GitHub رستا، بر پایهٔ تصویر رسمی Cisco-Talos همراهِ پایگاه امضا                                                   |
+| امضاها در Image  | `main.cvd` v63 · `daily.cvd` v28164 · `bytecode.cvd` v339                                                                 |
+| مرز Production   | Unix Domain Socket روی Volume مشترک درون یک Pod (مُد 0660)                                                                |
+| مرز Local/CI     | TCP فقط روی `127.0.0.1`، و **در Production رد می‌شود** (S-08)                                                             |
+| چرخهٔ عمر        | ناهمزمان: `PENDING` → Worker → `CLEAN` / `INFECTED` / `FAILED`                                                            |
+| به‌روزرسانی امضا | freshclam در Container جداگانه، روی Volume ماندگار                                                                        |
+| تازگی امضا       | سقف ۴۸ ساعت؛ فراتر از آن **اسکن انجام نمی‌شود** و `STALE_SIGNATURES` ثبت می‌شود                                           |
+| قرنطینه          | شیء نگه داشته می‌شود، هرگز URL صادر نمی‌شود، `VIRUS_DETECTED` منتشر می‌شود                                                |
 
 **وضعیت واقعی پس از بسته‌شدن — صادقانه:**
 

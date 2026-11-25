@@ -310,7 +310,8 @@ export function assetSyncRebalanceTimeoutMs(env: AssetSyncTimeouts): number {
         ACTIVATION_RETRY_ATTEMPTS * attempt +
         (DEFAULT_MAX_RETRIES + ACTIVATION_RETRY_ATTEMPTS + 1) *
           (SOURCE_REFUSAL_HISTORY_TRANSACTION.timeoutMs +
-            SOURCE_REFUSAL_HISTORY_TRANSACTION.maxWaitMs) +
+            SOURCE_REFUSAL_HISTORY_TRANSACTION.maxWaitMs +
+            SOURCE_REFUSAL_HISTORY_TRANSACTION.statementTimeoutMs) +
         (ACTIVATION_RETRY_ATTEMPTS - 1) * ACTIVATION_RETRY_BACKOFF_MS +
         3_000) /
         60_000,

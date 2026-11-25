@@ -962,6 +962,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
         ? { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs }
         : { maxWaitMs: this.transactionMaxWaitMs },
       envelope.eventId,
+      undefined,
+      envelope.payload,
     );
 
     // Committed: the sweep, outside this handler, decides what the transfer made
@@ -1260,6 +1262,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
           // Retain the processed marker: this terminal outcome cannot be replayed.
         },
       },
+      read.payload,
     );
     const outcome = await decision.catch(async (error: unknown): Promise<ParkedOutcome> => {
       lettered = undefined; // This instance has no confirmed exhaustion commit yet.

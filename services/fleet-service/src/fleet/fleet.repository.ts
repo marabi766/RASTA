@@ -12,7 +12,7 @@ import {
   type OutboxMessageInput,
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
-import type { FleetEventName } from './events';
+import { assetSourceSchema, type FleetEventName } from './events';
 import type { MeterUsageView } from './meter-usage';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
@@ -63,6 +63,7 @@ export class FleetRepository {
     options?: { timeoutMs?: number; maxWaitMs?: number },
     sourceEventId?: string,
     sourceDriftCleanup?: SourceDriftCleanup,
+    sourcePayload?: unknown,
   ): Promise<T> {
     if (sourceEventId)
       return quarantineTransaction(
@@ -70,6 +71,7 @@ export class FleetRepository {
         sourceEventId,
         fn,
         sourceDriftCleanup,
+        assetSourceSchema.safeParse(sourcePayload).data?.assetId,
       );
     return this.prisma.transaction(fn, options);
   }
