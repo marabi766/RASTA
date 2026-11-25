@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { transactionNow } from '../shared/clock';
 import { assertValidScoreSnapshot, type ScoreSnapshotInput } from './score-snapshot';
 
 /**
@@ -61,6 +62,9 @@ export class ScoreSnapshotRepository {
   async insert(tx: ExtendedPrismaClient, input: ScoreSnapshotInput): Promise<string> {
     assertValidScoreSnapshot(input);
     const id = `PSS_${ulid()}`;
+    // Prisma supplies @default(now()) on create instead of using the DB default.
+    // ADR-052 § 8 / D-5 require the caller's stable database transaction clock.
+    const calculatedAt = await transactionNow(tx);
 
     await tx.performanceScoreSnapshot.create({
       data: {
@@ -70,6 +74,7 @@ export class ScoreSnapshotRepository {
         formulaVersion: input.formulaVersion,
         windowStart: input.windowStart,
         windowEnd: input.windowEnd,
+        calculatedAt,
         status: input.status,
         scoreCentis: input.scoreCentis,
         eligibleSampleCount: input.eligibleSampleCount,

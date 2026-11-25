@@ -587,6 +587,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   >;
 
   let projectId = '';
+  const awardedAt: Record<TenderKey, string> = { A: '', B: '', C: '' };
   const tenderId: Record<TenderKey, string> = { A: '', B: '', C: '' };
   const bid: Record<TenderKey, Record<Contractor, string>> = {
     A: { c1: '', c2: '' },
@@ -1062,9 +1063,13 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       expect(awarded.status, JSON.stringify(awarded.body)).toBe(200);
       expect(awarded.body).toMatchObject({
         tenderId: tenderId[key],
+        projectId,
+        bidId: bid[key][winner],
         status: 'AWARDED',
         bidderOrganizationId: org[winner],
+        awardedAt: expect.any(String),
       });
+      awardedAt[key] = (awarded.body as { awardedAt: string }).awardedAt;
     }
   });
 
@@ -1091,9 +1096,15 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       const draft = drafts[index]!;
       contractId[key] = draft.id;
       const winner = WINNER[key];
-      expect(draft).toMatchObject({
-        organizationId: org.owner,
+      const award = {
         tenderId: tenderId[key],
+        projectId,
+        winningBidId: bid[key][winner],
+        awardedAt: awardedAt[key],
+      };
+      expect(draft).toMatchObject({
+        ...award,
+        organizationId: org.owner,
         contractorOrganizationId: org[winner],
         amountMinor: PRICE[key][winner],
         amendmentsTotalMinor: '0',
@@ -1103,6 +1114,11 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         contractorSignedAt: null,
         cancelReasonCode: null,
         authorityReviewRequired: false,
+      });
+      expect(await contract(people[winner], draft.id)).toMatchObject({
+        ...award,
+        id: draft.id,
+        status: 'DRAFT',
       });
     }
     expect(new Set(Object.values(contractId)).size).toBe(3);
@@ -1115,9 +1131,6 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     expect(ours).toHaveLength(3);
 
     // Each party reads its own contracts, and is a stranger to the other's.
-    expect(await contract(c1, contractId.A)).toMatchObject({ id: contractId.A, status: 'DRAFT' });
-    expect(await contract(c2, contractId.B)).toMatchObject({ id: contractId.B, status: 'DRAFT' });
-    expect(await contract(c2, contractId.C)).toMatchObject({ id: contractId.C, status: 'DRAFT' });
     const c1List = (await c1.get('/v1/contracts?limit=100')).body as { items: ContractBody[] };
     expect(c1List.items.map((item) => item.id)).toEqual([contractId.A]);
     const c2List = (await c2.get('/v1/contracts?limit=100')).body as { items: ContractBody[] };
